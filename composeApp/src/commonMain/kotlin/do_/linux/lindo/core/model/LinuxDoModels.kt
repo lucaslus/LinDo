@@ -446,7 +446,9 @@ data class PostItemModel(
     val linkCounts: List<PostLinkCountItem> = emptyList(),
     val bookmarkId: Int? = null,
     val bookmarkName: String? = null,
-    val bookmarkReminderAt: String? = null
+    val bookmarkReminderAt: String? = null,
+    val acceptedAnswer: Boolean = false,
+    val canAcceptAnswer: Boolean = false
 )
 
 /**
@@ -486,7 +488,9 @@ data class TopicDetailModel(
     val suggestedTopics: List<TopicSummary> = emptyList(),
     val allowedUsers: List<TopicUser> = emptyList(),
     val canInviteTo: Boolean = false,
-    val canRemoveAllowedUsers: Boolean = false
+    val canRemoveAllowedUsers: Boolean = false,
+    val acceptedAnswerPostNumber: Int? = null,
+    val hasAcceptedAnswer: Boolean = false
 )
 
 /**
@@ -527,7 +531,8 @@ data class UserFullProfileSummary(
     val statusText: String = "",
     val solvedCount: Int = 0,
     val badges: List<GrantedBadge> = emptyList(),
-    val flair: FlairInfo = FlairInfo()
+    val flair: FlairInfo = FlairInfo(),
+    val statusEmoji: String? = null
 ) {
     val trustLevelName: String
         get() = DiscourseTrustLevel.displayLabel(trustLevel)
@@ -600,7 +605,9 @@ data class UserActivityItem(
     val excerpt: String = "",
     val createdAtText: String = "",
     val categoryName: String = LinDoNetworkCopy.DEFAULT_TECH_CATEGORY.text,
-    val actionType: Int = DiscourseUserActionKind.REPLY.code
+    val actionType: Int = DiscourseUserActionKind.REPLY.code,
+    val bookmarkName: String? = null,
+    val bookmarkReminderAt: String? = null
 ) {
     val actionLabel: String
         get() = DiscourseUserActionKind.fromCode(actionType).copy.text

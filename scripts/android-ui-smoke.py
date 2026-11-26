@@ -131,9 +131,9 @@ def case(name, function):
 
 def welcome():
     start("welcome")
-    wait_for("你好，佬友。")
+    wait_for("登录 Lindo")
     root = tree()
-    label = find("使用 LINUX DO 登录", root)
+    label = find("使用 Linuxdo 登录", root)
     parent = {child: node for node in root.iter() for child in node}
     button = label
     while button.get("clickable") != "true" and button in parent:
@@ -152,10 +152,10 @@ def welcome():
 def large_fonts(scale):
     adb("shell", "settings", "put", "system", "font_scale", str(scale))
     start("welcome")
-    wait_for("使用 LINUX DO 登录")
+    wait_for("使用 Linuxdo 登录")
     root = tree()
     width, height = map(int, re.findall(r"(\d+)x(\d+)", adb("shell", "wm", "size"))[-1])
-    for label in ("使用 LINUX DO 登录", "使用系统浏览器授权"):
+    for label in ("使用 Linuxdo 登录", "浏览器授权"):
         left, top, right, bottom = bounds(find(label, root))
         assert 0 <= left < right <= width and 0 <= top < bottom <= height, f"Clipped action: {label}"
     screen(f"welcome-font-{scale}")

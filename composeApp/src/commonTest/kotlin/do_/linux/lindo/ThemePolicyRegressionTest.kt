@@ -66,4 +66,69 @@ class ThemePolicyRegressionTest {
             }
         }
     }
+
+    @Test fun lightThemeProposalASoftPorcelainPreventsGlareAndYellowCast() {
+        val light = buildLinDoPalette(isDark = false)
+        assertEquals(Color(0xFFF4F6F8), light.canvas)
+        assertEquals(Color(0xFFECEEF2), light.groupedCanvas)
+        assertEquals(Color(0xFFF4F6F8), light.cardSurface)
+        assertEquals(Color(0xFFECEEF2), light.feedSurface)
+        assertEquals(Color(0xFFFAFBFD), light.elevatedCardSurface)
+        assertEquals(Color(0xFFE7E9ED), light.subtleSurface)
+        assertEquals(Color(0xFFE5E7EB), light.navBarSurface)
+        assertEquals(Color(0xFFDFE1E5), light.tonalPill)
+        assertEquals(Color(0xFF161A22), light.onTonalPill)
+        assertEquals(Color(0xFF161A22), light.inkPrimary)
+        assertEquals(Color(0xFF242933), light.inkBody)
+        assertEquals(Color(0xFF4F5665), light.inkSecondary)
+        assertEquals(Color(0xFF5F6776), light.inkTertiary)
+        assertEquals(Color(0xFFD9DCE2), light.hairline)
+
+        // Zero-yellow chromaticity guard: all neutral light surfaces satisfy R <= G <= B and B - R <= 6.
+        val lightSurfaces = listOf(
+            "elevatedCardSurface" to light.elevatedCardSurface,
+            "canvas" to light.canvas,
+            "feedSurface" to light.feedSurface,
+            "subtleSurface" to light.subtleSurface,
+            "navBarSurface" to light.navBarSurface,
+            "tonalPill" to light.tonalPill
+        )
+        lightSurfaces.forEach { (name, color) ->
+            val r = (color.red * 255f + 0.5f).toInt()
+            val g = (color.green * 255f + 0.5f).toInt()
+            val b = (color.blue * 255f + 0.5f).toInt()
+            assertTrue(r <= g && g <= b, "$name must never have a yellow/warm cast (r=$r, g=$g, b=$b)")
+            assertTrue(b - r in 0..6, "$name cool-porcelain tint must stay subtle (r=$r, b=$b)")
+        }
+        run {
+            val r = (light.hairline.red * 255f + 0.5f).toInt()
+            val g = (light.hairline.green * 255f + 0.5f).toInt()
+            val b = (light.hairline.blue * 255f + 0.5f).toInt()
+            assertTrue(r <= g && g <= b, "hairline must never have a yellow/warm cast (r=$r, g=$g, b=$b)")
+        }
+
+        // Strict luminance separation ladder across wide-split & single-pane tiers
+        assertTrue(light.elevatedCardSurface.luminance() > light.canvas.luminance())
+        assertTrue(light.canvas.luminance() > light.feedSurface.luminance())
+        assertTrue(light.feedSurface.luminance() > light.subtleSurface.luminance())
+        assertTrue(light.subtleSurface.luminance() > light.navBarSurface.luminance())
+        assertTrue(light.navBarSurface.luminance() > light.tonalPill.luminance())
+
+        // Tertiary ink and every brand accent remain WCAG AA (>= 4.5:1) on both canvas and wide-split feedSurface
+        assertTrue(contrast(light.inkTertiary, light.canvas) >= 4.5f)
+        assertTrue(contrast(light.inkTertiary, light.feedSurface) >= 4.5f)
+        assertTrue(contrast(light.inkTertiary, light.subtleSurface) >= 4.5f)
+        for (theme in BrandThemeOption.entries) {
+            val themed = buildLinDoPalette(isDark = false, option = theme)
+            assertTrue(contrast(themed.brandGold, themed.feedSurface) >= 4.5f, "$theme brandGold on feedSurface")
+        }
+
+        // Dark mode stays strictly untouched
+        val dark = buildLinDoPalette(isDark = true)
+        assertEquals(Color(0xFF101217), dark.canvas)
+        assertEquals(Color(0xFF101217), dark.feedSurface)
+        assertEquals(Color(0xFF181B22), dark.subtleSurface)
+        assertEquals(Color(0xFF181B22), dark.elevatedCardSurface)
+        assertEquals(Color(0xFFDADBDF), dark.inkPrimary)
+    }
 }

@@ -17,6 +17,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -61,8 +62,8 @@ internal fun AuthorFeedbackDialog(
     ) {
         Column(
             modifier = Modifier
-                .fillMaxWidth(0.93f)
                 .widthIn(max = 520.dp)
+                .fillMaxWidth(0.93f)
                 .clip(RoundedCornerShape(16.dp))
                 .background(palette.cardSurface)
                 .border(0.5.dp, palette.hairline, RoundedCornerShape(16.dp))
@@ -245,8 +246,8 @@ internal fun PostRevisionsDialog(
     ) {
         Column(
             modifier = Modifier
-                .fillMaxWidth(0.93f)
                 .widthIn(max = 560.dp)
+                .fillMaxWidth(0.93f)
                 .heightIn(max = 600.dp)
                 .clip(RoundedCornerShape(16.dp))
                 .background(palette.cardSurface)
@@ -301,11 +302,13 @@ internal fun PostRevisionsDialog(
                                 .padding(horizontal = 10.dp, vertical = 6.dp)
                         )
                     }
-                    val plainDiff = remember(rev.bodyChangesHtml, rev.titleChangesHtml) {
-                        val parts = listOfNotNull(rev.titleChangesHtml, rev.bodyChangesHtml)
-                            .map { DiscourseAstParser.stripHtmlTags(it).trim() }
-                            .filter { it.isNotEmpty() }
-                        parts.joinToString("\n\n").ifBlank { "无正文变更详情" }
+                    val diffAnnotated = remember(rev.bodyChangesHtml, rev.titleChangesHtml, palette.isDark, palette.inkPrimary) {
+                        buildRevisionDiffAnnotatedString(
+                            titleChangesHtml = rev.titleChangesHtml,
+                            bodyChangesHtml = rev.bodyChangesHtml,
+                            isDark = palette.isDark,
+                            baseColor = palette.inkPrimary
+                        )
                     }
                     Column(
                         modifier = Modifier
@@ -316,7 +319,13 @@ internal fun PostRevisionsDialog(
                             .verticalScroll(rememberScrollState())
                             .padding(12.dp)
                     ) {
-                        Text(plainDiff, fontSize = 13.sp, lineHeight = 20.sp, color = palette.inkPrimary)
+                        Text(
+                            text = diffAnnotated,
+                            fontSize = 13.sp,
+                            lineHeight = 20.sp,
+                            color = palette.inkPrimary,
+                            modifier = Modifier.testTag("post_revision_diff_text")
+                        )
                     }
                 }
             }
@@ -349,8 +358,8 @@ internal fun ReactionUsersDialog(
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Column(
             modifier = Modifier
-                .fillMaxWidth(0.9f)
                 .widthIn(max = 460.dp)
+                .fillMaxWidth(0.9f)
                 .heightIn(max = 480.dp)
                 .clip(RoundedCornerShape(16.dp))
                 .background(palette.cardSurface)
@@ -437,8 +446,8 @@ internal fun BookmarkReminderDialog(
     Dialog(onDismissRequest = { if (!busy) onDismiss() }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Column(
             modifier = Modifier
-                .fillMaxWidth(0.9f)
                 .widthIn(max = 460.dp)
+                .fillMaxWidth(0.9f)
                 .clip(RoundedCornerShape(16.dp))
                 .background(palette.cardSurface)
                 .border(0.5.dp, palette.hairline, RoundedCornerShape(16.dp))
@@ -535,37 +544,24 @@ internal fun BookmarkReminderDialog(
 }
 
 /**
- * 帖子目录 (TOC) 弹窗：自动提取主贴 H1-H4 标题结构
+ * 帖子目录 (TOC) 弹窗：自动提取主贴 H1-H4 标题结构并支持滚动至对应章节位置
  */
 @Composable
 internal fun TopicTocDialog(
     firstPostHtml: String,
     onJumpTop: () -> Unit,
+    onJumpHeading: ((headingIndex: Int, headingTitle: String) -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
     val palette = LocalPalette.current
-    val headings = remember(firstPostHtml) {
-        val nodes = DiscourseAstParser.parseCookedHtml(firstPostHtml)
-        buildList {
-            fun walk(list: List<PostBlockNode>) {
-                for (n in list) {
-                    when (n) {
-                        is PostBlockNode.Heading -> if (n.text.isNotBlank()) add(n.level to n.text.trim())
-                        is PostBlockNode.CalloutBlock -> walk(n.children)
-                        is PostBlockNode.DetailsSpoilerBlock -> walk(n.children)
-                        else -> Unit
-                    }
-                }
-            }
-            walk(nodes)
-        }
-    }
+    val headings = remember(firstPostHtml) { extractTopicTocHeadings(firstPostHtml) }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Column(
             modifier = Modifier
-                .fillMaxWidth(0.88f)
                 .widthIn(max = 420.dp)
+                .fillMaxWidth(0.88f)
                 .heightIn(max = 440.dp)
+                .testTag("topic_toc_dialog")
                 .clip(RoundedCornerShape(16.dp))
                 .background(palette.cardSurface)
                 .border(0.5.dp, palette.hairline, RoundedCornerShape(16.dp))
@@ -582,7 +578,8 @@ internal fun TopicTocDialog(
                 Text("主贴未包含章节标题", fontSize = 13.sp, color = palette.inkTertiary)
             } else {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    items(headings) { (level, title) ->
+                    items(headings.size) { index ->
+                        val (level, title) = headings[index]
                         val indent = ((level - 1).coerceIn(0, 3) * 14).dp
                         Text(
                             text = title,
@@ -593,10 +590,15 @@ internal fun TopicTocDialog(
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .testTag("toc_heading_item_$index")
                                 .clip(RoundedCornerShape(8.dp))
                                 .clickable {
                                     onDismiss()
-                                    onJumpTop()
+                                    if (onJumpHeading != null) {
+                                        onJumpHeading(index, title)
+                                    } else {
+                                        onJumpTop()
+                                    }
                                 }
                                 .padding(start = indent + 6.dp, end = 6.dp, top = 6.dp, bottom = 6.dp)
                         )

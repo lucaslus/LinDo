@@ -64,16 +64,17 @@ class TurnstileAndQrLoginTest {
         val lindoUri = QrLoginManager.encodePayload(
             apiKey = "key+1/2=3",
             otp = "otp_abc/xyz",
-            username = "lucas",
+            username = "lucas dev",
             expiresAtEpochMs = 0L
         )
         assertTrue(QrLoginManager.isQrLoginUri(lindoUri))
+        assertTrue(lindoUri.contains("u=lucas%20dev"), "Space encoding must match Desktop encodeURIComponent (%20): $lindoUri")
         val parsedLindo = QrLoginManager.parsePayload(lindoUri, nowMs = 1_700_000_000_000L)
         assertTrue(parsedLindo is QrParseResult.Valid)
         assertEquals(2, parsedLindo.payload.version)
         assertEquals("key+1/2=3", parsedLindo.payload.apiKey)
         assertEquals("otp_abc/xyz", parsedLindo.payload.otp)
-        assertEquals("lucas", parsedLindo.payload.username)
+        assertEquals("lucas dev", parsedLindo.payload.username)
 
         val fluxdoUri = lindoUri.replaceFirst("lindo://", "fluxdo://")
         assertTrue(QrLoginManager.isQrLoginUri(fluxdoUri))
@@ -197,6 +198,51 @@ class TurnstileAndQrLoginTest {
         assertEquals(tempApiKey, revokeHeaders["User-Api-Key"])
         assertEquals("true", revokeHeaders["Discourse-Background"])
         assertNull(QrLoginManager.consumePendingRevokeApiKey())
+    }
+
+    @Test
+    fun crossDeviceQrGenerationRejectsGuestsAndSupportsPayloadEmbeddedOtpFallback() = runBlocking {
+        NetworkRecoveryPolicy.androidEnabled = true
+        UserApiKeyAuthManager.requireBrowserTransportOnly = true
+
+        // Guest cannot generate a login QR code
+        UserApiKeyAuthManager.logout()
+        val guestAttempt = LinuxDoRepository.createCrossDeviceQrLoginUri()
+        assertTrue(guestAttempt.isFailure)
+        assertTrue(guestAttempt.exceptionOrNull()?.message?.contains("请先登录") == true)
+
+        // Logged-in user also succeeds if Discourse embeds one_time_password inside the encrypted payload JSON
+        UserApiKeyAuthManager.recordWebSessionLogin(
+            username = "lucas",
+            displayName = "Lucas",
+            avatarUrl = "",
+            trustLevel = 3,
+            userId = 42
+        )
+        UserApiKeyAuthManager.webViewHttpExecutor = { url, method, formParams, _ ->
+            if (url == "https://linux.do/user-api-key.json" && method == "POST") {
+                val pem = formParams?.get("public_key").orEmpty()
+                val nonce = formParams?.get("nonce").orEmpty()
+                val base64Body = pem
+                    .replace("-----BEGIN PUBLIC KEY-----", "")
+                    .replace("-----END PUBLIC KEY-----", "")
+                    .replace(Regex("\\s+"), "")
+                val pubKey = KeyFactory.getInstance("RSA")
+                    .generatePublic(X509EncodedKeySpec(Base64.getDecoder().decode(base64Body)))
+                val cipher = Cipher.getInstance("RSA/ECB/PKCS1Padding")
+                cipher.init(Cipher.ENCRYPT_MODE, pubKey)
+                val payloadB64 = Base64.getEncoder().encodeToString(
+                    cipher.doFinal("""{"key":"temp_key_embedded","nonce":"$nonce","one_time_password":"embedded_otp_77"}""".toByteArray(Charsets.UTF_8))
+                )
+                200 to """{"redirect_url":"discourse://auth_redirect?payload=${URLEncoder.encode(payloadB64, "UTF-8")}"}"""
+            } else {
+                200 to "{}"
+            }
+        }
+        val (_, payload) = LinuxDoRepository.createCrossDeviceQrLoginUri().getOrThrow()
+        assertEquals("temp_key_embedded", payload.apiKey)
+        assertEquals("embedded_otp_77", payload.otp)
+        assertEquals("lucas", payload.username)
     }
 
     @Test

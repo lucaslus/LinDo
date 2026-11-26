@@ -389,6 +389,16 @@ object CookieSentinel {
         notifyIfAuthCookieChanged()
     }
 
+    /**
+     * Purges ONLY Cloudflare clearance/challenge cookies for [domain], strictly preserving
+     * Discourse login session cookies (`_t`, `_forum_session`, `authentication_data`).
+     */
+    fun purgeCfCookiesOnly(domain: String = "linux.do") {
+        for (cfName in ManualForceRefreshPolicy.CF_PURGEABLE_COOKIE_NAMES) {
+            removeCookieByName(cfName, domain = domain)
+        }
+    }
+
     fun ingestSetCookieHeader(
         rawSetCookie: String?,
         domain: String = "linux.do"
@@ -513,7 +523,7 @@ data class AuthenticatedUserProfile(
 
 /**
  * 双引擎登录与会话认证管理器 (`UserApiKeyAuthManager`)：
- * 1. 支持内置 WebView 统一登录（密码 / GitHub / Passkey / 2FA）并自动捕获 `_t`、`_forum_session`、`cf_clearance` 与用户资料
+ * 1. 支持内置 WebView 登录（密码 / GitHub / 2FA）并自动捕获 `_t`、`_forum_session`、`cf_clearance` 与用户资料
  * 2. 支持系统浏览器一键授权回跳 (`discourse://auth_redirect` + `scopes=one_time_password` + RSA PKCS1 解密与 OTP 兑换)
  */
 object UserApiKeyAuthManager {
@@ -2927,6 +2937,27 @@ object LinuxDoRepository {
     internal fun isRateLimitedNow(): Boolean =
         System.currentTimeMillis() < rateLimitedUntilMs.get()
 
+    internal fun getTransientRateLimitRemainingMs(nowMs: Long = System.currentTimeMillis()): Long =
+        (rateLimitedUntilMs.get() - nowMs).coerceAtLeast(0L)
+
+    /**
+     * 克制的 Discourse MessageBus 轮询 (`POST /message-bus/{clientId}/poll?dlp=t`)
+     */
+    suspend fun pollMessageBus(clientId: String, cursors: Map<String, Long>): Pair<Int, String>? = withContext(Dispatchers.IO) {
+        if (clientId.isBlank() || cursors.isEmpty()) return@withContext null
+        val form = cursors.mapValues { it.value.toString() }
+        executeHttp(
+            url = "https://linux.do/message-bus/${encodeUrlSegment(clientId)}/poll?dlp=t",
+            method = "POST",
+            formParams = form,
+            extraHeaders = mapOf(
+                "X-Silence-Logger" to "true",
+                "Discourse-Background" to "true"
+            ),
+            preserveFailure = true
+        )
+    }
+
     internal fun shouldPauseForSiteVerification(url: String): Boolean {
         if (!NetworkRecoveryPolicy.enabled) return false
         // The desktop native adapter uses this endpoint for its one explicit recovery probe.
@@ -4508,6 +4539,7 @@ object LinuxDoRepository {
         var websiteName = ""
         var websiteUrl = ""
         var statusText = ""
+        var statusEmoji: String? = null
         var badgeCount = 0
         var topBadges = emptyList<GrantedBadge>()
         var flair = FlairInfo()
@@ -4579,6 +4611,7 @@ object LinuxDoRepository {
                     val statusObj = uObj["status"] as? JsonObject
                     if (statusObj != null) {
                         statusText = statusObj["description"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                        statusEmoji = statusObj["emoji"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
                     }
                     val createdIso = uObj["created_at"]?.jsonPrimitive?.contentOrNull
                     if (!createdIso.isNullOrBlank() && createdIso.length >= 10) {
@@ -4657,7 +4690,8 @@ object LinuxDoRepository {
             websiteUrl = websiteUrl,
             statusText = statusText,
             badges = topBadges,
-            flair = flair
+            flair = flair,
+            statusEmoji = statusEmoji
         )
         if (!UserApiKeyAuthManager.isAuthorized() ||
             !UserApiKeyAuthManager.currentUser?.username.equals(uname, ignoreCase = true)
@@ -5320,6 +5354,8 @@ object LinuxDoRepository {
                 val createdAt = formatRelativeTime(obj["created_at"]?.jsonPrimitive?.contentOrNull)
                 val catId = obj["category_id"]?.jsonPrimitive?.intOrNull ?: 4
                 val (catName, _) = resolveCategoryMeta(catId)
+                val bookmarkName = obj["name"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+                val reminderAt = obj["reminder_at"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
                 UserActivityItem(
                     id = id,
                     topicId = topicId,
@@ -5328,7 +5364,9 @@ object LinuxDoRepository {
                     excerpt = excerpt,
                     createdAtText = createdAt,
                     categoryName = catName,
-                    actionType = DiscourseUserActionKind.BOOKMARK.code
+                    actionType = DiscourseUserActionKind.BOOKMARK.code,
+                    bookmarkName = bookmarkName,
+                    bookmarkReminderAt = reminderAt
                 )
             }
         } catch (cancelled: CancellationException) {
@@ -6386,6 +6424,7 @@ object LinuxDoRepository {
         var websiteName = ""
         var websiteUrl = ""
         var statusText = ""
+        var statusEmoji: String? = null
         var badgeCount = 0
         var topBadges = emptyList<GrantedBadge>()
         var flair = FlairInfo()
@@ -6428,6 +6467,7 @@ object LinuxDoRepository {
             if (statusObj != null) {
                 val statusDesc = statusObj["description"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
                 statusText = statusDesc
+                statusEmoji = statusObj["emoji"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
             }
             val createdIso = uObj["created_at"]?.jsonPrimitive?.contentOrNull
             if (!createdIso.isNullOrBlank() && createdIso.length >= 10) {
@@ -6513,7 +6553,8 @@ object LinuxDoRepository {
             statusText = statusText,
             solvedCount = solvedCount,
             badges = topBadges,
-            flair = flair
+            flair = flair,
+            statusEmoji = statusEmoji
         )
     }
 
@@ -7053,7 +7094,10 @@ object LinuxDoRepository {
             linkCounts = parsedLinkCounts,
             bookmarkId = pObj["bookmark_id"]?.jsonPrimitive?.intOrNull,
             bookmarkName = pObj["bookmark_name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() },
-            bookmarkReminderAt = pObj["bookmark_reminder_at"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+            bookmarkReminderAt = pObj["bookmark_reminder_at"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() },
+            acceptedAnswer = pObj["accepted_answer"]?.jsonPrimitive?.booleanOrNull == true,
+            canAcceptAnswer = pObj["can_accept_answer"]?.jsonPrimitive?.booleanOrNull == true ||
+                pObj["can_unaccept_answer"]?.jsonPrimitive?.booleanOrNull == true
         )
     }
 
@@ -7259,6 +7303,12 @@ object LinuxDoRepository {
         val resolvedOpAnimatedAvatar = createdByObj?.get("animated_avatar")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
             ?: opFloorPost?.animatedAvatar?.takeIf { it.isNotBlank() }
 
+        val acceptedAnswerObj = root["accepted_answer"] as? JsonObject
+        val acceptedAnswerPostNumber = acceptedAnswerObj?.get("post_number")?.jsonPrimitive?.intOrNull
+            ?: posts.firstOrNull { it.acceptedAnswer }?.postNumber
+        val hasAcceptedAnswer = root["has_accepted_answer"]?.jsonPrimitive?.booleanOrNull == true ||
+            acceptedAnswerPostNumber != null
+
         return TopicDetailModel(
             id = id,
             title = title,
@@ -7287,7 +7337,9 @@ object LinuxDoRepository {
             suggestedTopics = suggestedTopics,
             allowedUsers = allowedUsers,
             canInviteTo = detailsObj?.get("can_invite_to")?.jsonPrimitive?.booleanOrNull == true,
-            canRemoveAllowedUsers = detailsObj?.get("can_remove_allowed_users")?.jsonPrimitive?.booleanOrNull == true
+            canRemoveAllowedUsers = detailsObj?.get("can_remove_allowed_users")?.jsonPrimitive?.booleanOrNull == true,
+            acceptedAnswerPostNumber = acceptedAnswerPostNumber,
+            hasAcceptedAnswer = hasAcceptedAnswer
         )
     }
 
@@ -7943,7 +7995,25 @@ object LinuxDoRepository {
             )
         }
 
-        if (UserApiKeyAuthManager.webViewHttpExecutor == null && !UserApiKeyAuthManager.requireBrowserTransportOnly) {
+        val browserExec = UserApiKeyAuthManager.webViewHttpExecutor
+        if (browserExec != null) {
+            try {
+                val res = browserExec(
+                    "https://connect.linux.do/",
+                    "GET",
+                    null,
+                    mapOf("Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                )
+                if (res != null && res.first in 200..299 && !looksLikeCloudflareChallenge(res.second)) {
+                    ConnectStatsParser.parseConnectHtml(res.second)?.let { return@withContext it }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+            }
+        }
+
+        if (browserExec == null && !UserApiKeyAuthManager.requireBrowserTransportOnly) {
             try {
                 val allowedHosts = setOf("connect.linux.do", "linux.do")
                 val redirectStatuses = setOf(301, 302, 303, 307, 308)
@@ -8301,6 +8371,19 @@ object LinuxDoRepository {
     suspend fun acceptPostSolution(postId: Int): Boolean = withContext(Dispatchers.IO) {
         val res = executeHttp(
             url = "https://linux.do/solution/accept.json",
+            method = "POST",
+            formParams = mapOf("id" to postId.toString()),
+            preserveFailure = true
+        )
+        checkBooleanMutationResponse(res)
+    }
+
+    /**
+     * 取消采纳最佳解答 (`POST /solution/unaccept.json`)
+     */
+    suspend fun unacceptPostSolution(postId: Int): Boolean = withContext(Dispatchers.IO) {
+        val res = executeHttp(
+            url = "https://linux.do/solution/unaccept.json",
             method = "POST",
             formParams = mapOf("id" to postId.toString()),
             preserveFailure = true
@@ -8678,17 +8761,18 @@ object LinuxDoRepository {
     /**
      * 获取发现页「正在热议」真实全站热门话题 (`GET /top.json?period=daily`，不足时回退 `/top.json?period=weekly`)
      */
-    suspend fun fetchDiscoverHotTopics(limit: Int = 5): List<TopicSummary> = withContext(Dispatchers.IO) {
-        val daily = runCatching {
+    suspend fun fetchDiscoverHotTopics(limit: Int = 10, period: String = "daily"): List<TopicSummary> = withContext(Dispatchers.IO) {
+        val targetPeriod = if (period == "weekly") "weekly" else "daily"
+        val primary = runCatching {
             fetchTopics(
                 path = "/top.json",
                 categoryId = null,
                 page = 0,
-                topPeriod = "daily",
+                topPeriod = targetPeriod,
                 background = true
             ).filterNot { it.pinned }
         }.getOrDefault(emptyList())
-        if (daily.size >= limit) return@withContext daily.take(limit)
+        if (targetPeriod == "weekly" || primary.size >= limit) return@withContext primary.take(limit)
         val weekly = runCatching {
             fetchTopics(
                 path = "/top.json",
@@ -8698,7 +8782,7 @@ object LinuxDoRepository {
                 background = true
             ).filterNot { it.pinned }
         }.getOrDefault(emptyList())
-        (daily + weekly).distinctBy { it.id }.take(limit)
+        (primary + weekly).distinctBy { it.id }.take(limit)
     }
 
     /**
@@ -9170,6 +9254,28 @@ object LinuxDoRepository {
     }
 
     /**
+     * 拉取指定楼层的远端完整子回复树 (`GET /posts/{postId}/replies.json`)
+     */
+    suspend fun fetchPostReplies(postId: Int, topicId: Int = 0): List<PostItemModel> = withContext(Dispatchers.IO) {
+        if (postId <= 0) return@withContext emptyList()
+        val res = executeHttp(
+            url = "https://linux.do/posts/$postId/replies.json",
+            method = "GET",
+            preserveFailure = true
+        ) ?: return@withContext emptyList()
+        if (res.first !in 200..299 || looksLikeCloudflareChallenge(res.second)) return@withContext emptyList()
+        runCatching {
+            val arr = json.parseToJsonElement(res.second.removePrefix(CF_MITIGATED_CHALLENGE_PREFIX)) as? JsonArray
+                ?: return@runCatching emptyList()
+            arr.mapIndexedNotNull { idx, elem ->
+                val obj = elem as? JsonObject ?: return@mapIndexedNotNull null
+                val resolvedTopicId = obj["topic_id"]?.jsonPrimitive?.intOrNull ?: topicId
+                parseSinglePostObject(obj, fallbackIdx = idx, topicId = resolvedTopicId)
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    /**
      * 解析 `/p/{postId}` 短链到 `(topicId, postNumber)`，让短链也在 App 内原生打开
      */
     suspend fun fetchPostLocationById(postId: Int): Pair<Int, Int>? = withContext(Dispatchers.IO) {
@@ -9400,6 +9506,9 @@ object LinuxDoRepository {
      */
     suspend fun createCrossDeviceQrLoginUri(): Result<Pair<String, QrLoginPayload>> = withContext(Dispatchers.IO) {
         try {
+            if (!UserApiKeyAuthManager.isAuthorized()) {
+                return@withContext Result.failure(IllegalStateException("当前未登录，请先登录账号后再生成登录二维码"))
+            }
             val kpg = java.security.KeyPairGenerator.getInstance("RSA")
             kpg.initialize(2048)
             val kp = kpg.generateKeyPair()
@@ -9440,7 +9549,6 @@ object LinuxDoRepository {
             val rawPayload = queryParams["payload"]?.takeIf { it.isNotBlank() }
                 ?: return@withContext Result.failure(IllegalStateException("授权响应缺少加密载荷"))
             val rawOtp = (queryParams["oneTimePassword"] ?: queryParams["one_time_password"])?.takeIf { it.isNotBlank() }
-                ?: return@withContext Result.failure(IllegalStateException("授权响应缺少一次性登录令牌"))
             val payloadJson = UserApiKeyAuthManager.decryptRsaBase64(rawPayload, kp.private)
                 ?: return@withContext Result.failure(IllegalStateException("授权载荷解密失败"))
             val payloadObj = json.parseToJsonElement(payloadJson).jsonObject
@@ -9450,8 +9558,11 @@ object LinuxDoRepository {
             }
             val apiKey = payloadObj["key"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
                 ?: return@withContext Result.failure(IllegalStateException("授权响应缺少 API Key"))
-            val otp = UserApiKeyAuthManager.decryptRsaBase64(rawOtp, kp.private)?.trim()?.takeIf { it.isNotEmpty() }
-                ?: return@withContext Result.failure(IllegalStateException("一次性登录令牌解密失败"))
+            val otp = if (rawOtp != null) {
+                UserApiKeyAuthManager.decryptRsaBase64(rawOtp, kp.private)?.trim()?.takeIf { it.isNotEmpty() }
+            } else {
+                payloadObj["one_time_password"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+            } ?: return@withContext Result.failure(IllegalStateException("一次性登录令牌解密失败"))
             val username = UserApiKeyAuthManager.currentUser?.username
                 ?.takeIf { it.isNotBlank() && it != "linuxdo_user" }
                 .orEmpty()

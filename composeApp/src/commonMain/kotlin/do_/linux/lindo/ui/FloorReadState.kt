@@ -71,6 +71,36 @@ internal fun rememberTopicUnreadInFeed(topic: TopicSummary): Boolean {
     }
 }
 
+@Composable
+internal fun rememberTopicReadDimmedInFeed(topic: TopicSummary): Boolean {
+    val localVersion = ScreenTrackEngine.localReadVersion
+    val repositoryVersion = LinuxDoRepository.readTopicsVersion
+    return remember(
+        topic.id,
+        topic.unseen,
+        topic.unreadPosts,
+        topic.highestPostNumber,
+        topic.postsCount,
+        localVersion,
+        repositoryVersion
+    ) {
+        val visited = ScreenTrackEngine.isTopicVisitedLocally(topic.id)
+        val floor = maxOf(
+            ScreenTrackEngine.getLocalViewedMaxFloor(topic.id),
+            LinuxDoRepository.getServerConfirmedReadFloor(topic.id) ?: 0
+        )
+        val res = resolveDiscourseTopicUnread(
+            rawUnseen = topic.unseen,
+            rawUnreadPosts = topic.unreadPosts,
+            highestPostNumber = topic.highestPostNumber,
+            postsCount = topic.postsCount,
+            visitedLocally = visited,
+            effectiveReadFloor = floor
+        )
+        !res.isUnread && (visited || floor >= 1)
+    }
+}
+
 /** Only a viewed floor fades locally; server timings continue syncing asynchronously in the background. */
 @Composable
 internal fun rememberFloorUnread(topicId: Int, post: PostItemModel, isAuthorized: Boolean): Boolean {

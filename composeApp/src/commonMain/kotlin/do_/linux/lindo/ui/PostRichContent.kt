@@ -1,5 +1,7 @@
 package do_.linux.lindo.ui
 
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -9,6 +11,8 @@ import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -80,6 +84,10 @@ import do_.linux.lindo.ui.components.LinDoIcons
 internal fun RichPostText(rich: RichText, palette: LinDoThemePalette,
     onOpenLink: (String) -> Unit, heading: Boolean = false, onSelectionChange: ((String?) -> Unit)? = null) {
     val inQuote = LocalInQuoteBlock.current
+    val findQuery = LocalInTopicFindQuery.current
+    val onOpenFootnote = LocalOnOpenFootnote.current
+    val highlightBg = if (palette.isDark) Color(0x66FBBF24) else Color(0xAAFEF08A)
+    val highlightFg = if (palette.isDark) Color(0xFFFFFFFF) else Color(0xFF1C1917)
     val baseTextColor = when {
         heading && inQuote -> palette.inkBody
         heading -> palette.inkPrimary
@@ -94,7 +102,7 @@ internal fun RichPostText(rich: RichText, palette: LinDoThemePalette,
     val plain = rich.runs.singleOrNull()
     if (plain != null && plain.href == null && plain.imageUrl == null && !plain.bold &&
         !plain.italic && !plain.code && !plain.strike && !plain.underline &&
-        plain.colorHex == null && plain.bgColorHex == null
+        plain.colorHex == null && plain.bgColorHex == null && findQuery.isBlank()
     ) {
         var plainLayoutResult by remember(plain.text) { mutableStateOf<TextLayoutResult?>(null) }
         SelectablePostText(plain.text, onSelectionChange, plainLayoutResult) {
@@ -113,8 +121,8 @@ internal fun RichPostText(rich: RichText, palette: LinDoThemePalette,
     val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
     val clipboard = LocalClipboardManager.current
     var unavailableMailLink by remember { mutableStateOf<String?>(null) }
-    val annotated = remember(rich, palette, inQuote, onOpenLink, uriHandler) {
-        buildAnnotatedString {
+    val annotated = remember(rich, palette, inQuote, onOpenLink, uriHandler, findQuery, onOpenFootnote) {
+        val baseAnnotated = buildAnnotatedString {
             for ((index, run) in rich.runs.withIndex()) {
                 val customFgColor = run.colorHex?.let { hex ->
                     LinuxDoSiteRules.parseHexColor(hex, fallback = Color.Unspecified)
@@ -142,7 +150,7 @@ internal fun RichPostText(rich: RichText, palette: LinDoThemePalette,
                     linkInteractionListener = {
                         when {
                             run.href.startsWith("#") -> {
-                                // In-page footnote/heading anchor: handled cleanly without external-link popup
+                                onOpenFootnote?.invoke(run.href)
                             }
                             run.href.startsWith("mailto:", ignoreCase = true) -> {
                                 runCatching { uriHandler.openUri(run.href) }.onFailure { unavailableMailLink = run.href }
@@ -155,6 +163,7 @@ internal fun RichPostText(rich: RichText, palette: LinDoThemePalette,
                 pop()
             }
         }
+        applyInTopicFindHighlight(baseAnnotated, findQuery, highlightBg, highlightFg)
     }
     val failedEmoji = remember(rich) { mutableStateMapOf<String, Boolean>() }
     val failures = failedEmoji.toMap()
@@ -415,6 +424,8 @@ private fun SelectablePostText(
     }
 }
 
+internal val LocalOnInspectUser = compositionLocalOf<((String) -> Unit)?> { null }
+
 @Composable
 internal fun PostRichContent(
     nodes: List<PostBlockNode>,
@@ -425,17 +436,25 @@ internal fun PostRichContent(
     onSelectionChange: ((String?) -> Unit)? = null,
     onRequestLogin: (() -> Unit)? = null,
     onQuoteSelection: ((String) -> Unit)? = null,
-    onJumpToFloorNumber: ((Int) -> Unit)? = null
+    onJumpToFloorNumber: ((Int) -> Unit)? = null,
+    registerTocHeadings: Boolean = false
 ) {
     val existingSelectionOwner = LocalActiveSelectionOwner.current
     val effectiveQuoteAction = onQuoteSelection ?: LocalOnQuoteSelectedText.current
     val effectiveJumpAction = onJumpToFloorNumber ?: LocalOnJumpToFloorNumber.current
+    val existingWideGallery = LocalPostWideImageGallery.current
+    val rootWideGallery = remember(nodes, existingWideGallery) {
+        existingWideGallery ?: collectAllImagesFromPostNodes(nodes)
+    }
     if (existingSelectionOwner == null) {
         val rootSelectionOwner = remember { mutableStateOf<Any?>(null) }
+        val headingCounter = remember(nodes, registerTocHeadings) { intArrayOf(0) }
+        headingCounter[0] = 0
         CompositionLocalProvider(
             LocalActiveSelectionOwner provides rootSelectionOwner,
             LocalOnQuoteSelectedText provides effectiveQuoteAction,
-            LocalOnJumpToFloorNumber provides effectiveJumpAction
+            LocalOnJumpToFloorNumber provides effectiveJumpAction,
+            LocalPostWideImageGallery provides rootWideGallery
         ) {
             PostRichContentBody(
                 nodes = nodes,
@@ -444,13 +463,15 @@ internal fun PostRichContent(
                 originalUrl = originalUrl,
                 postId = postId,
                 onSelectionChange = onSelectionChange,
-                onRequestLogin = onRequestLogin
+                onRequestLogin = onRequestLogin,
+                tocHeadingCounter = if (registerTocHeadings) headingCounter else null
             )
         }
     } else {
         CompositionLocalProvider(
             LocalOnQuoteSelectedText provides effectiveQuoteAction,
-            LocalOnJumpToFloorNumber provides effectiveJumpAction
+            LocalOnJumpToFloorNumber provides effectiveJumpAction,
+            LocalPostWideImageGallery provides rootWideGallery
         ) {
             PostRichContentBody(
                 nodes = nodes,
@@ -459,12 +480,14 @@ internal fun PostRichContent(
                 originalUrl = originalUrl,
                 postId = postId,
                 onSelectionChange = onSelectionChange,
-                onRequestLogin = onRequestLogin
+                onRequestLogin = onRequestLogin,
+                tocHeadingCounter = null
             )
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun PostRichContentBody(
     nodes: List<PostBlockNode>,
@@ -473,14 +496,30 @@ private fun PostRichContentBody(
     originalUrl: String? = null,
     postId: Int? = null,
     onSelectionChange: ((String?) -> Unit)? = null,
-    onRequestLogin: (() -> Unit)? = null
+    onRequestLogin: (() -> Unit)? = null,
+    tocHeadingCounter: IntArray? = null
 ) {
     val clipboard = LocalClipboardManager.current
     val inQuote = LocalInQuoteBlock.current
+    val tocController = LocalTocHeadingScrollController.current
     Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
         for (node in nodes) when (node) {
             is PostBlockNode.Paragraph -> RichPostText(node.rich, palette, onOpenLink, onSelectionChange = onSelectionChange)
-            is PostBlockNode.Heading -> RichPostText(node.rich, palette, onOpenLink, heading = true, onSelectionChange = onSelectionChange)
+            is PostBlockNode.Heading -> {
+                if (tocHeadingCounter != null && tocController != null && node.text.isNotBlank()) {
+                    val headingIdx = tocHeadingCounter[0]++
+                    val bringIntoViewRequester = remember(postId, headingIdx) { BringIntoViewRequester() }
+                    DisposableEffect(tocController, headingIdx, bringIntoViewRequester) {
+                        tocController.register(headingIdx, bringIntoViewRequester)
+                        onDispose { tocController.unregister(headingIdx, bringIntoViewRequester) }
+                    }
+                    Box(modifier = Modifier.fillMaxWidth().bringIntoViewRequester(bringIntoViewRequester)) {
+                        RichPostText(node.rich, palette, onOpenLink, heading = true, onSelectionChange = onSelectionChange)
+                    }
+                } else {
+                    RichPostText(node.rich, palette, onOpenLink, heading = true, onSelectionChange = onSelectionChange)
+                }
+            }
             is PostBlockNode.Spoiler -> {
                 var revealed by remember(node) { mutableStateOf(false) }
                 Column {
@@ -635,9 +674,11 @@ private fun PostRichContentBody(
                 }
                 if (isMermaid && !showMermaidSource) {
                     val mermaidModel = remember(node.code) { CodeSyntaxHighlighter.parseMermaidPreview(node.code) }
+                    var showMermaidPreviewSheet by remember(node.code) { mutableStateOf(false) }
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .testTag("mermaid_card_block")
                             .clip(RoundedCornerShape(10.dp))
                             .background(palette.subtleSurface)
                             .border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp))
@@ -652,6 +693,13 @@ private fun PostRichContentBody(
                                 fontSize = 12.5.sp,
                                 fontWeight = FontWeight.SemiBold
                             )
+                            TextButton(
+                                onClick = { showMermaidPreviewSheet = true },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                modifier = Modifier.testTag("mermaid_render_preview_btn")
+                            ) {
+                                Text("渲染预览", color = palette.brandGold, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                            }
                             TextButton(
                                 onClick = { showMermaidSource = true },
                                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
@@ -677,6 +725,14 @@ private fun PostRichContentBody(
                                 color = palette.inkPrimary
                             )
                         }
+                    }
+                    if (showMermaidPreviewSheet) {
+                        AcademicPreviewDialog(
+                            title = "Mermaid 图表预览",
+                            source = node.code,
+                            isMermaid = true,
+                            onDismiss = { showMermaidPreviewSheet = false }
+                        )
                     }
                 } else {
                     val highlightedCode = remember(node.code, node.language, palette.isDark) {
@@ -756,9 +812,10 @@ private fun PostRichContentBody(
                 }
             }
             is PostBlockNode.ImageGallery -> {
+                val postWideGallery = LocalPostWideImageGallery.current
                 var lightboxIndex by remember(node) { mutableStateOf<Int?>(null) }
                 node.urls.forEachIndexed { index, url ->
-                    var failed by remember(url) { mutableStateOf(false) }
+                    var loadState by remember(url) { mutableIntStateOf(0) } // 0=loading, 1=loaded, -1=failed
                     val fullUrl = node.fullUrls.getOrElse(index) { url }
                     val rawLink = node.linkUrls.getOrNull(index)?.trim().orEmpty()
                     val linkTarget = rawLink.ifEmpty { fullUrl }
@@ -767,7 +824,8 @@ private fun PostRichContentBody(
                         !rawLink.equals(url, ignoreCase = true) &&
                         !isPostImageAssetUrl(rawLink)
                     val alt = node.captions.getOrNull(index).orEmpty().ifBlank { LinDoReaderCopy.POST_IMAGE_ALT.text }
-                    if (failed) {
+                    val knownAspectRatio = node.aspectRatios.getOrNull(index)?.coerceIn(0.45f, 3.0f)
+                    if (loadState < 0) {
                         TextButton(onClick = {
                             if (isExternalArticleLink) onOpenLink(linkTarget) else lightboxIndex = index
                         }) { Text("查看图片", color = palette.activeChipText) }
@@ -781,28 +839,95 @@ private fun PostRichContentBody(
                                 .precision(coil3.size.Precision.INEXACT)
                                 .build()
                         }
-                        AsyncImage(
-                            model = imageRequest,
-                            contentDescription = alt,
-                            contentScale = ContentScale.Inside,
-                            filterQuality = androidx.compose.ui.graphics.FilterQuality.Medium,
-                            onError = { failed = true },
-                            modifier = Modifier
-                                .widthIn(max = 560.dp).heightIn(max = 360.dp)
-                                .clickable {
-                                    if (isExternalArticleLink) {
-                                        onOpenLink(linkTarget)
+                        val isLoading = loadState == 0
+                        val animationsEnabled = LocalLinDoAnimations.current
+                        val skeletonAlpha = if (isLoading && animationsEnabled) {
+                            val pulse = androidx.compose.animation.core.rememberInfiniteTransition(label = "img_skel_$index")
+                            val a by pulse.animateFloat(
+                                initialValue = 0.55f,
+                                targetValue = 0.92f,
+                                animationSpec = androidx.compose.animation.core.infiniteRepeatable(
+                                    animation = androidx.compose.animation.core.tween(
+                                        durationMillis = 950,
+                                        easing = androidx.compose.animation.core.FastOutSlowInEasing
+                                    ),
+                                    repeatMode = androidx.compose.animation.core.RepeatMode.Reverse
+                                ),
+                                label = "img_skel_alpha_$index"
+                            )
+                            a
+                        } else 0.78f
+                        val boxMod = if (isLoading) {
+                            val base = Modifier
+                                .widthIn(max = 560.dp)
+                                .fillMaxWidth()
+                                .let { m ->
+                                    if (knownAspectRatio != null) {
+                                        m.aspectRatio(knownAspectRatio).heightIn(min = 120.dp, max = 360.dp)
                                     } else {
-                                        lightboxIndex = index
+                                        m.height(200.dp)
                                     }
                                 }
-                        )
+                            base
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(palette.subtleSurface.copy(alpha = skeletonAlpha))
+                                .border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp))
+                                .testTag("post_image_skeleton_$index")
+                        } else {
+                            Modifier
+                                .widthIn(max = 560.dp)
+                                .heightIn(max = 360.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                        }
+                        Box(
+                            modifier = boxMod.clickable {
+                                if (isExternalArticleLink) {
+                                    onOpenLink(linkTarget)
+                                } else {
+                                    lightboxIndex = index
+                                }
+                            },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (isLoading) {
+                                Icon(
+                                    imageVector = do_.linux.lindo.ui.components.LinDoIcons.Image,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(26.dp),
+                                    tint = palette.inkTertiary.copy(alpha = 0.45f)
+                                )
+                            }
+                            AsyncImage(
+                                model = imageRequest,
+                                contentDescription = alt,
+                                contentScale = ContentScale.Inside,
+                                filterQuality = androidx.compose.ui.graphics.FilterQuality.Medium,
+                                onSuccess = { loadState = 1 },
+                                onError = { loadState = -1 },
+                                modifier = if (isLoading) {
+                                    Modifier.matchParentSize()
+                                } else {
+                                    Modifier.widthIn(max = 560.dp).heightIn(max = 360.dp)
+                                }
+                            )
+                        }
                     }
                 }
                 lightboxIndex?.let { startIndex ->
+                    val effectiveGallery = postWideGallery ?: node
+                    val targetFullUrl = node.fullUrls.getOrElse(startIndex) { node.urls.getOrElse(startIndex) { "" } }
+                    val resolvedStartIndex = if (postWideGallery != null) {
+                        postWideGallery.fullUrls.indexOfFirst { it == targetFullUrl }
+                            .takeIf { it >= 0 }
+                            ?: postWideGallery.urls.indexOfFirst { it == node.urls.getOrNull(startIndex) }
+                                .takeIf { it >= 0 }
+                            ?: startIndex
+                    } else {
+                        startIndex
+                    }
                     PostImageLightboxDialog(
-                        gallery = node,
-                        initialIndex = startIndex,
+                        gallery = effectiveGallery,
+                        initialIndex = resolvedStartIndex,
                         onOpenLink = onOpenLink,
                         onDismiss = { lightboxIndex = null }
                     )
@@ -818,14 +943,20 @@ private fun PostRichContentBody(
             }
             is PostBlockNode.Media -> {
                 val mediaKind = MediaBlockKind.fromKey(node.kind)
-                Column(Modifier.fillMaxWidth().background(palette.subtleSurface, RoundedCornerShape(10.dp)).border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp)).padding(12.dp)) {
-                    Text(node.label, color = palette.inkPrimary, fontWeight = FontWeight.Medium)
-                    TextButton(onClick = { (node.url ?: originalUrl)?.let(onOpenLink) }, enabled = node.url != null || originalUrl != null) {
-                        Text(
-                            if (mediaKind.isAudio) LinDoReaderCopy.PLAY_AUDIO.text else LinDoReaderCopy.PLAY_MEDIA.text,
-                            color = if (node.url != null || originalUrl != null) palette.activeChipText else palette.inkTertiary
-                        )
-                    }
+                if (mediaKind.isAudio) {
+                    InlineAudioPlayerBar(
+                        label = node.label,
+                        url = node.url,
+                        fallbackUrl = originalUrl,
+                        onOpenExternal = onOpenLink
+                    )
+                } else {
+                    InlineVideoPlayerCard(
+                        label = node.label,
+                        url = node.url,
+                        fallbackUrl = originalUrl,
+                        onOpenExternal = onOpenLink
+                    )
                 }
             }
             is PostBlockNode.OneboxCard -> Column(
@@ -936,22 +1067,58 @@ private fun PostRichContentBody(
                     }
                     UnsupportedBlockKind.MATH -> {
                         if (node.text.isNotBlank()) {
-                            Box(
+                            var showMathSheet by remember(node.text) { mutableStateOf(false) }
+                            val formattedMath = remember(node.text) { formatMathForNativeDisplay(node.text) }
+                            Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clip(RoundedCornerShape(8.dp))
+                                    .testTag("math_card_block")
+                                    .clip(RoundedCornerShape(10.dp))
                                     .background(palette.subtleSurface)
-                                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                                    .border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp))
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                SelectionContainer {
+                                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                                     Text(
-                                        text = node.text,
-                                        color = palette.inkPrimary,
-                                        fontFamily = FontFamily.Monospace,
-                                        fontSize = 13.5.sp,
-                                        lineHeight = 20.sp
+                                        text = "数学公式",
+                                        fontSize = 11.2.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = palette.inkTertiary,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Text(
+                                        text = "渲染预览",
+                                        fontSize = 11.5.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = palette.activeChipText,
+                                        modifier = Modifier
+                                            .testTag("math_render_preview_btn")
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .pointerHoverIcon(PointerIcon.Hand)
+                                            .clickable { showMathSheet = true }
+                                            .padding(horizontal = 6.dp, vertical = 2.dp)
                                     )
                                 }
+                                SelectionContainer {
+                                    Text(
+                                        text = formattedMath,
+                                        color = palette.inkPrimary,
+                                        fontFamily = FontFamily.Serif,
+                                        fontStyle = FontStyle.Italic,
+                                        fontSize = 15.5.sp,
+                                        lineHeight = 23.sp,
+                                        modifier = Modifier.horizontalScroll(rememberScrollState())
+                                    )
+                                }
+                            }
+                            if (showMathSheet) {
+                                AcademicPreviewDialog(
+                                    title = "数学公式预览",
+                                    source = node.text,
+                                    isMermaid = false,
+                                    onDismiss = { showMathSheet = false }
+                                )
                             }
                         }
                     }
@@ -1111,16 +1278,44 @@ private fun NativePostPoll(
     var expandedVotersOptionId by remember(postId, poll) { mutableStateOf<String?>(null) }
     var votersCache by remember(postId, poll) { mutableStateOf<Map<String, List<do_.linux.lindo.core.model.PollVoterEntry>>>(emptyMap()) }
     var loadingVotersFor by remember(postId, poll) { mutableStateOf<String?>(null) }
+    var showResultsManually by remember(postId, poll) { mutableStateOf(false) }
+    val totalVotesSum = remember(optionVotes, voters) {
+        val sum = optionVotes.values.sum()
+        if (sum > 0) sum else (voters ?: 0)
+    }
+    val hasAnyVoteCounts = optionVotes.isNotEmpty()
+    val showResultBars = submitted || isClosed || showResultsManually
 
     Column(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(poll.title, fontWeight = FontWeight.SemiBold, color = palette.inkPrimary)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(poll.title, fontWeight = FontWeight.SemiBold, color = palette.inkPrimary, modifier = Modifier.weight(1f))
+            if (hasAnyVoteCounts && !submitted && !isClosed) {
+                Text(
+                    text = if (showResultsManually) "隐藏结果" else "查看结果",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = palette.activeChipText,
+                    modifier = Modifier
+                        .testTag("poll_toggle_results_btn")
+                        .clip(RoundedCornerShape(6.dp))
+                        .pointerHoverIcon(PointerIcon.Hand)
+                        .clickable { showResultsManually = !showResultsManually }
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+            }
+        }
         poll.options.forEach { option ->
             val isOptionSelected = option.id in selected
+            val optVotes = optionVotes[option.id]
+            val pctFraction = if (optVotes != null && totalVotesSum > 0) {
+                (optVotes.toFloat() / totalVotesSum.toFloat()).coerceIn(0f, 1f)
+            } else 0f
+            val pctInt = (pctFraction * 100f).roundToInt()
             Column(Modifier.fillMaxWidth()) {
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .heightIn(min = 48.dp)
+                        .heightIn(min = 44.dp)
                         .clip(RoundedCornerShape(8.dp))
                         .let { mod ->
                             if (postId != null && !isClosed && !busy) {
@@ -1138,7 +1333,7 @@ private fun NativePostPoll(
                             }
                             error = null
                         }
-                        .padding(horizontal = 6.dp, vertical = 8.dp),
+                        .padding(horizontal = 6.dp, vertical = 7.dp),
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -1176,34 +1371,60 @@ private fun NativePostPoll(
                         }
                     }
                     Text(option.text, modifier = Modifier.weight(1f), color = palette.inkPrimary, fontSize = 14.sp)
-                    optionVotes[option.id]?.let { count ->
+                    if (showResultBars && optVotes != null) {
                         Text(
-                            text = LinDoReaderCopy.POLL_VOTES_COUNT.format(count),
-                            color = if (count > 0 && postId != null) palette.activeChipText else palette.inkSecondary,
+                            text = "$pctInt% (${LinDoReaderCopy.POLL_VOTES_COUNT.format(optVotes)})",
+                            color = if (optVotes > 0 && postId != null) palette.activeChipText else palette.inkSecondary,
                             fontSize = 12.sp,
-                            modifier = if (count > 0 && postId != null) {
-                                Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .pointerHoverIcon(PointerIcon.Hand)
-                                    .clickable {
-                                        if (expandedVotersOptionId == option.id) {
-                                            expandedVotersOptionId = null
-                                        } else {
-                                            expandedVotersOptionId = option.id
-                                            if (!votersCache.containsKey(option.id)) {
-                                                loadingVotersFor = option.id
-                                                scope.launch {
-                                                    val fetched = runCatching {
-                                                        LinuxDoRepository.fetchPollVoters(postId, poll.name, option.id)
-                                                    }.getOrDefault(emptyList())
-                                                    votersCache = votersCache + (option.id to fetched)
-                                                    if (loadingVotersFor == option.id) loadingVotersFor = null
+                            fontWeight = if (isOptionSelected) FontWeight.SemiBold else FontWeight.Normal,
+                            modifier = Modifier
+                                .testTag("poll_option_pct_${option.id}")
+                                .let { m ->
+                                    if (optVotes > 0 && postId != null) {
+                                        m.clip(RoundedCornerShape(6.dp))
+                                            .pointerHoverIcon(PointerIcon.Hand)
+                                            .clickable {
+                                                if (expandedVotersOptionId == option.id) {
+                                                    expandedVotersOptionId = null
+                                                } else {
+                                                    expandedVotersOptionId = option.id
+                                                    if (!votersCache.containsKey(option.id)) {
+                                                        loadingVotersFor = option.id
+                                                        scope.launch {
+                                                            val fetched = runCatching {
+                                                                LinuxDoRepository.fetchPollVoters(postId, poll.name, option.id)
+                                                            }.getOrDefault(emptyList())
+                                                            votersCache = votersCache + (option.id to fetched)
+                                                            if (loadingVotersFor == option.id) loadingVotersFor = null
+                                                        }
+                                                    }
                                                 }
                                             }
-                                        }
-                                    }
-                                    .padding(horizontal = 6.dp, vertical = 2.dp)
-                            } else Modifier
+                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                    } else m
+                                }
+                        )
+                    }
+                }
+                if (showResultBars && optVotes != null) {
+                    val animatedFrac by androidx.compose.animation.core.animateFloatAsState(
+                        targetValue = pctFraction,
+                        label = "pollOptionBar_${option.id}"
+                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 34.dp, end = 6.dp, bottom = 4.dp)
+                            .height(6.dp)
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(palette.subtleSurface)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(animatedFrac)
+                                .height(6.dp)
+                                .clip(RoundedCornerShape(999.dp))
+                                .background(if (isOptionSelected) palette.brandGold else palette.activeChipText.copy(alpha = 0.72f))
                         )
                     }
                 }
@@ -1213,20 +1434,47 @@ private fun NativePostPoll(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(start = 34.dp, end = 6.dp, bottom = 6.dp),
+                            .padding(start = 34.dp, end = 6.dp, bottom = 6.dp)
+                            .horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         when {
                             loading -> Text("加载投票成员…", color = palette.inkTertiary, fontSize = 11.5.sp)
                             votersList.isNullOrEmpty() -> Text("该投票未公开投票成员", color = palette.inkTertiary, fontSize = 11.5.sp)
-                            else -> Text(
-                                text = votersList.take(12).joinToString(" · ") { "@${it.username}" } +
-                                    if (votersList.size > 12) " 等 ${votersList.size} 人" else "",
-                                color = palette.inkSecondary,
-                                fontSize = 11.5.sp,
-                                lineHeight = 16.sp
-                            )
+                            else -> {
+                                val onInspectUser = LocalOnInspectUser.current
+                                votersList.take(12).forEach { voter ->
+                                    Row(
+                                        modifier = Modifier
+                                            .testTag("poll_voter_chip_${voter.username}")
+                                            .clip(CircleShape)
+                                            .background(palette.subtleSurface)
+                                            .then(
+                                                if (onInspectUser != null) {
+                                                    Modifier
+                                                        .pointerHoverIcon(PointerIcon.Hand)
+                                                        .clickable { onInspectUser(voter.username) }
+                                                } else Modifier
+                                            )
+                                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        do_.linux.lindo.ui.components.SmartAvatar(
+                                            username = voter.username,
+                                            avatarTemplate = voter.avatarTemplate,
+                                            animatedAvatar = null,
+                                            size = 15.dp,
+                                            enableAnimations = false
+                                        )
+                                        Text("@${voter.username}", color = palette.inkSecondary, fontSize = 11.2.sp)
+                                    }
+                                }
+                                if (votersList.size > 12) {
+                                    Text("等 ${votersList.size} 人", color = palette.inkTertiary, fontSize = 11.2.sp)
+                                }
+                            }
                         }
                     }
                 }
@@ -1313,7 +1561,7 @@ private fun isPostImageAssetUrl(rawUrl: String): Boolean {
 }
 
 @Composable
-private fun PostImageLightboxDialog(
+internal fun PostImageLightboxDialog(
     gallery: PostBlockNode.ImageGallery,
     initialIndex: Int,
     onOpenLink: (String) -> Unit,
@@ -1588,58 +1836,132 @@ private fun PostImageLightboxDialog(
                 }
             }
 
-            // Bottom subtle icon-only action bar
-            Row(
+            // Bottom subtle action bar (Copy Link + Save to Gallery + Open Original)
+            val saveScope = rememberCoroutineScope()
+            var savingImage by remember(currentIndex) { mutableStateOf(false) }
+            var saveToast by remember(currentIndex) { mutableStateOf<String?>(null) }
+            LaunchedEffect(saveToast) {
+                if (saveToast != null) {
+                    delay(2_200L)
+                    saveToast = null
+                }
+            }
+            Column(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(horizontal = 16.dp, vertical = 14.dp)
-                    .clip(RoundedCornerShape(22.dp))
-                    .background(Color.White.copy(alpha = 0.14f))
-                    .border(0.5.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(22.dp))
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .clickable(
-                            onClickLabel = if (copiedLink) LinDoReaderCopy.IMAGE_LINK_COPIED.text else LinDoReaderCopy.COPY_IMAGE_LINK.text
-                        ) {
-                            clipboard.setText(AnnotatedString(fullUrl))
-                            copiedLink = true
-                        },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = if (copiedLink) LinDoIcons.Check else LinDoIcons.Link,
-                        contentDescription = if (copiedLink) LinDoReaderCopy.IMAGE_LINK_COPIED.text else LinDoReaderCopy.COPY_IMAGE_LINK.text,
-                        tint = if (copiedLink) Color(0xFFF5C451) else Color.White,
-                        modifier = Modifier.size(17.dp)
+                saveToast?.let { toast ->
+                    Text(
+                        text = toast,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = Color.White,
+                        modifier = Modifier
+                            .testTag("lightbox_save_toast")
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(Color.Black.copy(alpha = 0.72f))
+                            .padding(horizontal = 12.dp, vertical = 5.dp)
                     )
                 }
-                Box(
+                Row(
                     modifier = Modifier
-                        .width(0.5.dp)
-                        .height(16.dp)
-                        .background(Color.White.copy(alpha = 0.25f))
-                )
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .clickable(onClickLabel = LinDoReaderCopy.OPEN_ORIGINAL_IN_BROWSER.text) {
-                            onOpenLink(fullUrl)
-                        },
-                    contentAlignment = Alignment.Center
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(Color.White.copy(alpha = 0.14f))
+                        .border(0.5.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(22.dp))
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Icon(
-                        imageVector = LinDoIcons.ExternalLink,
-                        contentDescription = LinDoReaderCopy.OPEN_ORIGINAL_IN_BROWSER.text,
-                        tint = Color.White,
-                        modifier = Modifier.size(16.dp)
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .clickable(
+                                onClickLabel = if (copiedLink) LinDoReaderCopy.IMAGE_LINK_COPIED.text else LinDoReaderCopy.COPY_IMAGE_LINK.text
+                            ) {
+                                clipboard.setText(AnnotatedString(fullUrl))
+                                copiedLink = true
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = if (copiedLink) LinDoIcons.Check else LinDoIcons.Link,
+                            contentDescription = if (copiedLink) LinDoReaderCopy.IMAGE_LINK_COPIED.text else LinDoReaderCopy.COPY_IMAGE_LINK.text,
+                            tint = if (copiedLink) Color(0xFFF5C451) else Color.White,
+                            modifier = Modifier.size(17.dp)
+                        )
+                    }
+                    Box(
+                        modifier = Modifier
+                            .width(0.5.dp)
+                            .height(16.dp)
+                            .background(Color.White.copy(alpha = 0.25f))
                     )
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .testTag("lightbox_save_image_btn")
+                            .clickable(enabled = !savingImage, onClickLabel = "保存图片") {
+                                val saver = PlatformRichMediaBridge.saveImageToGallery
+                                if (saver == null) {
+                                    clipboard.setText(AnnotatedString(fullUrl))
+                                    saveToast = "已复制图片链接"
+                                    return@clickable
+                                }
+                                savingImage = true
+                                val suggestedName = fullUrl.substringAfterLast('/').substringBefore('?').ifBlank { "lindo_image.jpg" }
+                                saveScope.launch {
+                                    val res = runCatching { saver(fullUrl, suggestedName) }.getOrElse { Result.failure(it) }
+                                    savingImage = false
+                                    saveToast = res.fold(
+                                        onSuccess = { it.ifBlank { "已保存到相册 Pictures/LinDo" } },
+                                        onFailure = { err -> err.message?.takeIf { it.isNotBlank() } ?: "保存图片失败" }
+                                    )
+                                }
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (savingImage) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(15.dp),
+                                strokeWidth = 1.8.dp,
+                                color = Color.White
+                            )
+                        } else {
+                            Icon(
+                                imageVector = LinDoIcons.Download,
+                                contentDescription = "保存图片",
+                                tint = Color.White,
+                                modifier = Modifier.size(17.dp)
+                            )
+                        }
+                    }
+                    Box(
+                        modifier = Modifier
+                            .width(0.5.dp)
+                            .height(16.dp)
+                            .background(Color.White.copy(alpha = 0.25f))
+                    )
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .clickable(onClickLabel = LinDoReaderCopy.OPEN_ORIGINAL_IN_BROWSER.text) {
+                                onOpenLink(fullUrl)
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = LinDoIcons.ExternalLink,
+                            contentDescription = LinDoReaderCopy.OPEN_ORIGINAL_IN_BROWSER.text,
+                            tint = Color.White,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
                 }
             }
         }

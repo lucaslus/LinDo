@@ -53,7 +53,8 @@ sealed interface PostBlockNode {
         val urls: List<String>,
         val captions: List<String> = emptyList(),
         val fullUrls: List<String> = urls,
-        val linkUrls: List<String?> = emptyList()
+        val linkUrls: List<String?> = emptyList(),
+        val aspectRatios: List<Float?> = emptyList()
     ) : PostBlockNode
     data class Table(val rows: List<List<List<PostBlockNode>>>, val headerRows: Set<Int>) : PostBlockNode
     data class Media(val label: String, val url: String?, val kind: String) : PostBlockNode {
@@ -590,23 +591,31 @@ object DiscourseAstParser {
                     flush()
                     resolveImageDisplayAndFullUrl(node)?.let { (displayUrl, fullUrl) ->
                         val linkUrl = resolveImageLinkUrl(node, style.href)
+                        val rawW = node.attr("width").trim().removeSuffix("px").toFloatOrNull()
+                        val rawH = node.attr("height").trim().removeSuffix("px").toFloatOrNull()
+                        val aspectRatio = if (rawW != null && rawH != null && rawW >= 48f && rawH >= 48f) {
+                            (rawW / rawH).coerceIn(0.45f, 3.0f)
+                        } else null
                         val prev = result.lastOrNull() as? PostBlockNode.ImageGallery
                         if (prev != null) {
                             val prevCaptions = List(prev.urls.size) { prev.captions.getOrNull(it).orEmpty() }
                             val prevFullUrls = List(prev.urls.size) { prev.fullUrls.getOrElse(it) { prev.urls[it] } }
                             val prevLinkUrls = List(prev.urls.size) { prev.linkUrls.getOrNull(it) }
+                            val prevRatios = List(prev.urls.size) { prev.aspectRatios.getOrNull(it) }
                             result[result.lastIndex] = PostBlockNode.ImageGallery(
                                 urls = prev.urls + displayUrl,
                                 captions = prevCaptions + node.attr("alt"),
                                 fullUrls = prevFullUrls + fullUrl,
-                                linkUrls = prevLinkUrls + linkUrl
+                                linkUrls = prevLinkUrls + linkUrl,
+                                aspectRatios = prevRatios + aspectRatio
                             )
                         } else {
                             result += PostBlockNode.ImageGallery(
                                 urls = listOf(displayUrl),
                                 captions = listOf(node.attr("alt")),
                                 fullUrls = listOf(fullUrl),
-                                linkUrls = listOf(linkUrl)
+                                linkUrls = listOf(linkUrl),
+                                aspectRatios = listOf(aspectRatio)
                             )
                         }
                     } ?: run {

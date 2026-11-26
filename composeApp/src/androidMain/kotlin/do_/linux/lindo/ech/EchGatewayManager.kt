@@ -22,11 +22,16 @@ import do_.linux.lindo.core.network.EchRoutingMode
 import do_.linux.lindo.core.network.EchRoutingPolicy
 import do_.linux.lindo.core.network.EchRuntimeSnapshot
 import do_.linux.lindo.core.network.decideEchGatewayRoute
+import do_.linux.lindo.core.network.isFakeOrTunIpv4Bytes
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import java.io.File
+import java.net.Inet4Address
+import java.net.InetAddress
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 
 internal object NativeEchBridge {
@@ -70,9 +75,19 @@ object EchGatewayManager {
         val ifaceName: String
     )
 
+    private data class Tuple4<A, B, C, D>(
+        val first: A,
+        val second: B,
+        val third: C,
+        val fourth: D
+    )
+
     private val initialized = AtomicBoolean(false)
     private val reconcileExecutor = Executors.newSingleThreadExecutor { r ->
         Thread(r, "lindo-ech-ctrl").apply { isDaemon = true }
+    }
+    private val dnsProbeExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "lindo-ech-dns-probe").apply { isDaemon = true }
     }
     private val mainHandler = Handler(Looper.getMainLooper())
     private val stateLock = Any()
@@ -89,6 +104,10 @@ object EchGatewayManager {
     private var currentMode: EchRoutingMode = EchRoutingMode.SMART_AUTO
     private var lastAppliedMode: EchRoutingMode? = null
     private var vpnActive: Boolean = false
+    private var upstreamFakeIpDetected: Boolean = false
+    private var lastFakeIpProbeAtMs: Long = 0L
+    private var lastFakeIpProbeNetSig: String = ""
+    private var lastLoggedFakeIpSample: String = ""
     private var proxyTunnelUnreachable: Boolean = false
     private var vpnLockdownYielded: Boolean = false
     private var activeGatewayPort: Int = 0
@@ -177,11 +196,16 @@ object EchGatewayManager {
      * Automatically promotes `SMART_AUTO` onto ECH for the current VPN session; returns `true`
      * if ECH fallback was newly armed.
      */
+    fun isUpstreamFakeIpDetected(): Boolean = synchronized(stateLock) { upstreamFakeIpDetected }
+
     fun noteProxyTunnelUnreachable(): Boolean {
         if (!initialized.get() || !NativeEchBridge.loaded) return false
         val armed = synchronized(stateLock) {
             val hasSysProxy = isSystemHttpProxySet()
-            if (currentMode == EchRoutingMode.SMART_AUTO && (vpnActive || hasSysProxy) && !proxyTunnelUnreachable) {
+            if (currentMode == EchRoutingMode.SMART_AUTO &&
+                (vpnActive || hasSysProxy || upstreamFakeIpDetected) &&
+                !proxyTunnelUnreachable
+            ) {
                 proxyTunnelUnreachable = true
                 true
             } else {
@@ -471,12 +495,126 @@ object EchGatewayManager {
         !System.getProperty("http.proxyHost").isNullOrBlank() ||
             !System.getProperty("https.proxyHost").isNullOrBlank()
 
+    private fun buildNetworkProbeSignatureLocked(vpnNow: Boolean, hasSysProxy: Boolean): String {
+        val physSig = physicalNetworks.entries
+            .sortedBy { it.key }
+            .joinToString(",") { "${it.key}:${it.value.ifaceName}:${it.value.rank}" }
+        return "$vpnNow|$hasSysProxy|$physSig"
+    }
+
+    /**
+     * Non-blocking off-main-thread OS DNS probe for upstream transparent Fake-IP TUN/routers
+     * (e.g., host Clash/Mihomo TUN behind Android Emulator NAT, or OpenWrt/Mihomo 旁路由 returning `198.18.0.0/15`).
+     * Uses a tight bounded wait so cold-start `reconcileSync()` never risks ANR and avoids booting the local
+     * ECH MITM gateway when Fake-IP DNS responds in ~1–5ms. If DNS is slow, updates asynchronously and triggers
+     * a clean reconcile if the state changes.
+     */
+    private fun probeUpstreamFakeIpIfNeeded(
+        netSig: String,
+        force: Boolean,
+        waitMs: Long
+    ): Boolean {
+        val now = System.currentTimeMillis()
+        val cached = synchronized(stateLock) {
+            if (!force && lastFakeIpProbeNetSig == netSig && (now - lastFakeIpProbeAtMs) < 15_000L) {
+                upstreamFakeIpDetected
+            } else {
+                null
+            }
+        }
+        if (cached != null) return cached
+
+        val future = dnsProbeExecutor.submit<Pair<Boolean, String>> {
+            val addrs = runCatching { InetAddress.getAllByName("linux.do") }.getOrNull().orEmpty()
+            val fakeAddr = addrs.firstOrNull { addr ->
+                addr is Inet4Address && isFakeOrTunIpv4Bytes(addr.address)
+            }
+            val detected = fakeAddr != null
+            val sampleIp = fakeAddr?.hostAddress.orEmpty()
+            val prev = synchronized(stateLock) {
+                val p = upstreamFakeIpDetected
+                upstreamFakeIpDetected = detected
+                lastFakeIpProbeAtMs = System.currentTimeMillis()
+                lastFakeIpProbeNetSig = netSig
+                if (p != detected) {
+                    proxyTunnelUnreachable = false
+                }
+                if (detected && sampleIp.isNotBlank() && lastLoggedFakeIpSample != sampleIp) {
+                    lastLoggedFakeIpSample = sampleIp
+                } else if (!detected) {
+                    lastLoggedFakeIpSample = ""
+                }
+                p
+            }
+            if (detected && !prev) {
+                android.util.Log.i(
+                    "LinDoEch",
+                    "Detected upstream Fake-IP DNS for linux.do ($sampleIp); SMART_AUTO yielding to transparent proxy/TUN"
+                )
+                LinDoDiagnosticLogger.info(
+                    DiagnosticCategory.NETWORK,
+                    "EchGateway",
+                    "Detected upstream Fake-IP DNS ($sampleIp); SMART_AUTO yielding to transparent proxy/TUN"
+                )
+            } else if (!detected && prev) {
+                android.util.Log.i(
+                    "LinDoEch",
+                    "Upstream Fake-IP DNS cleared on network change; SMART_AUTO eligible for ECH direct"
+                )
+                LinDoDiagnosticLogger.info(
+                    DiagnosticCategory.NETWORK,
+                    "EchGateway",
+                    "Upstream Fake-IP DNS cleared on network change; SMART_AUTO eligible for ECH direct"
+                )
+            }
+            detected to sampleIp
+        }
+
+        return try {
+            future.get(waitMs, TimeUnit.MILLISECONDS).first
+        } catch (_: TimeoutException) {
+            // Do not stall startup on slow/offline OS DNS; reconcile asynchronously once lookup settles.
+            val before = synchronized(stateLock) { upstreamFakeIpDetected }
+            reconcileExecutor.execute {
+                val settled = runCatching { future.get(2_500L, TimeUnit.MILLISECONDS).first }.getOrNull()
+                if (settled != null && settled != before) {
+                    runCatching { reconcileInternal(forceModeRefresh = false) }
+                }
+            }
+            before
+        } catch (_: Throwable) {
+            synchronized(stateLock) { upstreamFakeIpDetected }
+        }
+    }
+
     private fun reconcileInternal(forceModeRefresh: Boolean = false) = synchronized(reconcileLock) {
-        val (mode, vpnNow, bestPhys) = synchronized(stateLock) {
-            Triple(currentMode, vpnActive, bestPhysicalLocked())
+        val hasSysProxy = isSystemHttpProxySet()
+        val (mode, vpnNow, bestPhys, netSig) = synchronized(stateLock) {
+            val sig = buildNetworkProbeSignatureLocked(vpnActive, hasSysProxy)
+            arrayOf(currentMode, vpnActive, bestPhysicalLocked(), sig)
+        }.let { arr ->
+            @Suppress("UNCHECKED_CAST")
+            Tuple4(
+                arr[0] as EchRoutingMode,
+                arr[1] as Boolean,
+                arr[2] as PhysicalNetInfo?,
+                arr[3] as String
+            )
+        }
+        val probeWaitMs = if (Looper.myLooper() == Looper.getMainLooper()) 250L else 450L
+        val fakeIpDetected = if (mode == EchRoutingMode.SMART_AUTO && !vpnNow && !hasSysProxy) {
+            probeUpstreamFakeIpIfNeeded(netSig = netSig, force = forceModeRefresh, waitMs = probeWaitMs)
+        } else {
+            if (vpnNow || hasSysProxy) {
+                synchronized(stateLock) {
+                    upstreamFakeIpDetected = false
+                    lastFakeIpProbeNetSig = netSig
+                    lastFakeIpProbeAtMs = System.currentTimeMillis()
+                }
+            }
+            false
         }
         val tunnelFallback = synchronized(stateLock) { proxyTunnelUnreachable }
-        val hasSysProxy = isSystemHttpProxySet()
         val physHandle = bestPhys?.handle ?: 0L
         val needPhysProbe = (mode == EchRoutingMode.ECH_PRIORITY && vpnNow) ||
             (mode == EchRoutingMode.SMART_AUTO && vpnNow && tunnelFallback)
@@ -488,7 +626,8 @@ object EchGatewayManager {
             vpnNow = vpnNow,
             hasSysProxy = hasSysProxy,
             canBindPhys = canBindPhys,
-            proxyTunnelUnreachable = tunnelFallback
+            proxyTunnelUnreachable = tunnelFallback,
+            upstreamFakeIpDetected = fakeIpDetected
         )
         val shouldRun = routeDecision.shouldRun
         val bypassVpn = routeDecision.bypassVpn
@@ -796,6 +935,7 @@ object EchGatewayManager {
         val (mode, vpnNow, phys) = synchronized(stateLock) {
             Triple(currentMode, vpnActive, bestPhysicalLocked())
         }
+        val fakeIpNow = synchronized(stateLock) { upstreamFakeIpDetected }
         val (vpnYieldNow, desiredActive) = synchronized(stateLock) {
             vpnLockdownYielded to (activeGatewayPort > 0)
         }
@@ -809,7 +949,8 @@ object EchGatewayManager {
             bypassVpnRequested = nativeActive && json.optBoolean("bypassVpnRequested", false),
             bypassVpnBound = nativeActive && json.optBoolean("bypassVpnBound", false),
             physicalIface = phys?.ifaceName.orEmpty(),
-            vpnActive = vpnNow || isSystemHttpProxySet(),
+            vpnActive = vpnNow || isSystemHttpProxySet() || fakeIpNow,
+            upstreamFakeIpDetected = fakeIpNow,
             vpnLockdownYielded = vpnYieldNow,
             lastBindErrno = json.optInt("lastBindErrno", 0),
             echHandshakeCount = json.optLong("echHandshakeCount", 0L),

@@ -169,7 +169,7 @@ internal fun AndroidQrScannerPreview(
     ) { granted ->
         hasCameraPerm = granted
         if (!granted) {
-            latestOnError("未授予相机权限，可通过「从相册识别二维码」或「粘贴登录口令」登录")
+            latestOnError("未授予相机权限，可切换「从相册识图」或「口令登录」")
         }
     }
 

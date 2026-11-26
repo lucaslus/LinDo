@@ -110,6 +110,7 @@ enum class DiscourseTrustLevel(val level: Int, val copy: LinDoNetworkCopy) {
  */
 enum class NotificationCategoryFilter(val labelCopy: LinDoMessagesCopy) {
     ALL(LinDoMessagesCopy.FILTER_ALL),
+    UNREAD(LinDoMessagesCopy.FILTER_UNREAD),
     REPLY(LinDoMessagesCopy.FILTER_REPLY),
     REACTION(LinDoMessagesCopy.FILTER_REACTION),
     MENTION(LinDoMessagesCopy.FILTER_MENTION),
@@ -294,11 +295,16 @@ enum class DiscourseUserActionKind(val code: Int, val copy: LinDoNetworkCopy, va
 /**
  * 话题订阅级别枚举（取代 `notificationLevel == 0/1/2/3` 魔法数字）
  */
-enum class TopicNotificationLevel(val code: Int, val menuLabel: LinDoReaderCopy) {
-    MUTED(0, LinDoReaderCopy.SUBSCRIPTION_MUTED),
-    REGULAR(1, LinDoReaderCopy.SUBSCRIPTION_DEFAULT),
-    TRACKING(2, LinDoReaderCopy.SUBSCRIPTION_DEFAULT),
-    WATCHING(3, LinDoReaderCopy.SUBSCRIPTION_WATCHING);
+enum class TopicNotificationLevel(
+    val code: Int,
+    val menuLabel: LinDoReaderCopy,
+    val shortTitle: String,
+    val detailHint: String
+) {
+    WATCHING(3, LinDoReaderCopy.SUBSCRIPTION_WATCHING, "关注 (Watching)", "每次有新回复都发送通知，并计入未读"),
+    TRACKING(2, LinDoReaderCopy.SUBSCRIPTION_TRACKING, "追踪 (Tracking)", "显示新回复计数，仅在被 @提及 或回复时通知"),
+    REGULAR(1, LinDoReaderCopy.SUBSCRIPTION_DEFAULT, "常规 (Normal)", "仅在被 @提及 或直接回复时接收通知"),
+    MUTED(0, LinDoReaderCopy.SUBSCRIPTION_MUTED, "静音 (Muted)", "不再接收此话题的任何通知与未读计数");
 
     fun nextQuickToggle(): TopicNotificationLevel = when (this) {
         REGULAR, TRACKING -> WATCHING
@@ -603,7 +609,8 @@ enum class ClearanceSyncState {
 enum class SearchSortOrder(val wireOrder: String?, val labelCopy: LinDoFeedCopy) {
     RELEVANCE(null, LinDoFeedCopy.SEARCH_SORT_RELEVANCE),
     LATEST("latest", LinDoFeedCopy.SEARCH_SORT_LATEST),
-    LIKES("likes", LinDoFeedCopy.SEARCH_SORT_LIKES)
+    LIKES("likes", LinDoFeedCopy.SEARCH_SORT_LIKES),
+    VIEWS("views", LinDoFeedCopy.SEARCH_SORT_VIEWS)
 }
 
 enum class UserActionFilterTab(val apiFilter: String?, val labelCopy: LinDoMessagesCopy) {

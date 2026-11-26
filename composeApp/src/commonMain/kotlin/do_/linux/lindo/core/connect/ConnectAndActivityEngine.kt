@@ -728,6 +728,17 @@ object ScreenTrackEngine {
 }
 
 /**
+ * `connect.linux.do` 单个指标项视觉分类（对齐 Desktop `ConnectMetricItem.kind`）
+ */
+enum class ConnectMetricKind {
+    RING,
+    BAR,
+    QUOTA,
+    STATUS,
+    STAT
+}
+
+/**
  * `connect.linux.do` 单个指标项模型
  */
 data class ConnectMetricItem(
@@ -736,7 +747,9 @@ data class ConnectMetricItem(
     val targetValue: Int,
     val displayCurrent: String,
     val displayTarget: String,
-    val isMet: Boolean
+    val isMet: Boolean,
+    val kind: ConnectMetricKind = ConnectMetricKind.BAR,
+    val sublabel: String? = null
 ) {
     val progress: Float
         get() = if (targetValue > 0) {
@@ -764,11 +777,12 @@ data class ConnectTrustLevelReport(
     val likesReceivedDays: Int,
     val likesReceivedUsers: Int,
     val metrics: List<ConnectMetricItem>,
-    val isLiveConnectData: Boolean
+    val isLiveConnectData: Boolean,
+    val footerSummary: String? = null
 )
 
 /**
- * `connect.linux.do` 当前环形、条形、举报配额及经典表格布局解析器。
+ * `connect.linux.do` 当前环形、条形、举报配额、合规记录及经典表格布局解析器。
  */
 object ConnectStatsParser {
 
@@ -830,7 +844,8 @@ object ConnectStatsParser {
                     targetValue = max,
                     displayCurrent = cur.toString(),
                     displayTarget = max.toString(),
-                    isMet = isMet || cur >= max
+                    isMet = isMet || cur >= max,
+                    kind = ConnectMetricKind.RING
                 )
             }
         }
@@ -860,12 +875,13 @@ object ConnectStatsParser {
                     targetValue = cssMax,
                     displayCurrent = cur.toString(),
                     displayTarget = cssMax.toString(),
-                    isMet = isMet || cur >= cssMax
+                    isMet = isMet || cur >= cssMax,
+                    kind = ConnectMetricKind.BAR
                 )
             }
         }
 
-        // Quotas are upper bounds. Never treat an excessive report count as positive progress.
+        // 3. 解析举报配额卡片 (.tl3-quota-card) — 上限类指标，超限为不达标
         val quotaRegex = Regex(
             """<div[^>]*class=["']([^"']*\btl3-quota-card\b[^"']*)["'][^>]*>(.*?)(?=<div[^>]*class=["'][^"']*\btl3-quota-card\b|$)""",
             RegexOption.DOT_MATCHES_ALL
@@ -879,11 +895,66 @@ object ConnectStatsParser {
             val values = Regex("""(\d+)\s*/\s*(\d+)""").find(numbers) ?: continue
             val current = values.groupValues[1].toInt()
             val limit = values.groupValues[2].toInt()
-            if (label.isNotBlank()) metrics += ConnectMetricItem(label, current, limit,
-                current.toString(), limit.toString(), current <= limit)
+            if (label.isNotBlank()) {
+                metrics += ConnectMetricItem(
+                    label = label,
+                    currentValue = current,
+                    targetValue = limit,
+                    displayCurrent = current.toString(),
+                    displayTarget = limit.toString(),
+                    isMet = current <= limit,
+                    kind = ConnectMetricKind.QUOTA
+                )
+            }
         }
 
-        // 兼容 connect.linux.do 经典 <table><tr><td>指标</td><td>当前</td><td>要求</td></tr></table> 布局
+        // 4. 解析现代布局中的 6 个月合规状态卡（被禁言 / 被封禁）
+        val parsedDoc = runCatching { org.jsoup.Jsoup.parse(htmlContent) }.getOrNull()
+        if (metrics.isNotEmpty() && parsedDoc != null) {
+            for (statusLabel in listOf("被禁言", "被封禁")) {
+                if (!htmlContent.contains(statusLabel) || metrics.any { it.label == statusLabel }) continue
+                val otherLabel = if (statusLabel == "被禁言") "被封禁" else "被禁言"
+                val candidates = parsedDoc.allElements.filter { el ->
+                    val tag = el.tagName().lowercase()
+                    if (tag == "html" || tag == "body" || tag == "head" || tag == "script" || tag == "style") {
+                        false
+                    } else {
+                        val txt = el.text().trim()
+                        txt.contains(statusLabel) && !txt.contains(otherLabel) && txt.length <= 120
+                    }
+                }
+                val bestCard = candidates
+                    .sortedWith(compareByDescending<org.jsoup.nodes.Element> {
+                        val t = it.text()
+                        var score = 0
+                        if (Regex("""过去\s*\d+\s*(?:个月|月|天)""").containsMatchIn(t)) score += 3
+                        if (Regex("""\d+""").containsMatchIn(t.replace(Regex("""过去\s*\d+\s*(?:个月|月|天)"""), ""))) score += 2
+                        if (it.className().contains("tl3", ignoreCase = true) || it.className().contains("status", ignoreCase = true)) score += 2
+                        score
+                    }.thenBy { it.text().length })
+                    .firstOrNull()
+                if (bestCard != null) {
+                    val cardText = bestCard.text().trim()
+                    val sublabel = Regex("""过去\s*\d+\s*(?:个月|月|天)""").find(cardText)?.value ?: "过去 6 个月"
+                    val withoutWindow = cardText.replace(Regex("""过去\s*\d+\s*(?:个月|月|天)"""), " ")
+                    val count = Regex("""(\d+)""").find(withoutWindow)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+                    val cls = bestCard.className().lowercase()
+                    val isUnmet = count > 0 || cls.contains("unmet") || cls.contains("fail") || cls.contains("danger") || cls.contains("red")
+                    metrics += ConnectMetricItem(
+                        label = statusLabel,
+                        currentValue = count,
+                        targetValue = 0,
+                        displayCurrent = count.toString(),
+                        displayTarget = "0",
+                        isMet = !isUnmet,
+                        kind = ConnectMetricKind.STATUS,
+                        sublabel = sublabel
+                    )
+                }
+            }
+        }
+
+        // 5. 兼容 connect.linux.do 经典 <table><tr><td>指标</td><td>当前</td><td>要求</td></tr></table> 布局
         if (metrics.isEmpty() && htmlContent.contains("<tr", ignoreCase = true)) {
             val trRegex = Regex("""<tr[^>]*>(.*?)</tr>""", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE))
             val tdRegex = Regex("""<td[^>]*>(.*?)</td>""", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE))
@@ -896,22 +967,43 @@ object ConnectStatsParser {
                     val rawTarget = cleanText(tds[2])
                     val curVal = parseFirstInt(rawCurrent)
                     val targetVal = parseFirstInt(rawTarget)
-                    if (
-                        rawLabel.isNotBlank() &&
-                        targetVal > 0 &&
-                        !rawLabel.contains("项目") &&
-                        !rawLabel.contains("禁言") &&
-                        !rawLabel.contains("封禁")
-                    ) {
-                        val isUnmet = tds[1].contains("red", ignoreCase = true) || trBlock.contains("unmet", ignoreCase = true)
-                        val isMet = if (tds[1].contains("green", ignoreCase = true)) true else if (isUnmet) false else curVal >= targetVal
+                    if (rawLabel.isBlank() || rawLabel.contains("项目")) continue
+                    val isComplianceRow = rawLabel.contains("禁言") || rawLabel.contains("封禁")
+                    val isQuotaRow = rawLabel.contains("举报")
+                    val isUnmet = tds[1].contains("red", ignoreCase = true) || trBlock.contains("unmet", ignoreCase = true)
+                    if (isComplianceRow) {
+                        val isMet = if (tds[1].contains("green", ignoreCase = true)) true
+                        else if (isUnmet) false
+                        else curVal == 0
+                        val normalizedLabel = when {
+                            rawLabel.contains("禁言") -> "被禁言"
+                            rawLabel.contains("封禁") -> "被封禁"
+                            else -> rawLabel
+                        }
+                        val sub = Regex("""过去\s*\d+\s*(?:个月|月|天)""").find(rawLabel)?.value ?: "过去 6 个月"
+                        metrics += ConnectMetricItem(
+                            label = normalizedLabel,
+                            currentValue = curVal,
+                            targetValue = targetVal,
+                            displayCurrent = rawCurrent.ifBlank { curVal.toString() },
+                            displayTarget = rawTarget.ifBlank { targetVal.toString() },
+                            isMet = isMet,
+                            kind = ConnectMetricKind.STATUS,
+                            sublabel = sub
+                        )
+                    } else if (targetVal > 0) {
+                        val isMet = if (tds[1].contains("green", ignoreCase = true)) true
+                        else if (isUnmet) false
+                        else if (isQuotaRow) curVal <= targetVal
+                        else curVal >= targetVal
                         metrics += ConnectMetricItem(
                             label = rawLabel,
                             currentValue = curVal,
                             targetValue = targetVal,
                             displayCurrent = rawCurrent.ifBlank { curVal.toString() },
                             displayTarget = rawTarget.ifBlank { targetVal.toString() },
-                            isMet = isMet
+                            isMet = isMet,
+                            kind = if (isQuotaRow) ConnectMetricKind.QUOTA else ConnectMetricKind.BAR
                         )
                     }
                 }
@@ -919,6 +1011,10 @@ object ConnectStatsParser {
         }
 
         if (metrics.isEmpty()) return null
+
+        val plainPageText = parsedDoc?.text()?.trim() ?: cleanText(htmlContent)
+        val footerSummary = Regex("""(?:您已|您尚未|恭喜[^。!\n]{0,30}|已|未)?(?:符合|不符合|达到|未达到)\s*信任级?别?\s*\d+[^。!\n]{0,60}[。!]?""")
+            .find(plainPageText)?.value?.trim()?.takeIf { it.length >= 6 }
 
         val mapByLabel = metrics.associate { it.label to it.currentValue }
 
@@ -941,7 +1037,8 @@ object ConnectStatsParser {
             likesReceivedDays = matchMetric(mapByLabel, listOf("获赞天数", "单日最高", "liked days")),
             likesReceivedUsers = matchMetric(mapByLabel, listOf("获赞用户", "不同用户", "获赞人数", "liked users")),
             metrics = metrics,
-            isLiveConnectData = true
+            isLiveConnectData = true,
+            footerSummary = footerSummary
         )
     }
 
@@ -962,7 +1059,13 @@ object ConnectStatsParser {
         timeReadSeconds: Int
     ): ConnectTrustLevelReport {
         fun metric(label: String, value: Int, suffix: String = "") = ConnectMetricItem(
-            label, value, 0, "$value$suffix", LinDoCommonCopy.NOT_PROVIDED.text, false
+            label = label,
+            currentValue = value,
+            targetValue = 0,
+            displayCurrent = "$value$suffix",
+            displayTarget = LinDoCommonCopy.NOT_PROVIDED.text,
+            isMet = false,
+            kind = ConnectMetricKind.STAT
         )
         return ConnectTrustLevelReport(
             title = LinDoNetworkCopy.CONNECT_CUMULATIVE_HEADER.format(trustLevel, username),

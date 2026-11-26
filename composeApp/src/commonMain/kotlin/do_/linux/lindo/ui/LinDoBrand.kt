@@ -34,9 +34,9 @@ import lindo.composeapp.generated.resources.Res
 import lindo.composeapp.generated.resources.lindo_mascot_welcome
 import org.jetbrains.compose.resources.painterResource
 
-private fun brandText(dark: Boolean) = if (dark) Color(0xFFF3F4F6) else Color(0xFF1A1B1E)
-private fun brandSecondary(dark: Boolean) = if (dark) Color(0xFF9CA3AF) else Color(0xFF5C626E)
-private fun brandBorder(dark: Boolean) = if (dark) Color(0xFF262A33) else Color(0xFFE3E6ED)
+private fun brandText(dark: Boolean) = if (dark) Color(0xFFF3F4F6) else Color(0xFF161A22)
+private fun brandSecondary(dark: Boolean) = if (dark) Color(0xFF9CA3AF) else Color(0xFF4F5665)
+private fun brandBorder(dark: Boolean) = if (dark) Color(0xFF262A33) else Color(0xFFD9DCE2)
 
 /** The exact same vector paths are used by SVG, Compose and Android adaptive icons. */
 @Composable
@@ -66,7 +66,7 @@ fun LindoColorWordmarkText(
     } else if (isDark) {
         Color(0xFFF3F4F6)
     } else {
-        Color(0xFF1A1B1E)
+        Color(0xFF161A22)
     }
     val resolvedDoColor = doColor ?: if (palette.isDark == isDark) {
         palette.logoDoColor
@@ -216,7 +216,7 @@ internal fun LinDoWelcomeScreen(
                     shape = actionShape,
                     contentPadding = PaddingValues(horizontal = 20.dp, vertical = 14.dp)
                 ) {
-                    Text(LinDoAuthCopy.LOGIN_WITH_LINUX_DO.text, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                    Text(LinDoAuthCopy.IN_APP_WEB_LOGIN.text, fontSize = 15.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.width(10.dp))
                     Icon(LinDoIcons.ArrowRight, contentDescription = null, modifier = Modifier.size(18.dp))
                 }

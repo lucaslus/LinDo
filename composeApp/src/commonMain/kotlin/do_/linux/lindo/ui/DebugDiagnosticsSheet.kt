@@ -176,7 +176,7 @@ private fun parseCleanDiagnosticSummary(entry: DiagnosticLogEntry): ParsedDiagno
     }
     val localized = when (raw) {
         "User unlocked DebugDiagnosticsSheet via consecutive version taps" -> "连续点击版本号进入诊断面板"
-        "Session authenticated via in-app WebView" -> "应用内网页登录会话已确认"
+        "Session authenticated via in-app WebView" -> "网页登录会话已确认"
         "Cloudflare verification completed" -> "站点安全验证已完成并恢复通行"
         else -> raw
             .replace("Callback accepted; OTP present=true", "系统浏览器一键授权回调成功")

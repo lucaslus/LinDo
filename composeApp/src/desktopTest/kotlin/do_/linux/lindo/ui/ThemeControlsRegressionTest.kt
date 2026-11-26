@@ -120,7 +120,7 @@ class ThemeControlsRegressionTest {
         }
         save("login-blue-dark.png")
         edt {
-            onNodeWithText("使用 LINUX DO 登录").performClick()
+            onNodeWithText("使用 Linuxdo 登录").performClick()
             onNodeWithText("浏览器授权").performClick()
             onNodeWithText("先逛逛").performClick()
         }

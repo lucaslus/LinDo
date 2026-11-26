@@ -247,15 +247,23 @@ class PreLaunchFullAppUiE2ETest {
             }
         }
         setContent { LinDoApp(systemAnimationsEnabled = false) }
-        waitForText("使用 LINUX DO 登录")
-        onNodeWithText("使用 LINUX DO 登录").edtClick()
+        waitForText("使用 Linuxdo 登录")
+        onNodeWithText("使用 Linuxdo 登录").edtClick()
         waitForText("测试取消网页")
         assertEquals(listOf("https://linux.do/login"), opened.toList())
         assertEquals(0, onAllNodesWithText("继续登录").edtCount())
         assertEquals(0, onAllNodesWithText("在网页中登录，完成后自动返回").edtCount())
         onNodeWithText("测试取消网页").edtClick()
         waitForTextGone("测试取消网页")
-        onNodeWithText("使用 LINUX DO 登录").edtClick()
+        onNodeWithText("先逛逛").edtClick()
+        waitForText("登录")
+        onNodeWithText("登录").edtClick()
+        waitForText("使用 Linuxdo 登录")
+        onNodeWithText("浏览器授权").edtAssertDisplayed()
+        onNodeWithText("扫码 / 口令登录").edtAssertDisplayed()
+        assertEquals(listOf("https://linux.do/login"), opened.toList())
+
+        onNodeWithText("使用 Linuxdo 登录").edtClick()
         waitForText("测试完成网页登录")
         onNodeWithText("测试完成网页登录").edtClick()
         waitForTextGone("测试完成网页登录")
@@ -287,8 +295,8 @@ class PreLaunchFullAppUiE2ETest {
         onNodeWithText("账号管理").edtScrollClick()
         waitForContentDescription("当前账号")
         onNodeWithText("添加账号").edtClick()
-        waitForText("使用 LINUX DO 登录")
-        onNodeWithText("使用 LINUX DO 登录").edtClick()
+        waitForText("使用 Linuxdo 登录")
+        onNodeWithText("使用 Linuxdo 登录").edtClick()
         waitForText("测试取消添加账号")
         assertFalse(UserApiKeyAuthManager.isAuthorized())
         onNodeWithText("测试取消添加账号").edtClick()
@@ -315,10 +323,10 @@ class PreLaunchFullAppUiE2ETest {
             true
         }
         setContent { LinDoApp(systemAnimationsEnabled = false) }
-        waitForText("使用 LINUX DO 登录")
-        onNodeWithText("使用 LINUX DO 登录").edtClick()
+        waitForText("使用 Linuxdo 登录")
+        onNodeWithText("使用 Linuxdo 登录").edtClick()
         waitUntil { opened.get() == 1 }
-        onNodeWithText("使用 LINUX DO 登录").edtClick()
+        onNodeWithText("使用 Linuxdo 登录").edtClick()
         assertEquals(1, opened.get())
         assertEquals(0, onAllNodesWithText("继续登录").edtCount())
         assertEquals(0, onAllNodesWithText("在网页中登录，完成后自动返回").edtCount())
@@ -344,7 +352,7 @@ class PreLaunchFullAppUiE2ETest {
             } else backend.handleHttp(url, method, form, headers)
         }
         setContent { LinDoApp(systemAnimationsEnabled = false) }
-        waitForText("使用 LINUX DO 登录")
+        waitForText("使用 Linuxdo 登录")
         onNodeWithText("浏览器授权").edtClick()
         waitUntil { openedExternalUrls.size == 1 }
         assertEquals(0, onAllNodesWithText("在网页中登录，完成后自动返回").edtCount())
@@ -381,7 +389,7 @@ class PreLaunchFullAppUiE2ETest {
         // Step 1 — Pre-Consent Welcome Screen
         // =========================================================================
         onNodeWithText("登录 Lindo").edtAssertDisplayed()
-        onNodeWithText("使用 LINUX DO 登录").edtAssertDisplayed()
+        onNodeWithText("使用 Linuxdo 登录").edtAssertDisplayed()
         onNodeWithText("浏览器授权").edtAssertDisplayed()
         onAllNodesWithText("粘贴 Cookie / 回调链接登录").assertCountEquals(0)
         onNodeWithText("先逛逛").edtAssertDisplayed()
@@ -447,7 +455,7 @@ class PreLaunchFullAppUiE2ETest {
             onAllNodesWithContentDescription("关闭图片预览").edtCount() == 0
         }
 
-        // Guest Gate -> Open Desktop Login Directly
+        // Choose in-app login from a context-specific guest gate.
         onNodeWithContentDescription("发布新话题").edtClick()
         waitForText("登录后发布话题")
         PlatformSessionRecovery.loginSession = {
@@ -457,7 +465,7 @@ class PreLaunchFullAppUiE2ETest {
             )
             true
         }
-        onAllNodesWithText("使用 LINUX DO 登录").onLast().edtClick()
+        onNodeWithText("使用 Linuxdo 登录").edtClick()
         assertEquals(0, onAllNodesWithText("继续登录").edtCount())
         waitUntil(timeoutMillis = 5_000L) {
             UserApiKeyAuthManager.isAuthorized() && UserApiKeyAuthManager.currentUser?.username == "lucas"
@@ -646,8 +654,10 @@ class PreLaunchFullAppUiE2ETest {
         runOnIdle { assertTrue(BackNavigationBridge.dispatchBack()) }
         waitForTextGone("搜索徽章")
 
-        // Connect external launcher
+        // Connect native sheet first, with Web Connect escape hatch
         onNodeWithText("Connect 保级与成长").edtScrollClick()
+        waitForText("网页版 Connect")
+        onNodeWithText("网页版 Connect").edtClick()
         waitUntil(timeoutMillis = 5_000L) {
             openedExternalUrls.any { it.startsWith("https://connect.linux.do") }
         }

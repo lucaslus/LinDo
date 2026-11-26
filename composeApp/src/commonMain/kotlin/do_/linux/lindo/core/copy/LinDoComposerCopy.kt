@@ -173,7 +173,7 @@ enum class LinDoComposerCopy(override val text: String) : LinDoCopyEntry {
     // 插入链接与引用帖子抽屉
     LOAD_RECENT_TOPICS_FAILED("加载最近话题失败"),
     SEARCH_FAILED_LATER("搜索失败，请稍后重试"),
-    LINK_TAB_QUOTE_POST("引用帖子"),
+    LINK_TAB_QUOTE_POST("引用社区帖子"),
     LINK_TAB_EXTERNAL_URL("外部链接"),
     SEARCH_TOPICS_PLACEHOLDER("搜索帖子"),
     NO_MATCHING_POSTS("未找到匹配的帖子"),

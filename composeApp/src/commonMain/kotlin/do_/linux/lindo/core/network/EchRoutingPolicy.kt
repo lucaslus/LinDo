@@ -47,6 +47,7 @@ data class EchRuntimeSnapshot(
     val bypassVpnBound: Boolean = false,
     val physicalIface: String = "",
     val vpnActive: Boolean = false,
+    val upstreamFakeIpDetected: Boolean = false,
     val vpnLockdownYielded: Boolean = false,
     val lastBindErrno: Int = 0,
     val echHandshakeCount: Long = 0L,
@@ -61,10 +62,35 @@ data class EchRouteDecision(
 )
 
 /**
+ * Detects RFC 2544 / Clash / Mihomo / Sing-box Fake-IP & TUN ranges (`198.18.0.0/15` and `172.19.0.0/16`)
+ * returned by OS DNS when the device sits behind an upstream transparent Fake-IP TUN/router
+ * (e.g., macOS/Windows Clash TUN hosting an Android emulator, or an OpenWrt/Mihomo bypass gateway).
+ * Mirrors Desktop's `is_fake_or_tun_ip` in `desktop-tauri/src-tauri/src/ech_desktop.rs`.
+ */
+fun isFakeOrTunIpv4Bytes(bytes: ByteArray?): Boolean {
+    if (bytes == null || bytes.size != 4) return false
+    val o0 = bytes[0].toInt() and 0xFF
+    val o1 = bytes[1].toInt() and 0xFF
+    return (o0 == 198 && (o1 == 18 || o1 == 19)) || (o0 == 172 && o1 == 19)
+}
+
+fun isFakeOrTunIpv4String(ip: String?): Boolean {
+    val parts = ip?.trim()?.split('.') ?: return false
+    if (parts.size != 4) return false
+    val o0 = parts[0].toIntOrNull() ?: return false
+    val o1 = parts[1].toIntOrNull() ?: return false
+    val o2 = parts[2].toIntOrNull() ?: return false
+    val o3 = parts[3].toIntOrNull() ?: return false
+    if (o0 !in 0..255 || o1 !in 0..255 || o2 !in 0..255 || o3 !in 0..255) return false
+    return (o0 == 198 && (o1 == 18 || o1 == 19)) || (o0 == 172 && o1 == 19)
+}
+
+/**
  * Pure routing decision for the native BoringSSL ECH gateway:
- * - `SMART_AUTO`: yields to active proxy/VPN by default, UNLESS that proxy/VPN tunnel is confirmed
- *   unreachable (e.g., local AdGuard fake-VPN or dead proxy hitting DNS poison / TCP reset), in which
- *   case it automatically falls back to ECH (binding physical NIC if permitted, or tunneling encrypted
+ * - `SMART_AUTO`: yields to active proxy/VPN (including upstream transparent Fake-IP TUN/routers
+ *   returning `198.18.0.0/15`) by default, UNLESS that proxy/VPN tunnel is confirmed unreachable
+ *   (e.g., local AdGuard fake-VPN or dead proxy hitting DNS poison / TCP reset), in which case it
+ *   automatically falls back to ECH (binding physical NIC if permitted, or tunneling encrypted
  *   DoH + TLS 1.3 ECH IP literals cleanly through the local TUN).
  */
 fun decideEchGatewayRoute(
@@ -72,7 +98,8 @@ fun decideEchGatewayRoute(
     vpnNow: Boolean,
     hasSysProxy: Boolean,
     canBindPhys: Boolean,
-    proxyTunnelUnreachable: Boolean = false
+    proxyTunnelUnreachable: Boolean = false,
+    upstreamFakeIpDetected: Boolean = false
 ): EchRouteDecision = when (mode) {
     EchRoutingMode.SYSTEM_DEFAULT -> EchRouteDecision(
         shouldRun = false,
@@ -80,7 +107,7 @@ fun decideEchGatewayRoute(
         yielded = false
     )
     EchRoutingMode.SMART_AUTO -> {
-        val hasProxyOrVpn = vpnNow || hasSysProxy
+        val hasProxyOrVpn = vpnNow || hasSysProxy || upstreamFakeIpDetected
         if (!hasProxyOrVpn) {
             EchRouteDecision(shouldRun = true, bypassVpn = false, yielded = false)
         } else if (proxyTunnelUnreachable) {
@@ -169,7 +196,10 @@ object EchRoutingPolicy {
         if (snap.mode == EchRoutingMode.SYSTEM_DEFAULT) {
             return "已关闭 · 使用系统默认网络"
         }
-        if (snap.mode == EchRoutingMode.SMART_AUTO && (snap.vpnActive || snap.vpnLockdownYielded) && !snap.active) {
+        if (snap.mode == EchRoutingMode.SMART_AUTO &&
+            (snap.vpnActive || snap.upstreamFakeIpDetected || snap.vpnLockdownYielded) &&
+            !snap.active
+        ) {
             return "检测到代理/VPN · 已自动使用代理通道（关闭代理后自动启用直连）"
         }
         if (snap.mode == EchRoutingMode.ECH_PRIORITY && snap.vpnActive && snap.vpnLockdownYielded && !snap.active) {
@@ -197,6 +227,7 @@ object EchRoutingPolicy {
             "vpnYield=${s.vpnLockdownYielded} bindErrno=${s.lastBindErrno} " +
             "iface=${s.physicalIface.ifBlank { "none" }} echCount=${s.echHandshakeCount} " +
             "lastEch=${s.lastEchAccepted}" +
+            (if (s.upstreamFakeIpDetected) " fakeIp=true" else "") +
             if (s.lastError.isNotBlank()) " err=${s.lastError}" else ""
     }
 }

@@ -6,6 +6,8 @@ import androidx.compose.runtime.setValue
 import do_.linux.lindo.core.runUiSafeStateWrite
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import java.time.Instant
+import java.time.OffsetDateTime
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.atomic.AtomicInteger
@@ -873,6 +875,16 @@ object SilentVerifyPolicy {
     fun shouldShowPill(trigger: SilentVerifyTrigger, elapsedMs: Long): Boolean =
         trigger == SilentVerifyTrigger.FOREGROUND && elapsedMs >= PILL_AFTER_MS
 
+    /**
+     * 未登录（停留在欢迎登录页）时严禁由冷启动/后台静默预检主动拉起 `安全确认` 弹窗，
+     * 避免用户尚未选择登录方式或点击「先逛逛」就被 Cloudflare 盾遮挡欢迎页；
+     * 用户主动点击登录或进入游客浏览后的前台请求会由 `FOREGROUND` 通道按需处理。
+     */
+    fun shouldAllowProactivePrewarm(
+        isAuthorized: Boolean,
+        reason: String
+    ): Boolean = isAuthorized && reason.isNotBlank()
+
     fun decide(
         trigger: SilentVerifyTrigger,
         signal: SilentProbeSignal,
@@ -925,6 +937,123 @@ object SilentVerifyPolicy {
      * 不发请求直接被短路成「需要完成站点验证」。后台请求只负责触发一次零 UI 预热。
      */
     fun backgroundChallengeArmsGlobalPause(isBackgroundRequest: Boolean): Boolean = !isBackgroundRequest
+}
+
+/**
+ * Outcome of evaluating a single-shot `forceRefresh` verification load on `/challenge`.
+ * Guarantees ZERO infinite reload loops on both clean IPs (no cookie issued) and challenged IPs.
+ */
+enum class ForceRefreshEval {
+    /** Turnstile challenge is active or page is still loading — wait for human completion. */
+    WAIT_FOR_CHALLENGE,
+    /** Origin reached without a brand-new `cf_clearance`; run ONE passive `/session/csrf.json` probe. */
+    PROBE_CSRF_ONCE,
+    /** Brand-new `cf_clearance` (not in `purgedStaleClearances`) observed + origin reached -> PASS. */
+    PASS_NEW_TICKET,
+    /** Clean IP returned non-challenge origin 404 with empty `cf_clearance` AND `/session/csrf.json` 200 OK -> PASS without looping. */
+    PASS_CLEAN_IP_NO_COOKIE,
+    /** Stale unchanged `cf_clearance` persisted in `purgedStaleClearances` -> REJECT cleanly (NEVER accept stale cookie, NEVER reload loop). */
+    REJECT_STALE_UNCHANGED,
+    /** Absent cookie AND `/session/csrf.json` failed or returned `cf-mitigated: challenge` -> stop & surface retryable error (NEVER auto-loop). */
+    REJECT_CHALLENGED_OR_FAILED
+}
+
+/**
+ * Pure single-shot `forceRefresh` policy for Settings -> `站点安全验证`.
+ *
+ * 5 anti-loop invariants:
+ * 1. Strictly manual & non-sticky: ONLY allowed when explicitly triggered by Settings manual verify in foreground
+ *    (silent, prewarm, reactive `去验证`, background, and unauthenticated Welcome prewarm ALWAYS clamp to `false`).
+ * 2. Single pre-load purge ONLY: purge `CF_PURGEABLE_COOKIE_NAMES` at most ONCE before the single `/challenge` navigation;
+ *    NEVER purge inside `onPageFinished` or polling loops; NEVER touch `_t` / `_forum_session` / `authentication_data`.
+ * 3. Clean-IP zero-loop exit: clean IP returning non-challenge 404 with empty `cf_clearance` + `/session/csrf.json` 200 OK passes cleanly.
+ * 4. Rejects stale unchanged `cf_clearance` as a new ticket rotation while preventing infinite reload loops.
+ * 5. Safe user cancel (`×`) never auto-reopens and never drops login session cookies.
+ */
+object ManualForceRefreshPolicy {
+    val CF_PURGEABLE_COOKIE_NAMES: Set<String> = setOf(
+        "cf_clearance",
+        "__cf_bm",
+        "_cfuvid",
+        "cf_chl_rc_i",
+        "cf_chl_rc_ni",
+        "cf_chl_rc_m"
+    )
+
+    fun allowForceRefresh(
+        requestedForceRefresh: Boolean,
+        presentation: VerifyPresentation,
+        isExplicitSettingsTrigger: Boolean,
+        appForeground: Boolean
+    ): Boolean = requestedForceRefresh &&
+        presentation == VerifyPresentation.MANUAL &&
+        isExplicitSettingsTrigger &&
+        appForeground
+
+    fun shouldPurgeBeforeInitialLoad(
+        forceRefresh: Boolean,
+        alreadyPurgedInModal: Boolean,
+        isVerificationFlow: Boolean
+    ): Boolean = forceRefresh && isVerificationFlow && !alreadyPurgedInModal
+
+    fun evaluateOutcome(
+        forceRefresh: Boolean,
+        freshClearance: String?,
+        purgedStaleClearances: Set<String>,
+        originReached: Boolean,
+        hasChallengeOrWidget: Boolean,
+        csrfProbeStatus: Int?,
+        csrfProbeChallenged: Boolean
+    ): ForceRefreshEval {
+        if (!forceRefresh) {
+            return if (originReached && !hasChallengeOrWidget) ForceRefreshEval.PASS_NEW_TICKET
+            else ForceRefreshEval.WAIT_FOR_CHALLENGE
+        }
+        if (hasChallengeOrWidget || !originReached) {
+            return ForceRefreshEval.WAIT_FOR_CHALLENGE
+        }
+        val cleanFresh = freshClearance?.trim().orEmpty()
+        if (cleanFresh.isNotEmpty()) {
+            return if (cleanFresh in purgedStaleClearances) {
+                ForceRefreshEval.REJECT_STALE_UNCHANGED
+            } else {
+                ForceRefreshEval.PASS_NEW_TICKET
+            }
+        }
+        if (csrfProbeStatus == null) {
+            return ForceRefreshEval.PROBE_CSRF_ONCE
+        }
+        if (csrfProbeChallenged || csrfProbeStatus != 200) {
+            return ForceRefreshEval.REJECT_CHALLENGED_OR_FAILED
+        }
+        return ForceRefreshEval.PASS_CLEAN_IP_NO_COOKIE
+    }
+
+    /**
+     * Strips any `cf_clearance` entry whose trimmed value is in [purgedStaleClearances]
+     * from a browser `Cookie` header string, while strictly preserving all other cookies
+     * (including `_t`, `_forum_session`, `authentication_data`, and any brand-new `cf_clearance`).
+     */
+    fun stripRejectedStaleClearance(
+        rawCookies: String,
+        purgedStaleClearances: Set<String>
+    ): String {
+        if (rawCookies.isBlank() || purgedStaleClearances.isEmpty()) return rawCookies
+        val kept = rawCookies.split(';').mapNotNull { part ->
+            val trimmed = part.trim()
+            if (trimmed.isEmpty()) return@mapNotNull null
+            val eqIdx = trimmed.indexOf('=')
+            if (eqIdx <= 0) return@mapNotNull trimmed
+            val name = trimmed.substring(0, eqIdx).trim()
+            val value = trimmed.substring(eqIdx + 1).trim()
+            if (name.equals("cf_clearance", ignoreCase = true) && value in purgedStaleClearances) {
+                null
+            } else {
+                trimmed
+            }
+        }
+        return kept.joinToString("; ")
+    }
 }
 
 object NetworkPolicyEngine {
@@ -1102,8 +1231,8 @@ object NetworkPolicyEngine {
     private var csrfCooldownUntilMs: Long = 0L
 
     private val waitSecondsJsonRegex = Regex("""\"(?:wait_seconds|time_left)\"\s*:\s*\"?(\d+)\"?""", RegexOption.IGNORE_CASE)
-    private val cnWaitRegex = Regex("""(?:等待|请稍候|再试|间隔)\s*(\d+)\s*(秒|分钟|分)""")
-    private val enWaitRegex = Regex("""(?:wait|try again in|retry in)\s+(\d+)\s*(seconds?|secs?|minutes?|mins?)""", RegexOption.IGNORE_CASE)
+    private val cnWaitRegex = Regex("""(?:等待|请稍候|再试|间隔)\s*(\d+)\s*(秒|分钟|分|小时|天)|(\d+)\s*(秒|分钟|分|小时|天)\s*(?:后|之后)?(?:再试|重试)""")
+    private val enWaitRegex = Regex("""(?:wait|try again in|retry in|again in)\s+(\d+)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|days?)""", RegexOption.IGNORE_CASE)
 
     fun isCsrfInCooldown(nowMs: Long = System.currentTimeMillis()): Boolean = nowMs < csrfCooldownUntilMs
 
@@ -1116,7 +1245,8 @@ object NetworkPolicyEngine {
     }
 
     fun isLogoutExemptFromSessionRecovery(method: String, url: String): Boolean =
-        method.equals("DELETE", ignoreCase = true) && url.contains("/session/", ignoreCase = true)
+        (method.equals("DELETE", ignoreCase = true) && url.contains("/session/", ignoreCase = true)) ||
+            (method.equals("POST", ignoreCase = true) && url.contains("/user-api-key/revoke", ignoreCase = true))
 
     fun shouldTriggerNearExpirySilentRefresh(
         ageSecs: Long?,
@@ -1169,7 +1299,7 @@ object NetworkPolicyEngine {
     ): Long {
         val nowSec = nowMs / 1000L
 
-        // 1. Retry-After header
+        // 1. Retry-After header (seconds, RFC-7231 HTTP-Date, or RFC 3339 timestamp)
         val ra = retryAfterHeader?.trim().orEmpty()
         if (ra.isNotEmpty()) {
             ra.toLongOrNull()?.let { secs ->
@@ -1180,6 +1310,16 @@ object NetworkPolicyEngine {
                 val diff = (targetMs - nowMs).coerceIn(1_000L, 604_800_000L)
                 return diff
             }
+            runCatching {
+                val targetMs = OffsetDateTime.parse(ra).toInstant().toEpochMilli()
+                val diff = (targetMs - nowMs).coerceIn(1_000L, 604_800_000L)
+                return diff
+            }
+            runCatching {
+                val targetMs = Instant.parse(ra).toEpochMilli()
+                val diff = (targetMs - nowMs).coerceIn(1_000L, 604_800_000L)
+                return diff
+            }
         }
 
         // 2. X-RateLimit-Reset header (Unix epoch or delta seconds)
@@ -1187,7 +1327,7 @@ object NetworkPolicyEngine {
         if (rl.isNotEmpty()) {
             rl.toLongOrNull()?.let { raw ->
                 val secs = if (raw > 1_000_000_000L) (raw - nowSec) else raw
-                if (secs > 0L) return secs.coerceIn(1L, 600L) * 1000L
+                if (secs > 0L) return secs.coerceIn(1L, 604_800L) * 1000L
             }
         }
 
@@ -1195,23 +1335,33 @@ object NetworkPolicyEngine {
         val body = bodyText.orEmpty()
         if (body.isNotBlank()) {
             waitSecondsJsonRegex.find(body)?.groupValues?.getOrNull(1)?.toLongOrNull()?.let { secs ->
-                if (secs > 0L) return secs.coerceIn(1L, 600L) * 1000L
+                if (secs > 0L) return secs.coerceIn(1L, 604_800L) * 1000L
             }
-            // 4. CN / EN text hints
+            // 4. CN / EN text hints (秒/分/小时/天, seconds/minutes/hours/days)
             cnWaitRegex.find(body)?.let { m ->
-                val n = m.groupValues[1].toLongOrNull() ?: 0L
-                val unit = m.groupValues[2]
+                val n = (m.groupValues[1].ifEmpty { m.groupValues[3] }).toLongOrNull() ?: 0L
+                val unit = m.groupValues[2].ifEmpty { m.groupValues[4] }
                 if (n > 0L) {
-                    val secs = if (unit.startsWith("分")) n * 60L else n
-                    return secs.coerceIn(1L, 600L) * 1000L
+                    val secs = when {
+                        unit == "天" -> n * 86_400L
+                        unit == "小时" -> n * 3_600L
+                        unit.startsWith("分") -> n * 60L
+                        else -> n
+                    }
+                    return secs.coerceIn(1L, 604_800L) * 1000L
                 }
             }
             enWaitRegex.find(body)?.let { m ->
                 val n = m.groupValues[1].toLongOrNull() ?: 0L
                 val unit = m.groupValues[2].lowercase()
                 if (n > 0L) {
-                    val secs = if (unit.startsWith("min")) n * 60L else n
-                    return secs.coerceIn(1L, 600L) * 1000L
+                    val secs = when {
+                        unit.startsWith("day") -> n * 86_400L
+                        unit.startsWith("hour") || unit.startsWith("hr") -> n * 3_600L
+                        unit.startsWith("min") -> n * 60L
+                        else -> n
+                    }
+                    return secs.coerceIn(1L, 604_800L) * 1000L
                 }
             }
         }

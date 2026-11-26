@@ -51,7 +51,7 @@ internal fun VerificationPageSurface(
         return
     }
 
-    val cardBg = if (palette.isDark) Color(0xFF1A1E28) else Color(0xFFFFFFFF)
+    val cardBg = if (palette.isDark) Color(0xFF1A1E28) else palette.cardSurface
     val cardBorder = if (palette.isDark) Color.White.copy(alpha = 0.08f) else palette.hairline
     val cardShape = RoundedCornerShape(16.dp)
 

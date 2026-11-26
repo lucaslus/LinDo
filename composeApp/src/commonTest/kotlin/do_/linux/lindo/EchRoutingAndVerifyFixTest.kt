@@ -11,8 +11,11 @@ import do_.linux.lindo.core.network.EchRoutingPolicy
 import do_.linux.lindo.core.network.EchRuntimeSnapshot
 import do_.linux.lindo.core.network.LinuxDoRepository
 import do_.linux.lindo.core.network.NetworkPolicyEngine
+import do_.linux.lindo.core.network.SilentVerifyPolicy
 import do_.linux.lindo.core.network.UserApiKeyAuthManager
 import do_.linux.lindo.core.network.decideEchGatewayRoute
+import do_.linux.lindo.core.network.isFakeOrTunIpv4Bytes
+import do_.linux.lindo.core.network.isFakeOrTunIpv4String
 import do_.linux.lindo.core.network.looksLikeCloudflareChallenge
 import do_.linux.lindo.core.network.webVerificationProbeScript
 import kotlinx.coroutines.test.runTest
@@ -258,6 +261,107 @@ class EchRoutingAndVerifyFixTest {
                 proxyTunnelUnreachable = true
             )
         )
+    }
+
+    @Test
+    fun smartAutoYieldsWhenUpstreamFakeIpDetectedWhileEchPriorityAndUnreachableFallbackStillWork() {
+        // 1. Fake-IP classification (RFC 2544 198.18.0.0/15 Clash/Mihomo/Sing-box TUN range)
+        assertTrue(isFakeOrTunIpv4Bytes(byteArrayOf(198.toByte(), 18, 1, 183.toByte())))
+        assertTrue(isFakeOrTunIpv4Bytes(byteArrayOf(198.toByte(), 19, 255.toByte(), 254.toByte())))
+        assertFalse(isFakeOrTunIpv4Bytes(byteArrayOf(198.toByte(), 17, 0, 1)))
+        assertFalse(isFakeOrTunIpv4Bytes(byteArrayOf(198.toByte(), 20, 0, 1)))
+        assertFalse(isFakeOrTunIpv4Bytes(byteArrayOf(104, 18, 10, 118)))
+        assertFalse(isFakeOrTunIpv4Bytes(byteArrayOf(10, 0, 2, 15)))
+        assertFalse(isFakeOrTunIpv4Bytes(null))
+        assertFalse(isFakeOrTunIpv4Bytes(byteArrayOf(198.toByte(), 18, 1)))
+
+        assertTrue(isFakeOrTunIpv4String("198.18.1.183"))
+        assertTrue(isFakeOrTunIpv4String("198.19.0.1"))
+        assertFalse(isFakeOrTunIpv4String("198.17.1.1"))
+        assertFalse(isFakeOrTunIpv4String("104.18.10.118"))
+        assertFalse(isFakeOrTunIpv4String("not-an-ip"))
+
+        // 2. SMART_AUTO yields ECH cleanly when upstream Fake-IP DNS is detected (no Android VPN/http_proxy)
+        assertEquals(
+            EchRouteDecision(shouldRun = false, bypassVpn = false, yielded = false),
+            decideEchGatewayRoute(
+                mode = EchRoutingMode.SMART_AUTO,
+                vpnNow = false,
+                hasSysProxy = false,
+                canBindPhys = false,
+                proxyTunnelUnreachable = false,
+                upstreamFakeIpDetected = true
+            )
+        )
+
+        // 3. SMART_AUTO promotes back to ECH if the upstream Fake-IP proxy tunnel is confirmed unreachable
+        assertEquals(
+            EchRouteDecision(shouldRun = true, bypassVpn = false, yielded = false),
+            decideEchGatewayRoute(
+                mode = EchRoutingMode.SMART_AUTO,
+                vpnNow = false,
+                hasSysProxy = false,
+                canBindPhys = false,
+                proxyTunnelUnreachable = true,
+                upstreamFakeIpDetected = true
+            )
+        )
+
+        // 4. Switching off Fake-IP Wi-Fi back to direct cellular re-enables ECH seamlessly under SMART_AUTO
+        assertEquals(
+            EchRouteDecision(shouldRun = true, bypassVpn = false, yielded = false),
+            decideEchGatewayRoute(
+                mode = EchRoutingMode.SMART_AUTO,
+                vpnNow = false,
+                hasSysProxy = false,
+                canBindPhys = false,
+                proxyTunnelUnreachable = false,
+                upstreamFakeIpDetected = false
+            )
+        )
+
+        // 5. ECH_PRIORITY still forces ECH even when upstream Fake-IP DNS is present
+        assertEquals(
+            EchRouteDecision(shouldRun = true, bypassVpn = false, yielded = false),
+            decideEchGatewayRoute(
+                mode = EchRoutingMode.ECH_PRIORITY,
+                vpnNow = false,
+                hasSysProxy = false,
+                canBindPhys = false,
+                proxyTunnelUnreachable = false,
+                upstreamFakeIpDetected = true
+            )
+        )
+
+        // 6. Status subtitle & diagnostic line accurately reflect upstream Fake-IP proxy yield
+        EchRoutingPolicy.publishSnapshot(
+            EchRuntimeSnapshot(
+                supported = true,
+                active = false,
+                mode = EchRoutingMode.SMART_AUTO,
+                physicalIface = "wlan0",
+                vpnActive = true,
+                upstreamFakeIpDetected = true
+            )
+        )
+        assertEquals(
+            "检测到代理/VPN · 已自动使用代理通道（关闭代理后自动启用直连）",
+            EchRoutingPolicy.statusSubtitle()
+        )
+        assertTrue(EchRoutingPolicy.toDiagnosticLine().contains("fakeIp=true"))
+    }
+
+    @Test
+    fun unauthenticatedWelcomeScreenNeverAllowsProactiveColdStartPrewarm() {
+        assertFalse(SilentVerifyPolicy.shouldAllowProactivePrewarm(isAuthorized = false, reason = "cold_start"))
+        assertFalse(SilentVerifyPolicy.shouldAllowProactivePrewarm(isAuthorized = false, reason = "resume"))
+        assertFalse(SilentVerifyPolicy.shouldAllowProactivePrewarm(isAuthorized = false, reason = "route_changed"))
+        assertFalse(SilentVerifyPolicy.shouldAllowProactivePrewarm(isAuthorized = false, reason = "background_challenge"))
+        assertFalse(SilentVerifyPolicy.shouldAllowProactivePrewarm(isAuthorized = true, reason = ""))
+
+        assertTrue(SilentVerifyPolicy.shouldAllowProactivePrewarm(isAuthorized = true, reason = "cold_start"))
+        assertTrue(SilentVerifyPolicy.shouldAllowProactivePrewarm(isAuthorized = true, reason = "resume"))
+        assertTrue(SilentVerifyPolicy.shouldAllowProactivePrewarm(isAuthorized = true, reason = "route_changed"))
     }
 
     @Test

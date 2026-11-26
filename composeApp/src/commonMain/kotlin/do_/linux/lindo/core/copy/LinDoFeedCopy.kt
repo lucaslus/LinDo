@@ -96,6 +96,7 @@ enum class LinDoFeedCopy(override val text: String) : LinDoCopyEntry {
     SEARCH_SORT_RELEVANCE("相关性"),
     SEARCH_SORT_LATEST("最新发帖"),
     SEARCH_SORT_LIKES("最多获赞"),
+    SEARCH_SORT_VIEWS("最多浏览"),
     HOT_SEARCH_KEYWORDS_TITLE("热门搜索关键词"),
     SEARCH_NO_RESULTS("未找到结果，试试其他关键词"),
     SEARCH_DISCUSSIONS_COUNT("{0} 条讨论"),

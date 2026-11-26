@@ -228,7 +228,7 @@ class DesktopPolishV0232RegressionTest {
         // Open 插入链接 dialog via toolbar contentDescription "插入链接" (or "链接")
         onEdt { onNodeWithContentDescription("链接").performClick() }
         waitUntil(timeoutMillis = 3_000L) {
-            onEdt { onAllNodesWithText("引用帖子").fetchSemanticsNodes().isNotEmpty() }
+            onEdt { onAllNodesWithText("引用社区帖子").fetchSemanticsNodes().isNotEmpty() }
         }
 
         // Type "Google" into the search box inside 插入链接

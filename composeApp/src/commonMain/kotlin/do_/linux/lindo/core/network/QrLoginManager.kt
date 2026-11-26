@@ -52,7 +52,7 @@ object QrLoginManager {
         username: String,
         expiresAtEpochMs: Long = 0L
     ): String {
-        fun enc(v: String): String = URLEncoder.encode(v, "UTF-8")
+        fun enc(v: String): String = URLEncoder.encode(v, "UTF-8").replace("+", "%20")
         return "lindo://qr-login?v=$CURRENT_VERSION" +
             "&k=${enc(apiKey)}" +
             "&o=${enc(otp)}" +

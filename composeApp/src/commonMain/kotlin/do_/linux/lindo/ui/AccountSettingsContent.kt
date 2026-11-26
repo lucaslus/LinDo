@@ -18,6 +18,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import do_.linux.lindo.core.copy.LinDoAuthCopy
 import do_.linux.lindo.core.network.AuthenticatedUserProfile
 import do_.linux.lindo.core.network.UserAccountPreferencesSnapshot
 import do_.linux.lindo.ui.components.LinDoIcons
@@ -217,8 +218,18 @@ internal fun AccountSessionContent(
         if (accounts.isNotEmpty()) {
             AccountDetailRow("添加账号", onClick = onAddAccount)
         } else {
-            AccountDetailRow(if (user != null) "重新登录" else "使用 LINUX DO 登录", onClick = onLogin)
+            AccountDetailRow(
+                if (user != null) "重新登录" else LinDoAuthCopy.IN_APP_WEB_LOGIN.text,
+                onClick = onLogin
+            )
             AccountDetailRow("浏览器授权", onClick = onBrowserAuth)
+        }
+        if (user != null && onGenerateQrLogin != null) {
+            AccountDetailRow(
+                title = "登录二维码",
+                detail = "扫码或复制口令登录其他设备",
+                onClick = onGenerateQrLogin
+            )
         }
         if (user != null) {
             Spacer(Modifier.height(24.dp))

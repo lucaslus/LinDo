@@ -311,8 +311,8 @@ internal fun resolveNotificationCornerBadgeIcon(item: UserNotificationItem): Ima
         "tada", "confetti_ball", "sparkles" -> return LinDoIcons.Sparkles
         "laughing", "joy", "open_mouth", "hugs", "distorted_face" -> return LinDoIcons.Smile
     }
-    val boostKeyword = LinDoNetworkCopy.NOTIF_BOOSTED_POST.text.take(2)
-    val isBoostLabel = item.typeLabel.contains(boostKeyword) ||
+    val isBoostLabel = item.typeLabel.contains("短评") ||
+        item.typeLabel.contains("助力") ||
         item.typeLabel.contains("boost", ignoreCase = true)
     if (isBoostLabel) return LinDoIcons.BoostRocket
 
@@ -361,8 +361,8 @@ internal fun resolveNotificationCornerBadgeIcon(item: UserNotificationItem): Ima
 }
 
 internal fun resolveNotificationIcon(item: UserNotificationItem): ImageVector {
-    val boostKeyword = LinDoNetworkCopy.NOTIF_BOOSTED_POST.text.take(2)
-    val isBoostLabel = item.typeLabel.contains(boostKeyword) ||
+    val isBoostLabel = item.typeLabel.contains("短评") ||
+        item.typeLabel.contains("助力") ||
         item.typeLabel.contains("boost", ignoreCase = true)
     return when (DiscourseNotificationKind.fromCode(item.notificationType)) {
         DiscourseNotificationKind.WATCHING_CATEGORY_OR_TAG,

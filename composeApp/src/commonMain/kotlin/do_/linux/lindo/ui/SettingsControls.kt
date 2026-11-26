@@ -176,7 +176,7 @@ internal fun SettingsAppearanceVisual(value: String, tint: Color) {
     } else {
         val shape = CircleShape
         Canvas(Modifier.size(16.dp).clip(shape).border(0.8.dp, tint.copy(alpha = 0.6f), shape)) {
-            drawRect(if (value == "dark") Color(0xFF17191E) else Color(0xFFF5F5F5))
+            drawRect(if (value == "dark") Color(0xFF17191E) else Color(0xFFF4F6F8))
             if (value == "system") drawRect(Color(0xFF17191E),
                 topLeft = androidx.compose.ui.geometry.Offset(size.width / 2, 0f),
                 size = androidx.compose.ui.geometry.Size(size.width / 2, size.height))
