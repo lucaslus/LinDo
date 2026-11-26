@@ -39,8 +39,8 @@ export const metadata: Metadata = {
 
 export const viewport: Viewport = {
   themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#ffffff" },
-    { media: "(prefers-color-scheme: dark)", color: "#101217" },
+    { media: "(prefers-color-scheme: light)", color: "#f4f6f8" },
+    { media: "(prefers-color-scheme: dark)", color: "#0f1115" },
   ],
 };
 
@@ -48,8 +48,8 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="zh-CN" dir="ltr" suppressHydrationWarning className={inter.variable}>
       <Head
-        color={{ hue: { light: 33, dark: 45 }, saturation: { light: 100, dark: 95 }, lightness: { light: 30, dark: 64 } }}
-        backgroundColor={{ light: "#ffffff", dark: "#101217" }}
+        color={{ hue: { light: 26, dark: 38 }, saturation: { light: 88, dark: 92 }, lightness: { light: 42, dark: 62 } }}
+        backgroundColor={{ light: "#f4f6f8", dark: "#0f1115" }}
       />
       <body>
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>

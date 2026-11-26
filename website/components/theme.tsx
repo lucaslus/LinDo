@@ -20,7 +20,7 @@ export function AccentProvider({ children }: { children: ReactNode }) {
 type Origin = { x: number; y: number } | null;
 
 /**
- * 深浅色主题切换：官网与所有真机截图同时切换。
+ * 官网深浅色主题切换。
  * 支持 View Transitions 时从点击位置圆形展开。
  */
 export function useThemeSwitch() {
@@ -48,7 +48,7 @@ export function useThemeSwitch() {
 
       const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
       const doc = document as Document & {
-        startViewTransition?: (cb: () => void) => { ready: Promise<void>; finished?: Promise<void> };
+        startViewTransition?: (cb: () => void) => { ready: Promise<void> };
       };
 
       if (!doc.startViewTransition || reduce) {
@@ -63,7 +63,6 @@ export function useThemeSwitch() {
       const x = origin?.x ?? window.innerWidth - 40;
       const y = origin?.y ?? 32;
       const r = Math.hypot(Math.max(x, window.innerWidth - x), Math.max(y, window.innerHeight - y));
-      root.classList.add("vt-active");
       const vt = doc.startViewTransition(apply);
       vt.ready
         .then(() => {
@@ -73,7 +72,6 @@ export function useThemeSwitch() {
           );
         })
         .catch(() => {});
-      Promise.resolve(vt.finished).finally(() => root.classList.remove("vt-active"));
     },
     [resolvedTheme, setTheme],
   );

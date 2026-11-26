@@ -68,37 +68,6 @@ export function LingduHead({
   );
 }
 
-/** 安全与零隐私代码审计认证徽章（浅/深色自适应） */
-export function SecuritySeal({ size = 88, className }: { size?: number; className?: string }) {
-  return (
-    <span
-      className={clsx("relative inline-block shrink-0 select-none", className)}
-      style={{ width: size, height: size }}
-      role="img"
-      aria-label="零隐私收集与开源代码安全审计认证标志"
-    >
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img
-        src="/brand/security-seal.svg"
-        alt=""
-        width={size}
-        height={size}
-        className="absolute inset-0 h-full w-full transition-opacity duration-300 opacity-100 dark:opacity-0"
-        draggable={false}
-      />
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img
-        src="/brand/security-seal-dark.svg"
-        alt=""
-        width={size}
-        height={size}
-        className="absolute inset-0 h-full w-full transition-opacity duration-300 opacity-0 dark:opacity-100"
-        draggable={false}
-      />
-    </span>
-  );
-}
-
 export function Wordmark({ size = 20, className }: { size?: number; className?: string }) {
   return (
     <span className={clsx("font-semibold tracking-tight", className)} style={{ fontSize: size, lineHeight: 1 }}>

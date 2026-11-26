@@ -4,21 +4,13 @@ title: 简介
 
 # LinDo
 
-LinDo 是 [LINUX DO](https://linux.do) 的第三方客户端，有 Android、macOS 和 Windows 三个版本。
-
-## 设计上的取舍
-
-首页和帖子都是连续的列表，用字号、留白和细分隔线区分层级，没有给每一行套卡片。界面大部分是中性色，主题色只用在选中项、主要按钮和未读标记上。
-
-手机、折叠屏和电脑用同一套界面。屏幕变宽时，列表和正文会并排显示。
-
-零度娘只出现在登录页、关于页，以及空内容和网络异常这几种状态里。
+LinDo 是 [LINUX DO](https://linux.do) 的第三方客户端，支持 Android、macOS、Windows 和 Linux。
 
 ## 技术栈
 
 | 平台 | 实现 |
 | --- | --- |
 | Android | Kotlin Multiplatform + Compose Multiplatform |
-| macOS / Windows | Tauri 2 + React |
+| macOS / Windows / Linux | Tauri 2 + Rust + React |
 
 源码在 [GitHub](https://github.com/lucaslus/LinDo)。

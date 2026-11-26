@@ -14,7 +14,7 @@ import { Steps, Callout } from "nextra/components";
 
 ### 下载 APK
 
-在官网下载区点击 **下载 APK**（或在电脑端点击 **手机扫码**），获取最新 `.apk` 安装包。
+在官网下载区点击 **下载 APK**（或在电脑端点击 **手机扫码**），获取最新 `.apk` 安装包。正式发布的 APK 面向 arm64，最低系统版本为 Android 7.0。
 
 ### 允许安装
 
@@ -22,7 +22,7 @@ import { Steps, Callout } from "nextra/components";
 
 ### 登录
 
-打开 LinDo，选择“使用 LINUX DO 登录”，或通过访客模式直接浏览公开话题。
+打开 LinDo 后，可选择应用内网页登录、浏览器授权或扫码 / 口令登录。点「先逛逛」可以浏览公开话题。
 
 </Steps>
 
@@ -37,3 +37,15 @@ import { Steps, Callout } from "nextra/components";
 ## Windows
 
 支持 Windows 10 / 11（64 位）。普通用户推荐下载 **安装程序（`-setup.exe`）** 按向导完成安装；企业或批量部署环境也可选择 **MSI 安装包（`.msi`）**。
+
+
+## Linux
+
+GitHub Releases 提供 x86_64 安装包。Debian / Ubuntu 系选择 `.deb`，Fedora 等 RPM 系选择 `.rpm`。也可下载 `.AppImage`，赋予执行权限后运行。
+
+```sh
+chmod +x Lindo-*-linux-x86_64.AppImage
+./Lindo-*-linux-x86_64.AppImage
+```
+
+Arch Linux / Omarchy 可从源码构建。克隆仓库后进入 `packaging/arch`，以普通用户运行 `makepkg -si`。[打包配置](https://github.com/lucaslus/LinDo/tree/main/packaging/arch)

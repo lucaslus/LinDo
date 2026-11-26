@@ -1,79 +1,66 @@
-# LinDo
-
-面向 [LINUX DO](https://linux.do) 社区打造的第三方开源跨平台客户端，提供 **Android 原生版**（Kotlin + Compose Multiplatform）与 **macOS / Windows / Linux 原生桌面版**（Tauri 2 + Rust + React）。
-
-- **官方网站与文档**：[https://lindo.app](https://lindo.app)（文档见 `/docs`，安全说明见 `/docs/security`）
-- **安装包下载**：[GitHub Releases](https://github.com/lucaslus/LinDo/releases/latest)（支持 Android `.apk`、macOS Apple Silicon / Intel `.dmg`、Windows `-setup.exe` / `.msi`、Linux `AppImage` / `.deb` / `.rpm`）
-
----
-
-## 📦 下载安装
-
-<!-- LINDO_DOWNLOAD_MATRIX_START -->
-[![Latest Release](https://img.shields.io/github/v/release/lucaslus/LinDo?logo=github&label=latest&color=F59E0B)](https://github.com/lucaslus/LinDo/releases/latest) [![Total Downloads](https://img.shields.io/github/downloads/lucaslus/LinDo/total?logo=github&label=downloads&color=2ea043)](https://github.com/lucaslus/LinDo/releases)
-
-当前最新正式版：**`v1.1.5`**（点击对应系统徽章即可直接下载安装包，完整校验文件见 [GitHub Releases](https://github.com/lucaslus/LinDo/releases/latest)）：
-
-| OS | Download |
-| :--- | :--- |
-| **Android** | [![APK-ARMv8](https://img.shields.io/badge/APK-ARMv8-2ea043?logo=android&logoColor=white)](https://github.com/lucaslus/LinDo/releases/download/v1.1.5/lindo-1.1.5-build105.apk) |
-| **Windows** | [![Setup-x64](https://img.shields.io/badge/Setup-x64-0078D4)](https://github.com/lucaslus/LinDo/releases/download/v1.1.5/Lindo-1.1.5-windows-x64-setup.exe)<br/>[![MSI-x64](https://img.shields.io/badge/MSI-x64-4B9CD3)](https://github.com/lucaslus/LinDo/releases/download/v1.1.5/Lindo-1.1.5-windows-x64.msi) |
-| **macOS** | [![DMG-Apple Silicon](https://img.shields.io/badge/DMG-Apple_Silicon-181717?logo=apple&logoColor=white)](https://github.com/lucaslus/LinDo/releases/download/v1.1.5/Lindo-1.1.5-macos-arm64.dmg)<br/>[![DMG-Intel X64](https://img.shields.io/badge/DMG-Intel_X64-0071C5?logo=apple&logoColor=white)](https://github.com/lucaslus/LinDo/releases/download/v1.1.5/Lindo-1.1.5-macos-x64.dmg) |
-| **Linux** | [![AppImage-x64](https://img.shields.io/badge/AppImage-x64-D94625?logo=linux&logoColor=white)](https://github.com/lucaslus/LinDo/releases/download/v1.1.5/Lindo-1.1.5-linux-x86_64.AppImage)<br/>[![DebPackage-x64](https://img.shields.io/badge/DebPackage-x64-E95420?logo=debian&logoColor=white)](https://github.com/lucaslus/LinDo/releases/download/v1.1.5/Lindo-1.1.5-linux-amd64.deb)<br/>[![RpmPackage-x64](https://img.shields.io/badge/RpmPackage-x64-D97706?logo=redhat&logoColor=white)](https://github.com/lucaslus/LinDo/releases/download/v1.1.5/Lindo-1.1.5-linux-x86_64.rpm) |
-<!-- LINDO_DOWNLOAD_MATRIX_END -->
-
-> Arch Linux / Omarchy 用户也可直接使用仓库内的 [`packaging/arch/PKGBUILD`](packaging/arch/PKGBUILD) 本地打包安装。
-
----
-
-## 🛡️ 安全、隐私与代码审计声明
-
-<p align="left">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="website/public/brand/security-seal-dark.svg" />
-    <img src="website/public/brand/security-seal.svg" width="84" height="84" alt="LinDo 零隐私收集与开源代码安全审计徽章" />
-  </picture>
+<p align="center">
+  <img src="website/public/icon-192.png" width="80" height="80" alt="LinDo 图标" />
+</p>
+<h1 align="center">LinDo</h1>
+<p align="center">LINUX DO 第三方客户端，支持 Android、macOS、Windows 和 Linux。</p>
+<p align="center">
+  <a href="https://lindo.app/">官网</a> ·
+  <a href="#下载安装">下载安装</a> ·
+  <a href="https://lindo.app/docs">使用文档</a> ·
+  <a href="https://github.com/lucaslus/LinDo/releases">版本记录</a>
+</p>
+<p align="center">
+  <a href="https://lindo.app/#screens"><img src="website/public/shots/cover-v115.webp" alt="LinDo 的 macOS、Android 和折叠屏阅读界面" width="1120" /></a>
 </p>
 
-作为第三方社区客户端，我们将**完全安全、零隐私收集、100% 开源可审计**视为最基本的底线，欢迎任何社区成员随时逐行检视源码：
+## 下载安装
 
-1. **零隐私收集 · 零自建后端 · 零遥测埋点**
-   - 项目**不设任何自建中转服务器**，**未接入任何第三方统计、埋点、广告或崩溃上报 SDK**（无 Sentry、Firebase、Google Analytics、友盟等）。
-   - 账号登录凭证（Cookie / 本机生成的 Discourse `User-Api-Key`）、多账号会话、未发草稿、浏览进度与本地诊断日志 **100% 仅存储在用户本机系统沙盒目录**，绝不向任何外部服务上传。
-2. **严格的出站通信边界**
-   - 客户端网络请求仅直连 `linux.do` 官方域名及官方静态/头像 CDN（`cdn.ldstatic.com`、`avatars.discourse-cdn.com`）；
-   - 版本更新检查仅请求公开接口 `api.github.com/repos/lucaslus/LinDo/releases/latest`；
-   - Android 端仅在系统 DNS 解析失败或被污染时，通过标准 HTTPS DoH（`223.5.5.5` / `1.12.12.12`）解析官方域名 IP。
-3. **专项代码安全审计与客户端防护**
-   - **防钓鱼外链分级拦截**：打开帖子外链前进行域名二次确认，自动识别并拦截 **IDN 同形异义词（`xn--`）** 与 **文本伪装钓鱼链接**（如文字显示可信网址但实际指向陌生域名）。
-   - **受控 WebView 白名单隔离**：应用内验证与登录 WebView 严格校验导航域名，拒绝越权跳转指令；本地诊断日志自动对敏感令牌与 Cookie 脱敏。
-4. **公开透明的构建流水线与哈希校验**
-   - 所有正式安装包均由 GitHub Actions 官方托管 Runner 通过 [`.github/workflows/release.yml`](.github/workflows/release.yml) 从公开源码自动编译打包，并随附 `SHA256SUMS.txt` 校验清单，任何人均可核对安装包 SHA-256 指纹或直接在本地从源码构建。
+<!-- LINDO_DOWNLOAD_MATRIX_START -->
+当前正式版 **[v1.1.5](https://github.com/lucaslus/LinDo/releases/tag/v1.1.5)**。校验清单 `SHA256SUMS.txt` 随版本发布。
 
----
+| 平台 | 安装包 |
+| :--- | :--- |
+| **Android** | [APK · arm64](https://github.com/lucaslus/LinDo/releases/download/v1.1.5/lindo-1.1.5-build105.apk) |
+| **Windows** | [安装程序 · x64](https://github.com/lucaslus/LinDo/releases/download/v1.1.5/Lindo-1.1.5-windows-x64-setup.exe)　·　[MSI · x64](https://github.com/lucaslus/LinDo/releases/download/v1.1.5/Lindo-1.1.5-windows-x64.msi) |
+| **macOS** | [Apple Silicon DMG](https://github.com/lucaslus/LinDo/releases/download/v1.1.5/Lindo-1.1.5-macos-arm64.dmg)　·　[Intel DMG](https://github.com/lucaslus/LinDo/releases/download/v1.1.5/Lindo-1.1.5-macos-x64.dmg) |
+| **Linux** | [AppImage · x86_64](https://github.com/lucaslus/LinDo/releases/download/v1.1.5/Lindo-1.1.5-linux-x86_64.AppImage)　·　[DEB · x86_64](https://github.com/lucaslus/LinDo/releases/download/v1.1.5/Lindo-1.1.5-linux-amd64.deb)　·　[RPM · x86_64](https://github.com/lucaslus/LinDo/releases/download/v1.1.5/Lindo-1.1.5-linux-x86_64.rpm) |
+<!-- LINDO_DOWNLOAD_MATRIX_END -->
 
-## 🤝 完全开源共建与长期路线图
+Arch Linux / Omarchy 可用仓库内的 [`PKGBUILD`](packaging/arch/PKGBUILD) 本地构建。[分平台安装说明](https://lindo.app/docs/install)
 
-LinDo **100% 开源**，非常欢迎各位佬友参与共建：
+## 功能
 
-- **欢迎代码安全审计与优化建议**：无论你是想对网络/存储链路进行独立代码安全审计，还是遇到了体验痛点、有性能调优想法或新功能点子，都非常欢迎直接提交 [Issues](https://github.com/lucaslus/LinDo/issues) 或发起 Pull Request。
-- **长期持续更新 + 纯本地特色周边功能**：项目将持续跟进 LINUX DO 社区体验做长期维护迭代。在此基础上，我们还会在**严格坚持「纯本地运行、零数据上传」**的前提下，陆续加入更多好玩实用的**特色本地周边功能**（例如桌面端零度娘本地陪伴挂件与状态提醒、本地离线帖子收藏归档与全文检索、本地阅读习惯看板与快捷效率工具等）。
+- Android 界面使用 Kotlin 与 Compose。v1.1.5 的 arm64 APK 为 **17.2 MiB**，Apple Silicon 的 DMG 为 **11.6 MiB**，桌面端使用 Tauri 2、Rust 和 React。[发布资产](https://github.com/lucaslus/LinDo/releases/tag/v1.1.5)
+- 折叠屏外屏用单栏。展开后列表和正文默认各占一半，可以拖动分隔线，也可以切回单栏。
+- 切网后尝试恢复加载，站点验证可在应用内完成。v1.1.5 修复了 Linux 在代理或 TUN 模式下的验证循环。[版本说明](https://github.com/lucaslus/LinDo/releases/tag/v1.1.5)
+- 已登录的设备可以生成登录二维码或口令。Android 支持扫码，桌面端可以识别二维码截图。
+- Android 可更换启动图标。零度娘有多种表情，也可选 LINUX DO 标志，背景支持跟随系统深浅色。
+- 阅读进度和草稿保存在本机。回复可跳到引用楼层，编辑器支持 Markdown 预览。
+- Connect 显示官方周期指标。周期数据缺失时会标注当前显示的是账户累计数据。
 
----
+<p align="center">
+  <a href="website/public/shots/pixel9-fold-cover-v115.webp"><img src="website/public/shots/pixel9-fold-cover-v115.webp" height="285" alt="Pixel 9 Pro Fold 模拟器闭合外屏，单栏阅读社区置顶帖" /></a>
+  <a href="website/public/shots/pixel9-fold-open-v115.webp"><img src="website/public/shots/pixel9-fold-open-v115.webp" height="285" alt="同一模拟器展开内屏，LinDo 左栏为列表，右栏阅读同一篇社区置顶帖" /></a>
+</p>
 
-## 💻 平台架构概览
+## 安全与构建
 
-| 目录 | 平台与职责 | 技术栈 |
-| --- | --- | --- |
-| [`composeApp/`](composeApp) | Android 原生客户端（及共享业务/测试集） | Kotlin Multiplatform + Compose Multiplatform |
-| [`desktop-tauri/`](desktop-tauri) | macOS（Apple Silicon / Intel）、Windows 与 Linux 桌面客户端 | Tauri 2 + Rust + React + TypeScript |
-| [`website/`](website) | 官方网站与在线文档站 | Next.js 16 + Nextra 4 + Tailwind CSS v4 |
+LinDo 没有自建中转后端或遥测 SDK。社区请求与 LINUX DO 服务通信，登录凭证、草稿、阅读进度和诊断日志保存在设备上。安装包由公开的 GitHub Actions 流水线构建，每个正式发布附带 `SHA256SUMS.txt`。[网络与隐私说明](https://lindo.app/docs/security) · [发布工作流](.github/workflows/release.yml)
 
----
+## 参与开发
 
-## 🛠️ 开发者构建与调试指南
+欢迎提交复现步骤、体验建议和 Pull Request。[GitHub Issues](https://github.com/lucaslus/LinDo/issues)
 
-### 1. 桌面端（Tauri 2：macOS / Windows / Linux）
+| 目录 | 职责 |
+| --- | --- |
+| [`composeApp/`](composeApp) | Android 客户端、共享业务代码与测试 |
+| [`desktop-tauri/`](desktop-tauri) | macOS、Windows、Linux 桌面客户端 |
+| [`website/`](website) | 官网和文档 |
+
+<details>
+<summary>展开本地构建与调试说明</summary>
+
+### 桌面端（Tauri 2：macOS / Windows / Linux）
 
 需要 Node.js 22+、pnpm 10+ 与 Rust stable 工具链：
 
@@ -84,12 +71,12 @@ pnpm tauri dev      # 启动本地开发窗口
 pnpm tauri build    # 构建对应平台的生产安装包
 ```
 
-### 2. Android 客户端本地构建
+### Android 本地构建
 
-需要 JDK 21、Android SDK 和已启动的 Android 模拟器或真机。Gradle daemon 固定使用 JDK 21；macOS 可选择本机安装的 JDK：
+需要 JDK 21、Android SDK 和已启动的 Android 模拟器或真机。Gradle daemon 固定使用 JDK 21；下例使用 Android Studio 自带的 JDK 21。也可将 `JAVA_HOME` 指向已安装的 JDK 21。
 
 ```sh
-export JAVA_HOME="$(/usr/libexec/java_home -v 21)"
+export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
 export ANDROID_HOME="$HOME/Library/Android/sdk"
 export PATH="$ANDROID_HOME/platform-tools:$PATH"
 ./gradlew :composeApp:assembleDebug
@@ -98,7 +85,7 @@ export PATH="$ANDROID_HOME/platform-tools:$PATH"
 
 Debug APK：`composeApp/build/outputs/apk/debug/composeApp-debug.apk`。历史审查记录见 [`docs/review-2026-11-06.md`](docs/review-2026-11-06.md)。
 
-### 3. Android 自动预览
+### Android 自动预览
 
 ```sh
 python3 scripts/android-dev.py --device emulator-5554
@@ -108,7 +95,7 @@ python3 scripts/android-dev.py --device emulator-5554
 
 这是自动重新部署。Android Studio 的 [Live Edit](https://developer.android.com/develop/ui/compose/tooling/iterative-development) 可用于支持范围内的 Compose 函数体即时预览；[Compose Hot Reload](https://kotlinlang.org/docs/multiplatform/compose-hot-reload.html) 面向桌面 JVM。
 
-### 4. 零度娘品牌与通用状态
+### 零度娘品牌与通用状态
 
 最终资产与来源见 [`design/brand-v3`](design/brand-v3/README.md)。App 使用真实 SVG 路径导出的 VectorDrawable，透明底人物；加载与刷新使用 Compose 图层轻摇摆，无 Lottie 依赖。网络异常、空内容、完成、分页结束、发送与上传等状态共用品牌组件。
 
@@ -118,7 +105,7 @@ python3 scripts/generate-brand-vectors.py
 
 WebView 使用全屏网页与系统返回键，网站自身的登录、验证及加载页面由网站呈现。
 
-### 5. 自动化 UI 回归
+### 自动化 UI 回归
 
 已安装 Debug APK 后运行，无额外 Python 依赖：
 
@@ -137,12 +124,6 @@ adb shell am start -n do_.linux.lindo/.MainActivity --ez lindo.brand_preview tru
 
 返回正常 App：`adb shell am start -S -n do_.linux.lindo/.MainActivity`。预览 Intent 仅在 debuggable 应用生效。
 
----
+</details>
 
-## 📋 数据与验证边界
-
-Connect 展示取得的官方周期指标；获取失败时明确标为账户累计数据，不推算保级资格。动态头像使用 CDN 原件，尊重动效开关及窗口焦点。正文支持常用富文本格式，投票/公式等互动块提供明确的原网页入口。详细发现、修复与测试证据见 [`docs/review-2026-11-06.md`](docs/review-2026-11-06.md)。
-
-Cookie、令牌及调试导入文件不得加入仓库。
-
-徽章内置矢量由 LinuxDo 提供的 Font Awesome Free SVG 转换而来。图标 © Fonticons, Inc.，采用 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) 许可。[Font Awesome Free 许可](https://fontawesome.com/license/free)
+截图中的帖子是[《请不要把互联网上的戾气带来这里！》](https://linux.do/t/topic/482293)。徽章内置矢量由 LINUX DO 提供的 Font Awesome Free SVG 转换而来。图标 © Fonticons, Inc.，采用 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) 许可。[Font Awesome Free 许可](https://fontawesome.com/license/free)

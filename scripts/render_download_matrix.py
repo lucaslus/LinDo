@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render OS download badge matrix for GitHub Release notes, latest.json, and README.md."""
+"""Render downloads for GitHub Release notes, latest.json, and README.md."""
 
 from __future__ import annotations
 
@@ -47,49 +47,50 @@ def resolve_asset_urls(
     }
 
 
-def render_os_table(urls: dict[str, str]) -> str:
+def render_os_table(urls: dict[str, str], *, badges: bool = True) -> str:
     spec_rows = [
         (
             "Android",
             [
-                ("apk_arm64", "APK-ARMv8", "https://img.shields.io/badge/APK-ARMv8-2ea043?logo=android&logoColor=white"),
+                ("apk_arm64", "APK · arm64", "https://img.shields.io/badge/APK-ARMv8-2ea043?logo=android&logoColor=white"),
             ],
         ),
         (
             "Windows",
             [
-                ("win_setup", "Setup-x64", "https://img.shields.io/badge/Setup-x64-0078D4"),
-                ("win_msi", "MSI-x64", "https://img.shields.io/badge/MSI-x64-4B9CD3"),
+                ("win_setup", "安装程序 · x64", "https://img.shields.io/badge/Setup-x64-0078D4"),
+                ("win_msi", "MSI · x64", "https://img.shields.io/badge/MSI-x64-4B9CD3"),
             ],
         ),
         (
             "macOS",
             [
-                ("mac_arm64", "DMG-Apple Silicon", "https://img.shields.io/badge/DMG-Apple_Silicon-181717?logo=apple&logoColor=white"),
-                ("mac_x64", "DMG-Intel X64", "https://img.shields.io/badge/DMG-Intel_X64-0071C5?logo=apple&logoColor=white"),
+                ("mac_arm64", "Apple Silicon DMG", "https://img.shields.io/badge/DMG-Apple_Silicon-181717?logo=apple&logoColor=white"),
+                ("mac_x64", "Intel DMG", "https://img.shields.io/badge/DMG-Intel_X64-0071C5?logo=apple&logoColor=white"),
             ],
         ),
         (
             "Linux",
             [
-                ("linux_appimage", "AppImage-x64", "https://img.shields.io/badge/AppImage-x64-D94625?logo=linux&logoColor=white"),
-                ("linux_deb", "DebPackage-x64", "https://img.shields.io/badge/DebPackage-x64-E95420?logo=debian&logoColor=white"),
-                ("linux_rpm", "RpmPackage-x64", "https://img.shields.io/badge/RpmPackage-x64-D97706?logo=redhat&logoColor=white"),
+                ("linux_appimage", "AppImage · x86_64", "https://img.shields.io/badge/AppImage-x64-D94625?logo=linux&logoColor=white"),
+                ("linux_deb", "DEB · x86_64", "https://img.shields.io/badge/DebPackage-x64-E95420?logo=debian&logoColor=white"),
+                ("linux_rpm", "RPM · x86_64", "https://img.shields.io/badge/RpmPackage-x64-D97706?logo=redhat&logoColor=white"),
             ],
         ),
     ]
     lines = [
-        "| OS | Download |",
+        "| OS | Download |" if badges else "| 平台 | 安装包 |",
         "| :--- | :--- |",
     ]
     for os_name, items in spec_rows:
-        badges = [
-            f"[![{alt}]({badge_img})]({urls[key]})"
-            for key, alt, badge_img in items
+        links = [
+            f"[![{label}]({badge_img})]({urls[key]})" if badges else f"[{label}]({urls[key]})"
+            for key, label, badge_img in items
             if urls.get(key)
         ]
-        if badges:
-            lines.append(f"| **{os_name}** | {'<br/>'.join(badges)} |")
+        if links:
+            separator = '<br/>' if badges else '　·　'
+            lines.append(f"| **{os_name}** | {separator.join(links)} |")
     return "\n".join(lines)
 
 
@@ -139,20 +140,12 @@ def build_release_markdown(
 
 
 def build_readme_block(repo: str, tag: str, urls: dict[str, str]) -> str:
-    badges = (
-        f"[![Latest Release](https://img.shields.io/github/v/release/{repo}?logo=github&label=latest&color=F59E0B)]"
-        f"(https://github.com/{repo}/releases/latest) "
-        f"[![Total Downloads](https://img.shields.io/github/downloads/{repo}/total?logo=github&label=downloads&color=2ea043)]"
-        f"(https://github.com/{repo}/releases)"
-    )
     return "\n".join(
         [
             START_MARKER,
-            badges,
+            f"当前正式版 **[{tag}](https://github.com/{repo}/releases/tag/{tag})**。校验清单 `SHA256SUMS.txt` 随版本发布。",
             "",
-            f"当前最新正式版：**`{tag}`**（点击对应系统徽章即可直接下载安装包，完整校验文件见 [GitHub Releases](https://github.com/{repo}/releases/latest)）：",
-            "",
-            render_os_table(urls),
+            render_os_table(urls, badges=False),
             END_MARKER,
         ]
     )

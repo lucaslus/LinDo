@@ -6,10 +6,12 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 @theme {
-  --font-sans: var(--font-inter), "PingFang SC", "HarmonyOS Sans SC", "MiSans", "Hiragino Sans GB",
-    "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+  --font-sans: var(--font-inter), -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC",
+    "HarmonyOS Sans SC", "MiSans", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei",
+    system-ui, sans-serif;
   --font-mono: "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Monaco, Consolas, monospace;
   --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
   --color-subtle: var(--subtle);
   --color-tonal: var(--tonal);
   --color-ink-1: var(--ink-1);
@@ -21,54 +23,131 @@
   --color-logo-do: var(--logo-do);
 }
 
-/* ───────────── 品牌金主题色（与 App BrandThemeOption 对齐） ───────────── */
+/* ───────────── 统一 LinDo 设计色阶（柔雾瓷白 Proposal A · 深曜暗色 · 细腻磨砂质感） ───────────── */
 :root {
-  --a-swatch: #f59e0b;
-  --a-l-accent: #936000;
-  --a-l-chip-bg: #fef3c7;
-  --a-l-chip-text: #b45309;
-  --a-l-pub-bg: #f59e0b;
-  --a-l-pub-fg: #111827;
-  --a-d-chip-bg: #3f2e05;
-  --a-d-chip-text: #fcd34d;
-
-  /* 浅色语义 palette（buildLinDoPalette） */
   color-scheme: light;
-  --canvas: #ffffff;
-  --subtle: #f3f4f6;
-  --tonal: #eef1f5;
-  --nav-surface: rgba(255, 255, 255, 0.94);
-  --ink-1: #111827;
-  --ink-2: #525866;
-  --ink-3: #6b7280;
-  --hairline: #ebeef2;
-  --logo-do: #f59e0b;
-  --accent: var(--a-l-accent);
-  --chip-bg: var(--a-l-chip-bg);
-  --chip-text: var(--a-l-chip-text);
-  --publish-bg: var(--a-l-pub-bg);
-  --publish-fg: var(--a-l-pub-fg);
-  --hover: rgba(17, 24, 39, 0.045);
-  --stage-glow: color-mix(in srgb, var(--a-swatch) 14%, transparent);
+
+  /* Cool-neutral Soft Porcelain surfaces (1:1 aligned with Proposal A, zero yellow/beige cast) */
+  --canvas: #f4f6f8;
+  --surface: #fafbfd;
+  --subtle: #eceef2;
+  --tonal: #e1e5ec;
+  --nav-surface: rgba(244, 246, 248, 0.74);
+
+  /* Crisp neutral-slate ink ladder (WCAG AA/AAA) */
+  --ink-1: #161a22;
+  --ink-2: #4b5464;
+  --ink-3: #5f6776;
+
+  /* Architectural hairlines */
+  --hairline: rgba(15, 23, 42, 0.085);
+  --hairline-strong: rgba(15, 23, 42, 0.15);
+
+  /* Signature LinDo Warm Orange accents (restrained & WCAG AA) */
+  --logo-do: #e07b08;
+  --accent: #c2550a;
+  --accent-hover: #9a3f06;
+  --accent-soft: rgba(234, 106, 14, 0.09);
+  --accent-border: rgba(224, 98, 12, 0.34);
+  --accent-dot: #ea6a0e;
+  --chip-bg: #fff3e6;
+  --chip-text: #b84d08;
+
+  /* Primary CTA: obsidian authority on porcelain */
+  --cta-bg: #151922;
+  --cta-bg-hover: #222938;
+  --cta-fg: #f8fafc;
+  --publish-bg: var(--cta-bg);
+  --publish-fg: var(--cta-fg);
+
+  /* Translucent Liquid Glass tokens (strictly for top bar & hero secondary pill) */
+  --glass-pill-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.8) 0%, rgba(242, 245, 250, 0.62) 100%);
+  --glass-bg-strong: rgba(255, 255, 255, 0.88);
+  --glass-specular-top: rgba(255, 255, 255, 0.94);
+  --glass-shadow:
+    0 1px 0 0 rgba(255, 255, 255, 0.92) inset,
+    0 0 0 1px rgba(15, 23, 42, 0.09),
+    0 8px 22px -12px rgba(15, 23, 42, 0.12);
+
+  /* Matte micro-grain frosted card tokens (Light: tactile ceramic porcelain, zero gloss) */
+  --matte-bg: rgba(250, 251, 253, 0.92);
+  --matte-bg-hover: rgba(252, 253, 255, 0.98);
+  --matte-border: rgba(15, 23, 42, 0.078);
+  --matte-border-hover: rgba(15, 23, 42, 0.14);
+  --matte-shadow: 0 2px 10px -4px rgba(15, 23, 42, 0.045);
+  --matte-grain-opacity: 0.032;
+  --matte-grain-blend: multiply;
+
+  /* Screenshot crisp edge & studio shadow (no thick outer frame) */
+  --shot-shadow:
+    0 0 0 1px rgba(15, 23, 42, 0.1),
+    0 24px 64px -20px rgba(15, 23, 42, 0.18),
+    0 6px 20px -8px rgba(15, 23, 42, 0.08);
+
+  --hover: rgba(15, 23, 42, 0.048);
 }
 
 html.dark {
   color-scheme: dark;
-  --canvas: #101217;
-  --subtle: #181b22;
-  --tonal: #212631;
-  --nav-surface: rgba(17, 20, 27, 0.94);
-  --ink-1: #f3f4f6;
-  --ink-2: #a1a8b5;
-  --ink-3: #7d8594;
-  --hairline: #1e222b;
-  --accent: var(--a-d-chip-text);
-  --chip-bg: var(--a-d-chip-bg);
-  --chip-text: var(--a-d-chip-text);
-  --publish-bg: var(--a-d-chip-text);
-  --publish-fg: #111827;
-  --hover: rgba(243, 244, 246, 0.05);
-  --stage-glow: color-mix(in srgb, var(--a-swatch) 18%, transparent);
+
+  /* Deep refined obsidian surfaces aligned with LinDo native dark mode */
+  --canvas: #0f1115;
+  --surface: #151820;
+  --subtle: #1b1f29;
+  --tonal: #242a38;
+  --nav-surface: rgba(12, 14, 19, 0.72);
+
+  /* Crisp glare-free cool off-white & slate ink */
+  --ink-1: #edf1f7;
+  --ink-2: #9ca5b4;
+  --ink-3: #727c8d;
+
+  /* Crisp Retina dark hairlines */
+  --hairline: rgba(255, 255, 255, 0.078);
+  --hairline-strong: rgba(255, 255, 255, 0.145);
+
+  /* Signature LinDo Warm Orange-Gold accents */
+  --logo-do: #f6aa00;
+  --accent: #f6b23c;
+  --accent-hover: #fcd34d;
+  --accent-soft: rgba(246, 170, 0, 0.11);
+  --accent-border: rgba(246, 170, 0, 0.34);
+  --accent-dot: #f6aa00;
+  --chip-bg: rgba(246, 170, 0, 0.13);
+  --chip-text: #f8be56;
+
+  /* Primary CTA: crisp luminous porcelain on obsidian */
+  --cta-bg: #f1f4f9;
+  --cta-bg-hover: #ffffff;
+  --cta-fg: #0f1115;
+  --publish-bg: var(--cta-bg);
+  --publish-fg: var(--cta-fg);
+
+  /* Translucent Liquid Glass tokens (top bar & hero secondary pill) */
+  --glass-pill-bg: linear-gradient(180deg, rgba(42, 48, 64, 0.62) 0%, rgba(22, 26, 35, 0.56) 100%);
+  --glass-bg-strong: rgba(34, 40, 54, 0.74);
+  --glass-specular-top: rgba(255, 255, 255, 0.18);
+  --glass-shadow:
+    0 1px 0 0 rgba(255, 255, 255, 0.16) inset,
+    0 0 0 1px rgba(255, 255, 255, 0.1),
+    0 12px 28px -12px rgba(0, 0, 0, 0.6);
+
+  /* Matte micro-grain frosted card tokens (Dark: velvety anodized obsidian, zero gloss glare) */
+  --matte-bg: rgba(21, 24, 32, 0.9);
+  --matte-bg-hover: rgba(25, 29, 39, 0.95);
+  --matte-border: rgba(255, 255, 255, 0.068);
+  --matte-border-hover: rgba(255, 255, 255, 0.13);
+  --matte-shadow: 0 4px 16px -8px rgba(0, 0, 0, 0.48);
+  --matte-grain-opacity: 0.045;
+  --matte-grain-blend: overlay;
+
+  /* Screenshot crisp edge & studio shadow (no thick outer frame) */
+  --shot-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.095),
+    0 28px 72px -20px rgba(0, 0, 0, 0.78),
+    0 8px 24px -8px rgba(0, 0, 0, 0.46);
+
+  --hover: rgba(237, 241, 247, 0.065);
 }
 
 /* ───────────── 主题切换动画（View Transitions，圆形展开） ───────────── */
@@ -80,18 +159,27 @@ html.dark {
 ::view-transition-new(root) {
   z-index: 2;
 }
-/* 浏览器不支持 View Transitions 时，退化为颜色过渡 */
 html.theme-fade,
 html.theme-fade * {
-  transition: background-color 360ms ease, color 360ms ease, border-color 360ms ease, fill 360ms ease !important;
+  transition: background-color 320ms ease, color 320ms ease, border-color 320ms ease, fill 320ms ease !important;
 }
 
 @layer base {
   body {
     margin: 0;
+    background: var(--canvas);
+    color: var(--ink-1);
   }
 
-  /* ───────────── 首页基础（只作用于 .site，文档页由 Nextra 管理） ───────────── */
+  /* Nextra 文档页全幅柔和毛玻璃顶栏同步 */
+  .nextra-nav-container nav,
+  .nextra-navbar {
+    border-color: var(--hairline);
+    backdrop-filter: blur(22px) saturate(180%);
+    -webkit-backdrop-filter: blur(22px) saturate(180%);
+  }
+
+  /* ───────────── 官网基础（只作用于 .site，文档页由 Nextra 管理） ───────────── */
   .site {
     min-height: 100vh;
     background: var(--canvas);
@@ -111,7 +199,6 @@ html.theme-fade * {
   .site h3 {
     font-weight: 600;
     text-wrap: balance;
-    /* 中文标点挤压：避免大字号下全角逗号句号留出空洞 */
     font-feature-settings: "palt", "cv11";
     text-spacing-trim: space-all;
   }
@@ -121,13 +208,6 @@ html.theme-fade * {
   .site ul,
   .site ol {
     list-style: none;
-  }
-  /* 大字号中文标点：收掉全角标点右侧的空白，句末标点做视觉居中补偿 */
-  .punct-tight {
-    margin-right: -0.42em;
-  }
-  .punct-end {
-    margin-right: -0.5em;
   }
   .site *,
   .site *::before,
@@ -155,894 +235,184 @@ html.theme-fade * {
   .site :focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
-    border-radius: 6px;
+    border-radius: 8px;
   }
 
   .hairline-b {
-    border-bottom: 0.5px solid var(--hairline);
+    border-bottom: 1px solid var(--hairline);
   }
   .hairline-t {
-    border-top: 0.5px solid var(--hairline);
+    border-top: 1px solid var(--hairline);
   }
 }
 
 @layer components {
-  /* 主按钮：与 App 的发布按钮同源 */
+  /* 全幅贯穿粘性液态玻璃顶栏 */
+  .site-nav-bar {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    width: 100%;
+    background: var(--nav-surface);
+    backdrop-filter: blur(22px) saturate(180%);
+    -webkit-backdrop-filter: blur(22px) saturate(180%);
+    border-bottom: 1px solid var(--hairline);
+  }
+
+  /* 细腻磨砂微颗粒哑光卡片（去高光玻璃反光，沉稳细腻） */
+  .matte-card {
+    position: relative;
+    overflow: hidden;
+    background: var(--matte-bg);
+    border: 1px solid var(--matte-border);
+    box-shadow: var(--matte-shadow);
+    transition: border-color 180ms ease, background-color 180ms ease;
+  }
+  .matte-card::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    opacity: var(--matte-grain-opacity);
+    mix-blend-mode: var(--matte-grain-blend);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160' viewBox='0 0 160 160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+    background-size: 160px 160px;
+  }
+  .matte-card > * {
+    position: relative;
+    z-index: 1;
+  }
+  .matte-card:hover {
+    background: var(--matte-bg-hover);
+    border-color: var(--matte-border-hover);
+  }
+
+  /* 主按钮：沉静高对比胶囊按钮 */
   .btn-primary {
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 8px;
     height: 44px;
-    padding: 0 20px;
-    border-radius: 10px;
-    background: var(--publish-bg);
-    color: var(--publish-fg) !important;
-    font-weight: 600;
-    font-size: 15px;
-    letter-spacing: -0.005em;
-    transition: filter 160ms ease, transform 160ms ease;
+    padding: 0 22px;
+    border-radius: 999px;
+    background: var(--cta-bg);
+    color: var(--cta-fg) !important;
+    font-weight: 560;
+    font-size: 14.5px;
+    letter-spacing: -0.008em;
+    box-shadow:
+      0 1px 0 rgba(255, 255, 255, 0.2) inset,
+      0 8px 22px -10px rgba(15, 23, 42, 0.32);
+    transition: background-color 150ms ease, transform 150ms ease;
   }
   .btn-primary:hover {
-    filter: brightness(1.06);
+    background: var(--cta-bg-hover);
+    transform: translateY(-0.5px);
   }
   .btn-primary:active {
-    transform: translateY(1px);
-  }
-  .btn-ghost {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    height: 44px;
-    padding: 0 16px;
-    border-radius: 10px;
-    color: var(--ink-1);
-    font-weight: 500;
-    font-size: 15px;
-    transition: background-color 160ms ease;
-  }
-  .btn-ghost:hover {
-    background: var(--hover);
+    transform: translateY(0.5px);
   }
 
-  /* 下载卡片内的架构 / 包格式胶囊 */
-  .dl-pill {
+  /* 次按钮：轻盈液态玻璃胶囊（Hero 幕墙上使用） */
+  .btn-secondary {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    height: 44px;
+    padding: 0 20px;
+    border-radius: 999px;
+    background: var(--glass-pill-bg);
+    backdrop-filter: blur(22px) saturate(180%);
+    -webkit-backdrop-filter: blur(22px) saturate(180%);
+    color: var(--ink-1);
+    font-weight: 530;
+    font-size: 14.5px;
+    box-shadow: var(--glass-shadow);
+    transition: background-color 150ms ease, transform 150ms ease;
+  }
+  .btn-secondary:hover {
+    background: var(--glass-bg-strong);
+    transform: translateY(-0.5px);
+  }
+  .btn-secondary:active {
+    transform: translateY(0.5px);
+  }
+
+  /* 无框极简下载链接（去背景框与背景色） */
+  .dl-link {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    height: 36px;
-    padding: 0 13px;
-    border-radius: 8px;
-    font-size: 13.5px;
-    font-weight: 500;
+    padding: 4px 0;
+    background: transparent;
+    border: none;
+    font-size: 14px;
+    font-weight: 540;
     color: var(--ink-1);
-    background: var(--subtle);
-    box-shadow: inset 0 0 0 0.5px var(--hairline);
-    transition: background-color 160ms ease, filter 160ms ease, transform 160ms ease;
+    transition: color 150ms ease;
   }
-  .dl-pill:hover {
-    background: var(--tonal);
+  .dl-link svg {
+    color: var(--ink-3);
+    transition: color 150ms ease, transform 150ms ease;
   }
-  .dl-pill:active {
+  .dl-link:hover {
+    color: var(--accent);
+    text-decoration: underline;
+    text-underline-offset: 4px;
+  }
+  .dl-link:hover svg {
+    color: var(--accent);
     transform: translateY(1px);
   }
-  .dl-pill.is-primary {
-    background: var(--publish-bg);
-    color: var(--publish-fg) !important;
-    font-weight: 600;
-    box-shadow: none;
+  .dl-link-primary {
+    font-weight: 620;
+    color: var(--ink-1);
   }
-  .dl-pill.is-primary:hover {
-    background: var(--publish-bg);
-    filter: brightness(1.06);
-  }
-  .dl-pill.is-selected {
-    background: var(--chip-bg);
-    color: var(--chip-text);
+  .dl-link-primary svg {
+    color: var(--accent);
   }
 
   .dl-qr-panel {
     align-items: center;
-    gap: 14px;
+    gap: 12px;
     width: 100%;
     padding: 10px 12px;
-    border-radius: 12px;
+    border-radius: 10px;
     background: var(--subtle);
-    box-shadow: inset 0 0 0 0.5px var(--hairline);
+    border: 1px solid var(--hairline);
   }
   .dl-qr-box {
     flex-shrink: 0;
     padding: 5px;
-    border-radius: 8px;
+    border-radius: 7px;
     background: #ffffff;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
   }
 
-  /* 零度娘：轻摇摆，±1.8°，与 LinDoMascot.kt 一致 */
-  @keyframes mascot-sway {
-    0%,
-    100% {
-      transform: rotate(-1.8deg);
-    }
-    50% {
-      transform: rotate(1.8deg);
-    }
-  }
-
-  /* 首屏纯 CSS 入场（不依赖 JS 水合，不阻塞 LCP） */
-  @keyframes hero-enter {
-    from {
-      opacity: 0;
-      transform: translate3d(0, 14px, 0);
-    }
-    to {
-      opacity: 1;
-      transform: translate3d(0, 0, 0);
-    }
-  }
-  .hero-enter {
-    animation: hero-enter 520ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
-  }
-  .hero-enter-delay {
-    animation-delay: 80ms;
-  }
-
-  /* 首屏以下滚动视口淡入 */
-  .reveal {
-    opacity: 0;
-    transform: translateY(18px);
-    transition: opacity 640ms cubic-bezier(0.2, 0.7, 0.2, 1), transform 640ms cubic-bezier(0.2, 0.7, 0.2, 1);
-  }
-  .reveal.is-in {
-    opacity: 1;
-    transform: none;
-  }
-
-  /* ───────────── 响应式等比舞台视口（0 CLS、0 重挂载） ───────────── */
-  .dv-viewport {
+  /* 更新日志页柔和氛围底色 */
+  .changelog-hero-bg {
     position: relative;
-    width: 100%;
-    max-width: 1200px;
-    margin-inline: auto;
-    aspect-ratio: 1200 / 740;
-    container-type: inline-size;
-    --stage-w-px: 1200px;
+    background:
+      radial-gradient(ellipse 68% 36% at 50% -12%, rgba(190, 210, 240, 0.34) 0%, transparent 70%),
+      var(--canvas);
   }
-  .dv-canvas {
-    position: absolute;
-    left: 0;
-    top: 0;
-    width: 1200px;
-    height: 740px;
-    transform-origin: 0 0;
-    transform: scale(var(--stage-scale, 1));
-  }
-  @supports (transform: scale(tan(atan2(100cqw, 1200px)))) {
-    .dv-canvas {
-      transform: scale(min(1, tan(atan2(100cqw, var(--stage-w-px)))));
-    }
+  html.dark .changelog-hero-bg {
+    background:
+      radial-gradient(ellipse 68% 36% at 50% -12%, rgba(56, 76, 118, 0.16) 0%, transparent 70%),
+      var(--canvas);
   }
 
-  /* ───────────── 设备切换器（全 GPU 合成变换，零布局回流） ───────────── */
-  .dv-tabs {
-    position: relative;
-    display: inline-flex;
-    padding: 4px;
-    border-radius: 999px;
-    background: var(--subtle);
-    box-shadow: inset 0 0 0 0.5px var(--hairline);
-  }
-  .dv-tabs-ind {
-    position: absolute;
-    top: 4px;
-    bottom: 4px;
-    left: 0;
-    border-radius: 999px;
-    background: var(--canvas);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08), 0 4px 12px -4px rgba(0, 0, 0, 0.12), 0 0 0 0.5px var(--hairline);
-    will-change: transform;
-    transition: transform 380ms cubic-bezier(0.22, 1, 0.36, 1);
-  }
-  .dv-tab {
-    position: relative;
-    z-index: 1;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 7px;
-    width: 108px;
-    height: 40px;
-    padding: 0 12px;
-    border-radius: 999px;
-    font-size: 14.5px;
-    white-space: nowrap;
-    flex-shrink: 0;
-    color: var(--ink-2);
-    transition: color 200ms ease;
-    overflow: hidden;
-  }
-  .dv-tab[aria-selected="true"] {
-    color: var(--ink-1);
-    font-weight: 600;
-  }
-  .dv-tab-progress {
-    position: absolute;
-    left: 24px;
-    right: 24px;
-    bottom: 4px;
-    height: 2px;
-    border-radius: 2px;
-    background: var(--accent);
-    opacity: 0.6;
-    transform-origin: left center;
-    will-change: transform;
-    animation-name: dv-progress;
-    animation-timing-function: linear;
-    animation-fill-mode: both;
-  }
-  @keyframes dv-progress {
-    from {
-      transform: scaleX(0);
-    }
-    to {
-      transform: scaleX(1);
-    }
-  }
-
-  /* ───────────── 舞台（纯 transform / opacity 合成器层） ───────────── */
-  .dv-glow {
-    position: absolute;
-    inset: 2% 4% -4%;
-    background: radial-gradient(46% 46% at 50% 54%, var(--stage-glow), transparent 72%);
-    transform: translateZ(0);
-    pointer-events: none;
-  }
-  .dv-stage {
-    position: absolute;
-    inset: 0;
-    contain: layout style;
-  }
-  .dv-slot {
-    position: absolute;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    opacity: 0;
-    transform: translate3d(0, 8px, 0) scale(0.986);
-    pointer-events: none;
-    will-change: transform, opacity;
-    backface-visibility: hidden;
-    transition: opacity 320ms cubic-bezier(0.22, 1, 0.36, 1), transform 420ms cubic-bezier(0.22, 1, 0.36, 1);
-  }
-  .dv-slot.is-active {
-    opacity: 1;
-    transform: translate3d(0, 0, 0) scale(1);
-    pointer-events: auto;
-    transition: opacity 380ms cubic-bezier(0.22, 1, 0.36, 1), transform 440ms cubic-bezier(0.22, 1, 0.36, 1);
-  }
-  .dv-shadow {
-    position: absolute;
-    left: 50%;
-    bottom: 14px;
-    height: 36px;
-    width: 1040px;
-    transform: translate3d(-50%, -4px, 0) scaleX(0.32);
-    transform-origin: 50% 50%;
-    border-radius: 50%;
-    background: radial-gradient(closest-side, rgba(0, 0, 0, 0.25), transparent);
-    will-change: transform, opacity;
-    transition: transform 440ms cubic-bezier(0.22, 1, 0.36, 1), opacity 320ms ease;
-    pointer-events: none;
-  }
-  html.dark .dv-shadow {
-    background: radial-gradient(closest-side, rgba(0, 0, 0, 0.56), transparent);
-  }
-  .dv-shadow[data-device="fold"] {
-    transform: translate3d(-50%, -10px, 0) scaleX(0.69);
-  }
-  .dv-shadow[data-device="tablet"] {
-    transform: translate3d(-50%, -22px, 0) scaleX(0.83);
-  }
-  .dv-shadow[data-device="desktop"] {
-    transform: translate3d(-50%, 8px, 0) scaleX(1);
-  }
-
-  /* View Transition 激活期暂停内部二次过渡，避免双层重绘抖动 */
-  html.vt-active *,
-  html.vt-active *::before,
-  html.vt-active *::after {
-    transition: none !important;
-  }
-
-  /* 真机截图：随主题交叉淡入 */
-  .shot {
-    position: absolute;
-    inset: 0;
-    display: block;
-    overflow: hidden;
-    background: var(--canvas);
-    transform: translateZ(0);
-  }
-  .shot img {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    max-width: none;
-    object-fit: cover;
-    object-position: 50% 0;
-    backface-visibility: hidden;
-    transition: opacity 380ms ease;
-  }
-  .shot-dark {
-    opacity: 0;
-  }
-  html.dark .shot-dark {
-    opacity: 1;
-  }
-  html.dark .shot-light {
-    opacity: 0;
-  }
-
-  /* ───────────── 手机（旗舰极窄四等边黑边） ───────────── */
-  .dv-phone {
-    position: relative;
-    width: 324px;
-    height: 692px;
-    padding: 5.5px;
-    border-radius: 46px;
-    background: linear-gradient(150deg, #434750 0%, #15171c 38%, #22252d 72%, #3a3e47 100%);
-    box-shadow: inset 0 0 0 1px #555964, inset 0 0 0 2px #0a0b0d, 0 44px 72px -38px rgba(0, 0, 0, 0.44);
-  }
-  .dv-phone::before,
-  .dv-phone::after {
-    content: "";
-    position: absolute;
-    right: -2px;
-    width: 2.5px;
-    border-radius: 0 2px 2px 0;
-    background: #2f3238;
-  }
-  .dv-phone::before {
-    top: 148px;
-    height: 64px;
-  }
-  .dv-phone::after {
-    top: 232px;
-    height: 38px;
-  }
-  .dv-phone-screen {
-    position: relative;
-    width: 100%;
-    height: 100%;
-    border-radius: 40.5px;
-    overflow: hidden;
-    background: #000;
-  }
-  .dv-phone-screen::after {
-    /* 微型居中前摄开孔 */
-    content: "";
-    position: absolute;
-    top: 9px;
-    left: 50%;
-    width: 9px;
-    height: 9px;
-    margin-left: -4.5px;
-    border-radius: 50%;
-    background: radial-gradient(circle at 35% 35%, #2b3140, #050608 60%);
-    box-shadow: 0 0 0 1px #000;
-  }
-
-  /* ───────────── 折叠屏（轻薄旗舰极窄边框，自然展开） ───────────── */
-  .dv-fold {
-    position: relative;
-    width: 752px;
-    height: 608px;
-    perspective: 2400px;
-  }
-  .dv-fold-body {
-    position: absolute;
-    inset: 0;
-    transform-style: preserve-3d;
-    will-change: transform, opacity;
-  }
-  .dv-fold-half {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    width: 50%;
-    transform-style: preserve-3d;
-  }
-  .dv-fold-right {
-    right: 0;
-    padding: 6px 6px 6px 0;
-    border-radius: 0 30px 30px 0;
-    background: linear-gradient(150deg, #353941 0%, #14161b 42%, #20232a 78%, #383c44 100%);
-    box-shadow: inset -1px 0 0 #555964, inset 0 1px 0 #555964, inset 0 -1px 0 #555964, 0 42px 70px -36px rgba(0, 0, 0, 0.4);
-    transform: translateZ(-1px);
-    will-change: opacity;
-  }
-  .dv-fold-left {
-    left: 0;
-    transform-origin: 100% 50%;
-    will-change: transform;
-  }
-  .dv-fold-face {
-    position: absolute;
-    inset: 0;
-    backface-visibility: hidden;
-    -webkit-backface-visibility: hidden;
-  }
-  .dv-fold-front {
-    padding: 6px 0 6px 6px;
-    border-radius: 30px 0 0 30px;
-    background: linear-gradient(150deg, #3f434c 0%, #14161b 42%, #20232a 78%, #363a43 100%);
-    box-shadow: inset 1px 0 0 #555964, inset 0 1px 0 #555964, inset 0 -1px 0 #555964;
-  }
-  .dv-fold-back {
-    transform: rotateY(180deg);
-    padding: 5.5px;
-    border-radius: 30px 8px 8px 30px;
-    background: linear-gradient(145deg, #41454e 0%, #14161b 42%, #22252c 76%, #393d46 100%);
-    box-shadow: inset 0 0 0 1px #555964, 0 36px 64px -32px rgba(0, 0, 0, 0.4);
-  }
-  .dv-fold-screen {
-    position: relative;
-    width: 100%;
-    height: 100%;
-    overflow: hidden;
-    background: var(--canvas);
-  }
-  .dv-fold-left .dv-fold-screen {
-    border-radius: 24px 0 0 24px;
-  }
-  .dv-fold-right .dv-fold-screen {
-    border-radius: 0 24px 24px 0;
-  }
-  .dv-fold-cover {
-    position: relative;
-    width: 100%;
-    height: 100%;
-    border-radius: 24.5px 6px 6px 24.5px;
-    overflow: hidden;
-    background: var(--canvas);
-  }
-  .shot-left img {
-    width: 200%;
-    object-fit: cover;
-    object-position: 50% 0;
-    left: 0;
-  }
-  .shot-right img {
-    width: 200%;
-    object-fit: cover;
-    object-position: 50% 0;
-    left: -100%;
-  }
-
-  /* 展开过程仅保留柔和自然的物理受光阴影过渡，无透明穿透 */
-  .dv-fold-shade-l {
-    position: absolute;
-    inset: 6px 0 6px 6px;
-    border-radius: 24px 0 0 24px;
-    background: linear-gradient(270deg, rgba(0, 0, 0, 0.3), rgba(0, 0, 0, 0.1) 60%, transparent);
-    opacity: 0;
-    pointer-events: none;
-    will-change: opacity;
-  }
-  .dv-fold-shade-r {
-    position: absolute;
-    inset: 6px 6px 6px 0;
-    border-radius: 0 24px 24px 0;
-    background: linear-gradient(90deg, rgba(0, 0, 0, 0.34), rgba(0, 0, 0, 0.07) 55%, transparent);
-    opacity: 0;
-    pointer-events: none;
-    will-change: opacity;
-  }
-
-  /* 落平后切换为单层整块内屏，彻底消除 3D 中轴接缝 */
-  .dv-fold-full {
-    position: absolute;
-    inset: 0;
-    z-index: 4;
-    padding: 6px;
-    border-radius: 30px;
-    background: linear-gradient(150deg, #3f434c 0%, #121317 40%, #1e2026 75%, #373b44 100%);
-    box-shadow: inset 0 0 0 1px #555964, inset 0 0 0 2px #0a0b0d, 0 42px 70px -36px rgba(0, 0, 0, 0.42);
-    opacity: 0;
-    pointer-events: none;
-    will-change: opacity;
-  }
-  .dv-fold-full-screen {
-    position: relative;
-    width: 100%;
-    height: 100%;
-    border-radius: 24px;
-    overflow: hidden;
-    background: var(--canvas);
-  }
-
-  /* 展开时序：合拢停顿 320ms，随后 1400ms 单段连续舒缓曲线向左展开 */
-  .dv-slot-fold.is-active .dv-fold-body {
-    animation:
-      dv-fold-shift 1400ms cubic-bezier(0.32, 0.08, 0.2, 1) 320ms both,
-      dv-fold-body-hide 1ms linear 1740ms forwards;
-  }
-  .dv-slot-fold.is-active .dv-fold-right {
-    animation: dv-fold-right-wake 160ms ease 400ms both;
-  }
-  .dv-slot-fold.is-active .dv-fold-left {
-    animation: dv-fold-open 1400ms cubic-bezier(0.32, 0.08, 0.2, 1) 320ms both;
-  }
-  .dv-slot-fold.is-active .dv-fold-shade-l {
-    animation: dv-fold-shade-l 1400ms linear 320ms both;
-  }
-  .dv-slot-fold.is-active .dv-fold-shade-r {
-    animation: dv-fold-shade-r 1400ms linear 320ms both;
-  }
-  .dv-slot-fold.is-active .dv-fold-full {
-    animation: dv-fold-full 70ms linear 1670ms both;
-  }
-
-  @keyframes dv-fold-shift {
-    from {
-      transform: translate3d(-25%, 0, 0);
-    }
-    to {
-      transform: translate3d(0, 0, 0);
-    }
-  }
-  @keyframes dv-fold-body-hide {
-    to {
-      opacity: 0;
-      visibility: hidden;
-    }
-  }
-  @keyframes dv-fold-right-wake {
-    from {
-      opacity: 0;
-    }
-    to {
-      opacity: 1;
-    }
-  }
-  @keyframes dv-fold-open {
-    from {
-      transform: rotateY(180deg);
-    }
-    to {
-      transform: rotateY(0deg);
-    }
-  }
-  @keyframes dv-fold-shade-l {
-    0%,
-    35% {
-      opacity: 1;
-    }
-    85%,
-    100% {
-      opacity: 0;
-    }
-  }
-  @keyframes dv-fold-shade-r {
-    0%,
-    20% {
-      opacity: 1;
-    }
-    85%,
-    100% {
-      opacity: 0;
-    }
-  }
-  @keyframes dv-fold-full {
-    from {
-      opacity: 0;
-    }
-    to {
-      opacity: 1;
-    }
-  }
-
-  /* ───────────── 平板（16:10 窄边全面屏双栏） ───────────── */
-  .dv-tablet {
-    position: relative;
-    width: 892px;
-    height: 566px;
-    padding: 7.5px;
-    border-radius: 27px;
-    background: linear-gradient(150deg, #41454e 0%, #14151a 40%, #20232a 75%, #383c45 100%);
-    box-shadow: inset 0 0 0 1px #565a65, inset 0 0 0 2px #0a0b0d, 0 42px 74px -36px rgba(0, 0, 0, 0.42);
-  }
-  .dv-tablet::before {
-    /* 顶部居中微孔镜头 */
-    content: "";
-    position: absolute;
-    top: 2px;
-    left: 50%;
-    width: 3.5px;
-    height: 3.5px;
-    margin-left: -1.75px;
-    border-radius: 50%;
-    background: radial-gradient(circle at 35% 35%, #343d52, #090b0f 70%);
-    z-index: 2;
-  }
-  .dv-tablet-screen {
-    position: relative;
-    width: 100%;
-    height: 100%;
-    border-radius: 19.5px;
-    overflow: hidden;
-    background: var(--canvas);
-  }
-
-  /* ───────────── 笔记本（现代极窄三面微边） ───────────── */
-  .dv-laptop {
-    position: relative;
-    width: 1060px;
-    height: 668px;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: flex-end;
-  }
-  .dv-laptop-lid {
-    position: relative;
-    width: 952px;
-    height: 614px;
-    padding: 7.5px 7.5px 12px;
-    border-radius: 17px 17px 4px 4px;
-    background: #0d0e11;
-    box-shadow: inset 0 0 0 1px #cfd2d8, inset 0 0 0 2px #16171a, 0 28px 56px -28px rgba(0, 0, 0, 0.34);
-  }
-  html.dark .dv-laptop-lid {
-    box-shadow: inset 0 0 0 1px #575b63, inset 0 0 0 2px #141518, 0 28px 56px -28px rgba(0, 0, 0, 0.58);
-  }
-  .dv-laptop-screen {
-    position: relative;
-    width: 100%;
-    height: 100%;
-    border-radius: 9.5px 9.5px 4px 4px;
-    overflow: hidden;
-    background: #000;
-  }
-  .dv-laptop-notch {
-    position: absolute;
-    top: 2px;
-    left: 50%;
-    width: 92px;
-    height: 10px;
-    margin-left: -46px;
-    border-radius: 0 0 6px 6px;
-    background: #0d0e11;
-  }
-  .dv-laptop-base {
-    position: relative;
-    width: 1060px;
-    height: 16px;
-    border-radius: 2px 2px 12px 12px;
-    background: linear-gradient(180deg, #e3e5e9 0%, #c8cbd1 45%, #9a9ea6 100%);
-    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.6) inset;
-  }
-  html.dark .dv-laptop-base {
-    background: linear-gradient(180deg, #5b5e65 0%, #3e4046 45%, #26282c 100%);
-    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.12) inset;
-  }
-  .dv-laptop-base > span {
-    position: absolute;
-    top: 0;
-    left: 50%;
-    width: 136px;
-    height: 6px;
-    margin-left: -68px;
-    border-radius: 0 0 8px 8px;
-    background: rgba(0, 0, 0, 0.14);
-  }
-
-  /* 零度娘：外层纯 GPU translate3d 位移，内层独立摇摆 */
-  .dv-mascot-wrap {
-    position: absolute;
-    left: 64%;
-    bottom: 2%;
-    width: 15.5%;
-    max-width: 200px;
-    pointer-events: none;
-    will-change: transform, opacity;
-    transition: transform 560ms cubic-bezier(0.22, 1, 0.36, 1), opacity 340ms ease;
-  }
-  .dv-mascot-wrap.is-phone {
-    transform: translate3d(0, 0, 0);
-  }
-  .dv-mascot-wrap.is-fold {
-    transform: translate3d(108%, 0, 0);
-  }
-  .dv-mascot-wrap.is-tablet,
-  .dv-mascot-wrap.is-desktop {
-    opacity: 0;
-    transform: translate3d(125%, 24px, 0);
-  }
-  .dv-mascot {
-    display: block;
-    width: 100%;
-    height: auto;
-    transform-origin: 50% 90%;
-    will-change: transform;
-    animation: mascot-sway 3.2s ease-in-out infinite;
-  }
-
-  /* 窄屏舞台：纯 CSS 切换至 640×740 坐标系并按比例收拢设备，彻底消除水合 CLS */
-  @media (max-width: 767px) {
-    .dv-viewport {
-      max-width: 640px;
-      aspect-ratio: 640 / 740;
-      --stage-w-px: 640px;
-    }
-    .dv-canvas {
-      width: 640px;
-    }
-    .dv-stage .dv-fold {
-      transform: scale(0.8);
-    }
-    .dv-stage .dv-tablet {
-      transform: scale(0.68);
-    }
-    .dv-stage .dv-laptop {
-      transform: scale(0.58);
-    }
-    .dv-stage .dv-phone {
-      transform: scale(1.02);
-    }
-    .dv-stage .dv-shadow[data-device="fold"] {
-      transform: translate3d(-50%, -56px, 0) scaleX(0.54);
-    }
-    .dv-stage .dv-shadow[data-device="tablet"] {
-      transform: translate3d(-50%, -96px, 0) scaleX(0.57);
-    }
-    .dv-stage .dv-shadow[data-device="desktop"] {
-      transform: translate3d(-50%, -136px, 0) scaleX(0.58);
-    }
-    .dv-mascot-wrap {
-      display: none;
-    }
-    .dv-tab {
-      width: 82px;
-      height: 36px;
-      padding: 0 8px;
-      gap: 4px;
-      font-size: 13px;
-    }
-    .dv-tab-progress {
-      left: 16px;
-      right: 16px;
-    }
-  }
-
-  /* 首屏更新标签 */
-  .update-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    height: 30px;
-    padding: 0 12px 0 10px;
-    border-radius: 999px;
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--ink-1);
-    background: var(--subtle);
-    box-shadow: inset 0 0 0 0.5px var(--hairline);
-    transition: background-color 160ms ease;
-  }
-  .update-pill:hover {
-    background: var(--tonal);
-  }
-  .update-dot {
-    position: relative;
-    width: 6px;
-    height: 6px;
-    border-radius: 999px;
-    background: var(--accent);
-  }
-  .update-dot::after {
-    content: "";
-    position: absolute;
-    inset: -3px;
-    border-radius: 999px;
-    border: 1px solid var(--accent);
-    opacity: 0;
-    animation: update-ping 2.6s ease-out infinite;
-  }
-  @keyframes update-ping {
-    0% {
-      opacity: 0.7;
-      transform: scale(0.6);
-    }
-    80%,
-    100% {
-      opacity: 0;
-      transform: scale(1.7);
-    }
-  }
-
-  /* 首屏信任微标签与安全认证胶囊 */
-  .hero-trust {
-    display: inline-flex;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: center;
-    gap: 7px;
-    font-size: 13px;
-    color: var(--ink-2);
-    transition: color 160ms ease;
-  }
-  .hero-trust:hover {
-    color: var(--ink-1);
-  }
-  .trust-eyebrow {
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-    height: 28px;
-    padding: 0 12px;
-    border-radius: 999px;
-    font-size: 12.5px;
-    font-weight: 600;
-    letter-spacing: 0.03em;
-    color: #047857;
-    background: #ecfdf5;
-    box-shadow: inset 0 0 0 0.5px rgba(5, 150, 105, 0.22);
-  }
-  html.dark .trust-eyebrow {
-    color: #6ee7b7;
-    background: rgba(16, 185, 129, 0.12);
-    box-shadow: inset 0 0 0 0.5px rgba(52, 211, 153, 0.24);
-  }
-  .trust-icon {
-    display: inline-grid;
-    place-items: center;
-    width: 36px;
-    height: 36px;
-    border-radius: 10px;
-    color: #047857;
-    background: #ecfdf5;
-    box-shadow: inset 0 0 0 0.5px rgba(5, 150, 105, 0.2);
-  }
-  html.dark .trust-icon {
-    color: #6ee7b7;
-    background: rgba(16, 185, 129, 0.12);
-    box-shadow: inset 0 0 0 0.5px rgba(52, 211, 153, 0.22);
-  }
-
-  /* 亮点图标：中性色、细描边，与 App 图标同源 */
-  .feature-icon {
-    display: inline-grid;
-    place-items: center;
-    width: 36px;
-    height: 36px;
-    border-radius: 10px;
-    color: var(--ink-1);
-    background: var(--subtle);
-    box-shadow: inset 0 0 0 0.5px var(--hairline);
-  }
-
-  /* 字号层级 */
-  .t-display {
-    font-size: clamp(44px, 7.2vw, 80px);
-    line-height: 1.05;
-    letter-spacing: -0.03em;
-  }
+  /* 通用排版工具 */
   .t-h2 {
-    font-size: clamp(30px, 4.2vw, 44px);
-    line-height: 1.15;
-    letter-spacing: -0.02em;
-  }
-  .t-h3 {
-    font-size: 16px;
-    line-height: 1.45;
-    font-weight: 600;
-    letter-spacing: -0.005em;
+    font-size: clamp(26px, 3.6vw, 38px);
+    line-height: 1.18;
+    letter-spacing: -0.03em;
   }
   .t-body {
     font-size: 15px;
-    line-height: 1.7;
+    line-height: 1.72;
     color: var(--ink-2);
   }
   .t-meta {
@@ -1054,36 +424,5 @@ html.theme-fade * {
     font-family: var(--font-inter), system-ui, sans-serif;
     font-variant-numeric: tabular-nums;
     font-feature-settings: "tnum", "cv11";
-  }
-
-  /* 亮点大数字 */
-  .hl-num {
-    font-family: var(--font-inter), "PingFang SC", system-ui, sans-serif;
-    font-size: clamp(44px, 5.6vw, 64px);
-    line-height: 1;
-    font-weight: 600;
-    letter-spacing: -0.035em;
-    font-variant-numeric: tabular-nums;
-    font-feature-settings: "palt", "tnum", "cv11";
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .dv-slot-fold.is-active .dv-fold-body {
-      display: none;
-    }
-    .dv-slot-fold.is-active .dv-fold-full {
-      animation: none;
-      opacity: 1;
-    }
-    .dv-mascot,
-    .update-dot::after,
-    .hero-enter {
-      animation: none;
-    }
-    .reveal {
-      opacity: 1;
-      transform: none;
-      transition: none;
-    }
   }
 }

@@ -7,13 +7,13 @@ import { SITE } from "@/lib/site";
 import "nextra-theme-docs/style.css";
 
 const logo = (
-  <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontWeight: 600, fontSize: 17 }}>
+  <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontWeight: 600, fontSize: 16.5, letterSpacing: "-0.02em" }}>
     {/* eslint-disable-next-line @next/next/no-img-element */}
-    <img src="/brand/lindo-mark.svg" alt="" width={28} height={28} />
+    <img src="/brand/lindo-mark.svg" alt="" width={26} height={26} />
     <span>
-      Lin<span style={{ color: "var(--logo-do, #f59e0b)" }}>Do</span>
+      Lin<span style={{ color: "var(--logo-do, #e07b08)" }}>Do</span>
     </span>
-    <span style={{ fontWeight: 400, opacity: 0.6, fontSize: 14 }}>文档</span>
+    <span style={{ fontWeight: 450, color: "var(--ink-3)", fontSize: 13.5 }}>文档</span>
   </span>
 );
 
@@ -25,14 +25,15 @@ export default async function DocsLayout({ children }: { children: ReactNode }) 
           <Link
             href="/#download"
             style={{
-              fontSize: 14,
-              fontWeight: 500,
-              padding: "5px 12px",
-              borderRadius: 8,
-              background: "var(--publish-bg, #f59e0b)",
-              color: "var(--publish-fg, #111827)",
+              fontSize: 13.5,
+              fontWeight: 560,
+              padding: "6px 14px",
+              borderRadius: 999,
+              background: "var(--cta-bg, #151922)",
+              color: "var(--cta-fg, #f8fafc)",
               textDecoration: "none",
               whiteSpace: "nowrap",
+              boxShadow: "0 1px 0 rgba(255,255,255,0.2) inset, 0 6px 16px -8px rgba(15,23,42,0.35)",
             }}
           >
             下载客户端

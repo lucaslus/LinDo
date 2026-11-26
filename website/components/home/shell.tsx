@@ -1,38 +1,11 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import clsx from "clsx";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { GithubLogo } from "@phosphor-icons/react";
-import { IconClose, IconDownload, IconMenu, IconMoon, IconSun } from "@/components/icons";
+import { IconClose, IconDownload, IconGitHub, IconMenu, IconMoon, IconSun } from "@/components/icons";
 import { LingduHead, Wordmark, type Expression } from "@/components/brand";
 import { originFromEvent, useThemeSwitch } from "@/components/theme";
 import { SITE } from "@/lib/site";
-
-export function Reveal({ children, className, delay = 0 }: { children: ReactNode; className?: string; delay?: number }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [inView, setInView] = useState(false);
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const io = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting) {
-          setInView(true);
-          io.disconnect();
-        }
-      },
-      { rootMargin: "0px 0px -8% 0px" },
-    );
-    io.observe(el);
-    return () => io.disconnect();
-  }, []);
-  return (
-    <div ref={ref} className={clsx("reveal", inView && "is-in", className)} style={{ transitionDelay: `${delay}ms` }}>
-      {children}
-    </div>
-  );
-}
 
 /** 顶栏主题按钮：默认由 CSS `.dark` 在首帧决定开心/犯困与日月图标，避免深色水合闪烁 */
 export function MascotThemeToggle() {
@@ -61,17 +34,17 @@ export function MascotThemeToggle() {
       }}
       onPointerEnter={() => setHover(true)}
       onPointerLeave={() => setHover(false)}
-      className="flex h-10 items-center gap-1.5 rounded-full py-1 pr-3 pl-1 transition-colors hover:bg-[var(--hover)]"
+      className="flex h-9 items-center gap-1.5 rounded-full py-1 pr-2.5 pl-1.5 transition-colors hover:bg-[var(--hover)]"
       aria-label={label}
       title={label}
     >
-      <LingduHead size={32} expression={expression} preloadAll />
+      <LingduHead size={24} expression={expression} preloadAll />
       <span className="inline-flex" style={{ color: "var(--ink-2)" }}>
         <span className="dark:hidden">
-          <IconSun size={16} />
+          <IconSun size={14.5} />
         </span>
         <span className="hidden dark:inline-flex">
-          <IconMoon size={16} />
+          <IconMoon size={14.5} />
         </span>
       </span>
     </button>
@@ -79,27 +52,15 @@ export function MascotThemeToggle() {
 }
 
 const NAV = [
-  { href: "/#highlights", label: "亮点" },
-  { href: "/#security", label: "安全与隐私" },
+  { href: "/#screens", label: "界面" },
+  { href: "/#highlights", label: "功能" },
   { href: "/changelog", label: "更新日志" },
   { href: "/docs", label: "文档" },
-  { href: "/#download", label: "下载" },
 ];
 
 export function SiteNav() {
-  const [scrolled, setScrolled] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const headerRef = useRef<HTMLElement>(null);
-
-  useEffect(() => {
-    const on = () => {
-      const next = window.scrollY > 8;
-      setScrolled((prev) => (prev === next ? prev : next));
-    };
-    on();
-    window.addEventListener("scroll", on, { passive: true });
-    return () => window.removeEventListener("scroll", on);
-  }, []);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -119,59 +80,50 @@ export function SiteNav() {
     };
   }, [menuOpen]);
 
-  const showSurface = scrolled || menuOpen;
-
   return (
-    <header
-      ref={headerRef}
-      className="sticky top-0 z-50 transition-[background-color,border-color] duration-200"
-      style={{
-        background: showSurface ? "var(--nav-surface)" : "transparent",
-        backdropFilter: showSurface ? "blur(14px) saturate(1.35)" : "none",
-        WebkitBackdropFilter: showSurface ? "blur(14px) saturate(1.35)" : "none",
-        borderBottom: `0.5px solid ${showSurface ? "var(--hairline)" : "transparent"}`,
-      }}
-    >
-      <div className="mx-auto flex h-16 max-w-[1200px] items-center gap-6 px-5 sm:px-6">
+    <header ref={headerRef} className="site-nav-bar">
+      <div className="mx-auto flex h-[58px] max-w-[1120px] items-center gap-6 px-5">
         <Link href="/" className="flex items-center gap-2" aria-label="LinDo 首页" onClick={() => setMenuOpen(false)}>
-          <LingduHead size={30} />
-          <Wordmark size={20} />
+          <LingduHead size={28} />
+          <Wordmark size={18} />
         </Link>
-        <nav className="hidden items-center gap-1 md:flex" aria-label="主导航">
+        <nav className="hidden items-center gap-0.5 md:flex" aria-label="主导航">
           {NAV.map((n) => (
             <Link
               key={n.href}
               href={n.href}
-              className="rounded-lg px-3 py-2 text-[14.5px] transition-colors hover:bg-[var(--hover)]"
+              className="rounded-lg px-3 py-1.5 text-[14px] font-medium transition-colors hover:bg-[var(--hover)] hover:text-[var(--ink-1)]"
               style={{ color: "var(--ink-2)" }}
             >
               {n.label}
             </Link>
           ))}
         </nav>
-        <div className="ml-auto flex items-center gap-1">
+        <div className="ml-auto flex items-center gap-1.5">
           <a
             href={SITE.repo}
             target="_blank"
             rel="noreferrer"
-            className="grid h-10 w-10 place-items-center rounded-full transition-colors hover:bg-[var(--hover)]"
+            className="grid h-9 w-9 place-items-center rounded-full transition-colors hover:bg-[var(--hover)] hover:text-[var(--ink-1)]"
+            style={{ color: "var(--ink-2)" }}
             aria-label="GitHub 仓库"
           >
-            <GithubLogo size={20} />
+            <IconGitHub size={18.5} />
           </a>
           <MascotThemeToggle />
-          <Link href="/#download" className="btn-primary ml-1.5 hidden !h-9 !px-4 !text-[14px] sm:inline-flex">
+          <Link href="/#download" className="btn-primary ml-1 hidden !h-[34px] !px-4 !text-[13.5px] sm:inline-flex">
             下载
           </Link>
           <button
             type="button"
             onClick={() => setMenuOpen((v) => !v)}
-            className="grid h-10 w-10 place-items-center rounded-full transition-colors hover:bg-[var(--hover)] md:hidden"
+            className="grid h-9 w-9 place-items-center rounded-full transition-colors hover:bg-[var(--hover)] md:hidden"
+            style={{ color: "var(--ink-2)" }}
             aria-label={menuOpen ? "收起导航菜单" : "展开导航菜单"}
             aria-expanded={menuOpen}
             aria-controls="mobile-site-nav"
           >
-            {menuOpen ? <IconClose size={20} /> : <IconMenu size={20} />}
+            {menuOpen ? <IconClose size={19} /> : <IconMenu size={19} />}
           </button>
         </div>
       </div>
@@ -180,8 +132,8 @@ export function SiteNav() {
         <nav
           id="mobile-site-nav"
           aria-label="移动端导航"
-          className="mx-auto max-w-[1200px] px-5 pt-1 pb-4 md:hidden"
-          style={{ borderTop: "0.5px solid var(--hairline)" }}
+          className="mx-auto max-w-[1120px] px-5 pt-2 pb-4 md:hidden"
+          style={{ borderTop: "1px solid var(--hairline)" }}
         >
           <div className="flex flex-col gap-1">
             {NAV.map((n) => (
@@ -189,7 +141,7 @@ export function SiteNav() {
                 key={n.href}
                 href={n.href}
                 onClick={() => setMenuOpen(false)}
-                className="flex h-11 items-center rounded-xl px-3 text-[15px] font-medium transition-colors hover:bg-[var(--hover)]"
+                className="flex h-10 items-center rounded-lg px-3 text-[14.5px] font-medium transition-colors hover:bg-[var(--hover)]"
                 style={{ color: "var(--ink-1)" }}
               >
                 {n.label}
@@ -200,8 +152,8 @@ export function SiteNav() {
               onClick={() => setMenuOpen(false)}
               className="btn-primary mt-2 justify-center sm:hidden"
             >
-              <IconDownload size={17} strokeWidth={2} />
-              免费下载 LinDo
+              <IconDownload size={16} strokeWidth={2} />
+              下载 LinDo
             </Link>
           </div>
         </nav>
