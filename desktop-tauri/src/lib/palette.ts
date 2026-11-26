@@ -235,35 +235,35 @@ export function applyPaletteToDocument(isDark: boolean, optionKey: string, fontS
     root.style.setProperty("--hover-overlay", "rgba(218, 219, 223, 0.05)");
     root.style.setProperty("--press-overlay", "rgba(218, 219, 223, 0.088)");
   } else {
-    root.style.setProperty("--canvas", "#FFFFFF");
-    root.style.setProperty("--grouped-canvas", "#FFFFFF");
-    root.style.setProperty("--card-surface", "#FFFFFF");
-    root.style.setProperty("--feed-surface", "#F6F7FA");
-    root.style.setProperty("--selected-card-bg", "#FFFFFF");
+    root.style.setProperty("--canvas", "#F4F6F8");
+    root.style.setProperty("--grouped-canvas", "#F4F6F8");
+    root.style.setProperty("--card-surface", "#F8F9FB");
+    root.style.setProperty("--feed-surface", "#ECEEF2");
+    root.style.setProperty("--selected-card-bg", "#FAFBFD");
     root.style.setProperty(
       "--selected-card-border",
-      `color-mix(in srgb, ${opt.lightChipText} 24%, rgba(15, 23, 42, 0.06))`
+      `color-mix(in srgb, ${opt.lightChipText} 22%, rgba(15, 23, 42, 0.08))`
     );
-    root.style.setProperty("--subtle-surface", "#EEF1F6");
-    root.style.setProperty("--nav-bar-surface", "#EEF1F6");
-    root.style.setProperty("--tonal-pill", "#EAECEF");
-    root.style.setProperty("--on-tonal-pill", "#161920");
-    root.style.setProperty("--ink-primary", "#161920");
-    root.style.setProperty("--ink-body", "#262B35");
-    root.style.setProperty("--ink-secondary", "#5E6675");
-    root.style.setProperty("--ink-tertiary", "#8A93A3");
-    root.style.setProperty("--hairline", "rgba(15, 23, 42, 0.072)");
-    root.style.setProperty("--hairline-soft", "rgba(15, 23, 42, 0.05)");
+    root.style.setProperty("--subtle-surface", "#E5E7EB");
+    root.style.setProperty("--nav-bar-surface", "#E5E7EB");
+    root.style.setProperty("--tonal-pill", "#DFE1E5");
+    root.style.setProperty("--on-tonal-pill", "#161A22");
+    root.style.setProperty("--ink-primary", "#161A22");
+    root.style.setProperty("--ink-body", "#242933");
+    root.style.setProperty("--ink-secondary", "#4F5665");
+    root.style.setProperty("--ink-tertiary", "#5F6776");
+    root.style.setProperty("--hairline", "rgba(15, 23, 42, 0.088)");
+    root.style.setProperty("--hairline-soft", "rgba(15, 23, 42, 0.062)");
     root.style.setProperty("--accent", opt.lightChipText);
-    root.style.setProperty("--brand-gold", opt.key === "OFFICIAL_GOLD" ? "#B45309" : opt.lightChipText);
+    root.style.setProperty("--brand-gold", opt.key === "OFFICIAL_GOLD" ? "#936000" : opt.lightChipText);
     root.style.setProperty("--logo-do", "#E58E09");
     root.style.setProperty("--tab-indicator", opt.lightChipText);
     root.style.setProperty("--active-chip-bg", opt.lightChipBg);
     root.style.setProperty("--active-chip-text", opt.lightChipText);
     root.style.setProperty("--publish-btn-bg", opt.key === "OFFICIAL_GOLD" ? opt.swatchColor : opt.lightChipText);
     root.style.setProperty("--publish-btn-fg", opt.key === "OFFICIAL_GOLD" ? "#111827" : "#FFFFFF");
-    root.style.setProperty("--hover-overlay", "rgba(15, 23, 42, 0.038)");
-    root.style.setProperty("--press-overlay", "rgba(15, 23, 42, 0.068)");
+    root.style.setProperty("--hover-overlay", "rgba(15, 23, 42, 0.044)");
+    root.style.setProperty("--press-overlay", "rgba(15, 23, 42, 0.078)");
   }
 }
 

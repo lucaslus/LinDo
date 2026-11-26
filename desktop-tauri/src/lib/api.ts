@@ -5,12 +5,14 @@ import type React from "react";
 import type {
   BootstrapPayload,
   CategoryMeta,
+  ClearLocalCachesResult,
   CloudDraftItem,
   CommunitySearchFilters,
   CommunitySearchTagHit,
   CommunitySearchUserHit,
   ConnectMetricItem,
   ConnectTrustLevelReport,
+  CustomEmojiItem,
   DesktopUpdateInfo,
   EchDesktopSnapshot,
   FlairInfo,
@@ -27,6 +29,7 @@ import type {
   PostPollModel,
   PostReactionItem,
   PostRevisionDetail,
+  PublicUserProfile,
   ReactionUserGroup,
   SiteHttpResponse,
   TagChoiceOption,
@@ -35,12 +38,20 @@ import type {
   TopicPoster,
   TopicSummary,
   UserAccountPreferencesSnapshot,
+  UserActivityItem,
   UserPreferences,
   UserProfile,
 } from "./types";
 import { parseInternalTopicLink } from "./cooked";
 import { extractUsernameFromAvatarUrl } from "./palette";
 import { diagLog } from "./diagnostics";
+import { clearForumMediaBlobCache } from "./forumMedia";
+import { registerCustomSiteEmojis } from "./markdownPreview";
+import {
+  ScreenTrackController,
+  type TimingBatchPayload,
+  type TimingSendOutcome,
+} from "./screenTrack";
 
 export class SiteError extends Error {
   readonly isVerification: boolean;
@@ -388,9 +399,25 @@ export function setApiDarkTheme(isDark: boolean): void {
   currentApiDarkTheme = isDark;
 }
 
-export function triggerInteractiveVerifyOnce(manual = true): Promise<boolean> {
+export interface InteractiveVerifyOptions {
+  manual?: boolean;
+  forceRefresh?: boolean;
+}
+
+export function triggerInteractiveVerifyOnce(
+  manualOrOpts: boolean | InteractiveVerifyOptions = true
+): Promise<boolean> {
+  const manual =
+    typeof manualOrOpts === "boolean" ? manualOrOpts : (manualOrOpts.manual ?? true);
+  const forceRefresh =
+    typeof manualOrOpts === "boolean" ? false : Boolean(manual && manualOrOpts.forceRefresh);
   if (inflightVerifyReplayPromise) return inflightVerifyReplayPromise;
-  inflightVerifyReplayPromise = siteVerify(false, currentApiDarkTheme, manual).finally(() => {
+  inflightVerifyReplayPromise = siteVerify(
+    false,
+    currentApiDarkTheme,
+    manual,
+    forceRefresh
+  ).finally(() => {
     inflightVerifyReplayPromise = null;
   });
   return inflightVerifyReplayPromise;
@@ -399,15 +426,26 @@ export function triggerInteractiveVerifyOnce(manual = true): Promise<boolean> {
 export async function siteVerify(
   login: boolean,
   isDark: boolean,
-  manual = true
+  manual = true,
+  forceRefresh = false
 ): Promise<boolean> {
+  const effectiveForceRefresh = Boolean(!login && manual && forceRefresh);
   diagLog(
     "INFO",
     "AUTH",
     "AuthPending",
-    login ? "已打开内置登录窗口，等待完成登录" : "已打开站点安全验证窗口，等待完成验证"
+    login
+      ? "已打开内置登录窗口，等待完成登录"
+      : effectiveForceRefresh
+        ? "已打开站点安全验证窗口，刷新验证票据"
+        : "已打开站点安全验证窗口，等待完成验证"
   );
-  const ok = await invoke<boolean>("site_verify", { login, isDark, manual });
+  const ok = await invoke<boolean>("site_verify", {
+    login,
+    isDark,
+    manual,
+    forceRefresh: effectiveForceRefresh,
+  });
   if (ok) {
     globalRateLimitUntilMs = 0;
     shortFeedCache.clear();
@@ -520,6 +558,29 @@ export async function recordReadFloorInRust(topicId: number, floor: number): Pro
 
 export async function clearReadHistoryInRust(): Promise<void> {
   return invoke("clear_read_history");
+}
+
+export async function clearLocalCachesInRust(): Promise<ClearLocalCachesResult> {
+  clearTopicDetailCache();
+  userAvatarMemoryCache.clear();
+  knownBadgesCache.clear();
+  followFeedCursors.clear();
+  cachedSiteCustomEmojis = null;
+  recentLinkTopicsCache = null;
+  const clearedBlobEntries = clearForumMediaBlobCache();
+
+  try {
+    const res = await invoke<ClearLocalCachesResult>("clear_local_caches");
+    return {
+      freedBytes: Number(res?.freedBytes ?? 0),
+      clearedEntries: Number(res?.clearedEntries ?? 0) + clearedBlobEntries,
+    };
+  } catch {
+    return {
+      freedBytes: 0,
+      clearedEntries: clearedBlobEntries,
+    };
+  }
 }
 
 export async function saveLocalDraftInRust(draft: LocalDraftRecord): Promise<void> {
@@ -2663,94 +2724,73 @@ export async function removeUserFromPm(topicId: number, username: string): Promi
   });
 }
 
-// Single-flight coalesced `topics/timings` reporter so rapid 144Hz scroll never piles up concurrent POSTs!
-const pendingTimingsByTopic = new Map<number, Set<number>>();
-let timingsFlushTimer: ReturnType<typeof setTimeout> | null = null;
-let timingsInFlight = false;
-let timingsPausedForVerify = false;
+// Real dwell-time ScreenTrack engine (`src/lib/screenTrack.ts`) backed by official Discourse `/topics/timings` headers & retry queue.
+export async function sendTopicTimingsBatch(
+  batch: TimingBatchPayload
+): Promise<TimingSendOutcome> {
+  const entries = Object.entries(batch.timings).filter(
+    ([k, ms]) => Number(k) > 0 && Number.isFinite(ms) && ms > 0
+  );
+  if (batch.topicId <= 0 || entries.length === 0) return "ok";
+
+  const form: Record<string, string> = {
+    topic_id: String(batch.topicId),
+    topic_time: String(Math.max(100, Math.round(batch.topicTimeMs))),
+  };
+  for (const [postNum, ms] of entries) {
+    form[`timings[${postNum}]`] = String(Math.max(100, Math.round(ms)));
+  }
+
+  try {
+    const res = await siteRequest(
+      "https://linux.do/topics/timings",
+      "POST",
+      form,
+      {
+        "Discourse-Background": "true",
+        "X-SILENCE-LOGGER": "true",
+        "Discourse-Present": batch.isPresent ? "true" : "false",
+        "Discourse-Logged-In": "true",
+      },
+      { silentDiag: true }
+    );
+    if (res.status >= 200 && res.status < 300 && !res.isChallenge && !res.isUnauthenticated) {
+      return "ok";
+    }
+    if (res.isChallenge || res.isUnauthenticated || res.status === 401 || res.status === 403 || res.status === 404) {
+      return "drop";
+    }
+    return "retryable";
+  } catch {
+    return "retryable";
+  }
+}
+
+export const desktopScreenTrack = new ScreenTrackController({
+  sendBatch: sendTopicTimingsBatch,
+  onConfirmed: (topicId, maxPostNum) => {
+    recordConfirmedTopicFloorForNotifications(topicId, maxPostNum);
+  },
+});
 
 /**
  * Cloudflare 验证期间冻结并丢弃阻塞期未发出的阅读时长批次（借鉴 FluxDO 经验），
  * 避免过盾恢复瞬间积压的 `/topics/timings` 齐射把刚恢复的通道直接打成 429。
  */
 export function pauseAndDropPendingTimings(): void {
-  timingsPausedForVerify = true;
-  pendingTimingsByTopic.clear();
-  if (timingsFlushTimer) {
-    clearTimeout(timingsFlushTimer);
-    timingsFlushTimer = null;
-  }
+  desktopScreenTrack.pauseAndDropPending();
 }
 
 export function resumeTimingsAfterVerify(): void {
-  timingsPausedForVerify = false;
-}
-
-async function drainPendingTimings(): Promise<void> {
-  if (timingsPausedForVerify || timingsInFlight || pendingTimingsByTopic.size === 0) return;
-  timingsInFlight = true;
-  try {
-    while (pendingTimingsByTopic.size > 0) {
-      const nextEntry = pendingTimingsByTopic.entries().next().value as [number, Set<number>] | undefined;
-      if (!nextEntry) break;
-      const [topicId, set] = nextEntry;
-      pendingTimingsByTopic.delete(topicId);
-      const nums = Array.from(set).slice(0, 25);
-      if (nums.length === 0) continue;
-      const form: Record<string, string> = {
-        topic_id: String(topicId),
-        topic_time: String(Math.min(12000, Math.max(2200, nums.length * 900))),
-      };
-      for (const num of nums) {
-        form[`timings[${num}]`] = "1500";
-      }
-      try {
-        const res = await siteRequest(
-          "https://linux.do/topics/timings",
-          "POST",
-          form,
-          { "Discourse-Background": "true" },
-          { silentDiag: true }
-        );
-        if (res.status >= 200 && res.status < 300 && !res.isChallenge && !res.isUnauthenticated) {
-          const maxNum = nums.reduce((acc, n) => (n > acc ? n : acc), 0);
-          if (maxNum > 0) {
-            recordConfirmedTopicFloorForNotifications(topicId, maxNum);
-          }
-        }
-      } catch {
-        // non-fatal background telemetry
-        break;
-      }
-    }
-  } finally {
-    timingsInFlight = false;
-  }
+  desktopScreenTrack.resumeAfterVerify();
 }
 
 export async function flushTopicTimingsNow(): Promise<void> {
-  if (timingsFlushTimer) {
-    clearTimeout(timingsFlushTimer);
-    timingsFlushTimer = null;
-  }
-  await drainPendingTimings();
+  await desktopScreenTrack.flushNow();
 }
 
 export async function reportTopicTimings(topicId: number, postNumbers: number[]): Promise<void> {
-  if (timingsPausedForVerify || postNumbers.length === 0) return;
-  let bucket = pendingTimingsByTopic.get(topicId);
-  if (!bucket) {
-    bucket = new Set<number>();
-    pendingTimingsByTopic.set(topicId, bucket);
-  }
-  for (const n of postNumbers) {
-    if (n > 0) bucket.add(n);
-  }
-  if (timingsFlushTimer) clearTimeout(timingsFlushTimer);
-  timingsFlushTimer = setTimeout(() => {
-    timingsFlushTimer = null;
-    void drainPendingTimings();
-  }, 2400);
+  desktopScreenTrack.recordManualTimings(topicId, postNumbers);
 }
 
 /* ==================== 5. 社区通知中心 (1:1 对齐 fetchUserNotifications & parseNotificationItemsFromRoot) ==================== */
@@ -3153,6 +3193,58 @@ export async function searchCommunity(
   return parseSearchRoot(data);
 }
 
+let recentLinkTopicsCache: { at: number; items: CommunitySearchHit[] } | null = null;
+
+export async function fetchRecentTopicsForLinkPicker(limit = 15): Promise<CommunitySearchHit[]> {
+  const now = Date.now();
+  if (recentLinkTopicsCache && now - recentLinkTopicsCache.at < 45_000 && recentLinkTopicsCache.items.length > 0) {
+    return recentLinkTopicsCache.items.slice(0, limit);
+  }
+  const mapTopicToHit = (t: TopicSummary): CommunitySearchHit => ({
+    id: `recent_${t.id}`,
+    topicId: t.id,
+    postNumber: 1,
+    title: t.title,
+    blurb: "",
+    username: t.originalPoster?.username || "linuxdo",
+    avatarTemplate: t.originalPoster?.avatarTemplate || "",
+    createdAt: t.lastPostedAt || t.createdAt || "",
+    categoryId: t.categoryId,
+    categoryName: t.categoryName,
+    categoryColorHex: t.categoryColorHex,
+    likeCount: t.likeCount || 0,
+    postsCount: t.postsCount || 1,
+  });
+
+  try {
+    const { topics } = await fetchTopicFeed({ sort: "latest", page: 0 });
+    const hits = topics.slice(0, limit).map(mapTopicToHit);
+    if (hits.length > 0) {
+      recentLinkTopicsCache = { at: now, items: hits };
+      return hits;
+    }
+  } catch {
+    // Graceful fallback to local visited history if network fails
+  }
+  return getLocalTopicHistory()
+    .slice(0, limit)
+    .map((h) => ({
+      id: `hist_${h.topicId}`,
+      topicId: h.topicId,
+      postNumber: 1,
+      title: h.title,
+      blurb: "",
+      username: h.authorUsername || "linuxdo",
+      avatarTemplate: h.authorAvatar || "",
+      createdAt: h.visitedAt || "",
+      categoryId: h.categoryId,
+      categoryName: h.categoryName,
+      categoryColorHex: h.categoryColorHex,
+      likeCount: 0,
+      postsCount: (h.replyCount || 0) + 1,
+    }));
+}
+
 export async function searchTopicsForLinkPicker(query: string): Promise<CommunitySearchHit[]> {
   const cleanQ = query.trim();
   if (!cleanQ) return [];
@@ -3441,45 +3533,103 @@ export async function sendPrivateMessage(params: {
   return Number(res?.topic_id || res?.post?.topic_id || 0);
 }
 
+function parseCloudDraftObject(obj: any, fallbackKey = ""): CloudDraftItem | null {
+  const draftKey = String(obj?.draft_key || fallbackKey || "").trim();
+  if (!draftKey) return null;
+  let dObj: any = {};
+  if (obj?.data && typeof obj.data === "object") {
+    dObj = obj.data;
+  } else if (typeof obj?.data === "string" && obj.data.trim().startsWith("{")) {
+    dObj = safeJson(obj.data) || {};
+  } else if (typeof obj?.draft === "string" && obj.draft.trim().startsWith("{")) {
+    dObj = safeJson(obj.draft) || {};
+  } else if (obj?.draft && typeof obj.draft === "object") {
+    dObj = obj.draft;
+  }
+  const actionStr = String(dObj.action || "").toLowerCase();
+  const archetypeStr = String(dObj.archetypeId || dObj.archetype || obj?.archetype || "").toLowerCase();
+  const isPrivateMessage =
+    draftKey.startsWith("new_private_message") ||
+    draftKey.startsWith("pm_") ||
+    actionStr === "privatemessage" ||
+    actionStr === "private_message" ||
+    archetypeStr === "private_message";
+  const action: CloudDraftItem["action"] = isPrivateMessage
+    ? "PRIVATE_MESSAGE"
+    : actionStr === "edit" || draftKey.startsWith("edit")
+      ? "EDIT"
+      : obj?.topic_id || draftKey.startsWith("topic_") || draftKey.startsWith("reply_")
+        ? "REPLY"
+        : "NEW_TOPIC";
+
+  const rawText = String(dObj.reply || dObj.raw || "");
+  const titleText = String(dObj.title || obj?.title || "");
+  if (!rawText.trim() && !titleText.trim()) return null;
+
+  const recipients = Array.isArray(dObj.recipients)
+    ? dObj.recipients.map((r: any) => String(r || "").trim()).filter(Boolean).join(", ")
+    : typeof dObj.recipients === "string"
+      ? dObj.recipients.trim()
+      : undefined;
+
+  return {
+    draftKey,
+    sequence: Number(obj?.sequence ?? obj?.draft_sequence ?? 0),
+    action,
+    topicId: obj?.topic_id
+      ? Number(obj.topic_id)
+      : dObj.topic_id
+        ? Number(dObj.topic_id)
+        : draftKey.startsWith("topic_")
+          ? Number(draftKey.slice(6)) || null
+          : null,
+    postId: dObj.postId ? Number(dObj.postId) : dObj.post_id ? Number(dObj.post_id) : null,
+    replyToPostNumber: dObj.replyToPostNumber
+      ? Number(dObj.replyToPostNumber)
+      : dObj.replyToPostId
+        ? Number(dObj.replyToPostId)
+        : null,
+    categoryId: obj?.category_id
+      ? Number(obj.category_id)
+      : dObj.categoryId
+        ? Number(dObj.categoryId)
+        : null,
+    title: titleText,
+    raw: rawText,
+    tags: Array.isArray(dObj.tags) ? dObj.tags.map((t: any) => String(t)) : [],
+    recipients: recipients || undefined,
+    createdAt: obj?.created_at ? String(obj.created_at) : undefined,
+  };
+}
+
 export async function fetchCloudDrafts(): Promise<CloudDraftItem[]> {
   const data = await getJsonOrThrow("https://linux.do/drafts.json");
   const arr: any[] = Array.isArray(data?.drafts) ? data.drafts : [];
   return arr
-    .map((obj): CloudDraftItem | null => {
-      const draftKey = String(obj?.draft_key || "");
-      if (!draftKey) return null;
-      let dObj: any = {};
-      if (obj.data && typeof obj.data === "object") {
-        dObj = obj.data;
-      } else if (typeof obj.data === "string" && obj.data.trim().startsWith("{")) {
-        dObj = safeJson(obj.data) || {};
-      }
-      const actionStr = String(dObj.action || "");
-      const action: "NEW_TOPIC" | "REPLY" | "EDIT" =
-        actionStr === "edit" || draftKey.startsWith("edit")
-          ? "EDIT"
-          : obj.topic_id || draftKey.startsWith("topic_")
-            ? "REPLY"
-            : "NEW_TOPIC";
-      return {
-        draftKey,
-        sequence: Number(obj.sequence || 0),
-        action,
-        topicId: obj.topic_id ? Number(obj.topic_id) : dObj.topic_id ? Number(dObj.topic_id) : null,
-        postId: dObj.postId ? Number(dObj.postId) : null,
-        replyToPostNumber: dObj.replyToPostId ? Number(dObj.replyToPostId) : null,
-        categoryId: obj.category_id
-          ? Number(obj.category_id)
-          : dObj.categoryId
-            ? Number(dObj.categoryId)
-            : null,
-        title: String(dObj.title || obj.title || ""),
-        raw: String(dObj.reply || dObj.raw || ""),
-        tags: Array.isArray(dObj.tags) ? dObj.tags.map((t: any) => String(t)) : [],
-        createdAt: obj.created_at ? String(obj.created_at) : undefined,
-      };
-    })
+    .map((obj) => parseCloudDraftObject(obj))
     .filter((x): x is CloudDraftItem => Boolean(x));
+}
+
+export async function fetchSingleCloudDraft(draftKey: string): Promise<CloudDraftItem | null> {
+  const cleanKey = draftKey.trim();
+  if (!cleanKey) return null;
+  try {
+    const data = await getJsonOrThrow(
+      `https://linux.do/drafts/${encodeURIComponent(cleanKey)}.json`
+    );
+    if (!data || (!data.draft && !data.data)) return null;
+    return parseCloudDraftObject(
+      {
+        draft_key: cleanKey,
+        draft: data.draft,
+        data: data.data,
+        sequence: data.draft_sequence ?? data.sequence ?? 0,
+      },
+      cleanKey
+    );
+  } catch {
+    return null;
+  }
 }
 
 export async function saveCloudDraft(params: {
@@ -3512,6 +3662,180 @@ export async function fetchUserCardDetail(username: string): Promise<any> {
   return getJsonOrThrow(`https://linux.do/u/${encodeURIComponent(username)}/card.json`);
 }
 
+function parseUserBadgesFromPayload(root: any): GrantedBadge[] {
+  if (!root || typeof root !== "object") return [];
+  const defs = new Map<number, any>();
+  for (const b of root.badges ?? []) {
+    if (b?.id) defs.set(Number(b.id), b);
+  }
+  readBadgeDefinitionsAny(root.badges);
+  const out: GrantedBadge[] = [];
+  const seen = new Set<number>();
+
+  if (Array.isArray(root.user_badges) && root.user_badges.length > 0) {
+    for (const ub of root.user_badges) {
+      const bid = Number(ub?.badge_id ?? ub?.id ?? 0);
+      if (!bid || seen.has(bid)) continue;
+      const def = defs.get(bid);
+      const mergedObj = def
+        ? { ...def, count: ub?.count ?? def.count ?? 1, granted_at: ub?.granted_at ?? def.granted_at }
+        : ub;
+      const parsed = parseGrantedBadgeObj(mergedObj, bid);
+      if (parsed && parsed.id > 0) {
+        seen.add(parsed.id);
+        out.push(parsed);
+      }
+    }
+  }
+  if (Array.isArray(root.badges)) {
+    for (const b of root.badges) {
+      const parsed = parseGrantedBadgeObj(b);
+      if (parsed && parsed.id > 0 && !seen.has(parsed.id)) {
+        seen.add(parsed.id);
+        out.push(parsed);
+      }
+    }
+  }
+  return out;
+}
+
+export async function fetchPublicUserProfile(username: string): Promise<PublicUserProfile> {
+  const clean = username.trim().replace(/^@/, "");
+  const encoded = encodeURIComponent(clean);
+
+  const [userRoot, summaryRoot] = await Promise.all([
+    getJsonOrThrow(`https://linux.do/u/${encoded}.json`).catch(() =>
+      getJsonOrThrow(`https://linux.do/u/${encoded}/card.json`)
+    ),
+    getJsonOrThrow(`https://linux.do/u/${encoded}/summary.json`).catch(() => null),
+  ]);
+
+  const u = userRoot?.user;
+  if (!u || typeof u !== "object") {
+    throw new SiteError("未能读取该用户的公开资料");
+  }
+
+  const us = summaryRoot?.user_summary || {};
+  const mergedBadges: GrantedBadge[] = [];
+  const seenBadgeIds = new Set<number>();
+  for (const b of [
+    ...parseUserBadgesFromPayload(userRoot),
+    ...parseUserBadgesFromPayload(summaryRoot),
+  ]) {
+    if (!seenBadgeIds.has(b.id)) {
+      seenBadgeIds.add(b.id);
+      mergedBadges.push(b);
+    }
+  }
+
+  const resolvedUsername = String(u.username || clean);
+  const avatarTemplate = String(u.avatar_template || "");
+  if (avatarTemplate) {
+    userAvatarMemoryCache.set(resolvedUsername.toLowerCase(), avatarTemplate);
+  }
+
+  const websiteUrl = String(u.website || "").trim();
+  const websiteName = String(u.website_name || "").trim() || websiteUrl;
+  const rawStatus = u.status && typeof u.status === "object" ? u.status : null;
+  const status =
+    rawStatus && (rawStatus.emoji || rawStatus.description)
+      ? {
+          emoji: rawStatus.emoji ? String(rawStatus.emoji).trim() : null,
+          description: rawStatus.description ? String(rawStatus.description).trim() : null,
+        }
+      : null;
+
+  return {
+    id: Number(u.id || 0),
+    username: resolvedUsername,
+    displayName: String(u.name || "").trim() || resolvedUsername,
+    avatarTemplate,
+    animatedAvatar: u.animated_avatar ? String(u.animated_avatar) : null,
+    trustLevel: Number(u.trust_level ?? 1),
+    title: String(u.title || "").trim(),
+    bioExcerptHtml: String(u.bio_excerpt || u.bio_cooked || "").trim(),
+    primaryGroupName: u.primary_group_name ? String(u.primary_group_name).trim() : null,
+    admin: Boolean(u.admin),
+    moderator: Boolean(u.moderator),
+    flair: parseFlairFromObj(u),
+    status,
+    createdAtText: String(u.created_at || "").slice(0, 10),
+    lastSeenText: String(u.last_seen_at || u.last_posted_at || "").trim(),
+    location: String(u.location || "").trim(),
+    websiteName,
+    websiteUrl,
+    solvedCount: Number(us.solved_count ?? u.solved_count ?? 0),
+    daysVisited: Number(us.days_visited ?? 0),
+    timeReadSeconds: Number(us.time_read ?? 0),
+    topicsEntered: Number(us.topics_entered ?? 0),
+    postsReadCount: Number(us.posts_read_count ?? 0),
+    likesReceived: Number(us.likes_received ?? 0),
+    likesGiven: Number(us.likes_given ?? 0),
+    topicCount: Number(us.topic_count ?? 0),
+    postCount: Number(us.post_count ?? 0),
+    badgeCount: Math.max(Number(u.badge_count ?? 0), mergedBadges.length),
+    badges: mergedBadges,
+    canFollow: u.can_follow !== false,
+    isFollowedHint:
+      typeof u.is_followed === "boolean"
+        ? u.is_followed
+        : typeof u.following === "boolean"
+          ? u.following
+          : undefined,
+  };
+}
+
+export function mapRawUserActionItem(raw: any): UserActivityItem | null {
+  if (!raw || typeof raw !== "object") return null;
+  const topicId = Number(raw.topic_id || 0);
+  if (!topicId) return null;
+  const postNumber = Number(raw.post_number || 1);
+  const categoryId = raw.category_id != null ? Number(raw.category_id) : undefined;
+  const catMeta = categoryId
+    ? getCachedCategories().find((c) => c.id === categoryId)
+    : undefined;
+  return {
+    id: Number(raw.post_id || topicId * 1000 + postNumber),
+    topicId,
+    postNumber,
+    title: stripHtmlTags(String(raw.title || `话题 #${topicId}`)),
+    excerpt: raw.excerpt ? stripHtmlTags(String(raw.excerpt)) : "",
+    actionType: Number(raw.action_type ?? 5),
+    createdAt: String(raw.created_at || ""),
+    categoryId,
+    categoryName:
+      catMeta?.displayName ||
+      catMeta?.name ||
+      (categoryId ? CANONICAL_NAME_BY_ID.get(categoryId) : undefined),
+    categoryColorHex: catMeta?.colorHex,
+  };
+}
+
+export async function fetchUserActivityItems(
+  username: string,
+  filter?: string | null,
+  offset = 0
+): Promise<UserActivityItem[]> {
+  const rawList = await fetchUserActions(username, filter ?? "", offset);
+  return rawList
+    .map(mapRawUserActionItem)
+    .filter((x): x is UserActivityItem => Boolean(x));
+}
+
+export function mapSiteBadgeList(rawList: any[], isEarned = false): GrantedBadge[] {
+  if (!Array.isArray(rawList)) return [];
+  const out: GrantedBadge[] = [];
+  const seen = new Set<number>();
+  for (const item of rawList) {
+    const parsed = parseGrantedBadgeObj(item);
+    if (parsed && parsed.id > 0 && !seen.has(parsed.id)) {
+      seen.add(parsed.id);
+      out.push({ ...parsed, isEarned });
+    }
+  }
+  return out;
+}
+
 export async function toggleFollowUser(username: string, follow: boolean): Promise<void> {
   await mutateJsonOrThrow(
     `https://linux.do/follow/${encodeURIComponent(username)}.json`,
@@ -3519,14 +3843,109 @@ export async function toggleFollowUser(username: string, follow: boolean): Promi
   );
 }
 
+const DEFAULT_SITE_CUSTOM_EMOJIS: CustomEmojiItem[] = [
+  {
+    name: "tieba_087",
+    url: "https://linux.do/uploads/default/original/3X/2/e/2e092708f7b0a5e8f8a4b2520e3f452d62a3ef59.png",
+    group: "社区常用",
+  },
+];
+
+let cachedSiteCustomEmojis: CustomEmojiItem[] | null = null;
+let inflightSiteCustomEmojis: Promise<CustomEmojiItem[]> | null = null;
+
+function normalizeEmojiUrl(rawUrl: string): string {
+  const u = (rawUrl || "").trim();
+  if (!u) return "";
+  if (u.startsWith("https://") || u.startsWith("http://")) return u;
+  if (u.startsWith("//")) return `https:${u}`;
+  if (u.startsWith("/")) return `https://linux.do${u}`;
+  return `https://linux.do/${u}`;
+}
+
+export async function fetchSiteCustomEmojis(forceRefresh = false): Promise<CustomEmojiItem[]> {
+  if (!forceRefresh && cachedSiteCustomEmojis && cachedSiteCustomEmojis.length > 0) {
+    return cachedSiteCustomEmojis;
+  }
+  if (!forceRefresh && inflightSiteCustomEmojis) {
+    return inflightSiteCustomEmojis;
+  }
+
+  const run = (async (): Promise<CustomEmojiItem[]> => {
+    try {
+      const data = await getJsonOrThrow("https://linux.do/emojis.json");
+      const out: CustomEmojiItem[] = [];
+      const seen = new Set<string>();
+
+      const pushEntry = (raw: any, groupName: string) => {
+        const name = String(raw?.name || "").trim().replace(/^:|:$/g, "");
+        const url = normalizeEmojiUrl(String(raw?.url || ""));
+        if (!name || !url) return;
+        const lower = name.toLowerCase();
+        if (seen.has(lower)) return;
+        seen.add(lower);
+        out.push({
+          name,
+          url,
+          group: String(raw?.group || groupName || "社区自定义").trim() || "社区自定义",
+        });
+      };
+
+      if (Array.isArray(data)) {
+        for (const item of data) pushEntry(item, "社区自定义");
+      } else if (data && typeof data === "object") {
+        for (const [groupKey, list] of Object.entries(data)) {
+          if (Array.isArray(list)) {
+            for (const item of list) {
+              pushEntry(item, groupKey);
+            }
+          }
+        }
+      }
+
+      const finalList = out.length > 0 ? out : DEFAULT_SITE_CUSTOM_EMOJIS;
+      cachedSiteCustomEmojis = finalList;
+      registerCustomSiteEmojis(finalList);
+      return finalList;
+    } catch {
+      cachedSiteCustomEmojis = DEFAULT_SITE_CUSTOM_EMOJIS;
+      registerCustomSiteEmojis(DEFAULT_SITE_CUSTOM_EMOJIS);
+      return DEFAULT_SITE_CUSTOM_EMOJIS;
+    } finally {
+      inflightSiteCustomEmojis = null;
+    }
+  })();
+
+  inflightSiteCustomEmojis = run;
+  return run;
+}
+
 export async function fetchUserFollowList(
   username: string,
-  followers = false
+  followers = false,
+  viewerUsername?: string | null
 ): Promise<FollowUserEntry[]> {
   const kind = followers ? "followers" : "following";
-  const data = await getJsonOrThrow(
-    `https://linux.do/u/${encodeURIComponent(username)}/follow/${kind}.json`
-  );
+  const [data, viewerFollowingRaw] = await Promise.all([
+    getJsonOrThrow(`https://linux.do/u/${encodeURIComponent(username)}/follow/${kind}.json`),
+    followers && (viewerUsername || username)
+      ? getJsonOrThrow(
+          `https://linux.do/u/${encodeURIComponent(viewerUsername || username)}/follow/following.json`
+        ).catch(() => null)
+      : Promise.resolve(null),
+  ]);
+
+  const followingSet = new Set<string>();
+  if (viewerFollowingRaw) {
+    const fArr: any[] = Array.isArray(viewerFollowingRaw)
+      ? viewerFollowingRaw
+      : viewerFollowingRaw?.users ?? viewerFollowingRaw?.following ?? viewerFollowingRaw?.follow ?? [];
+    for (const f of fArr) {
+      const u = String(f?.username || "").trim().toLowerCase();
+      if (u) followingSet.add(u);
+    }
+  }
+
   const arr: any[] = Array.isArray(data)
     ? data
     : data?.users ?? data?.[kind] ?? data?.follow ?? [];
@@ -3534,21 +3953,52 @@ export async function fetchUserFollowList(
     .map((u: any): FollowUserEntry | null => {
       const uname = String(u?.username || "").trim();
       if (!uname) return null;
+      const lower = uname.toLowerCase();
+      const crossCheckedFollowing = followers
+        ? viewerFollowingRaw !== null
+          ? followingSet.has(lower)
+          : Boolean(u?.is_followed ?? u?.following)
+        : true;
       return {
         username: uname,
         displayName: String(u?.name || uname),
         avatarTemplate: String(u?.avatar_template || ""),
         animatedAvatar: u?.animated_avatar ? String(u.animated_avatar) : null,
         bio: u?.bio_excerpt ? stripHtmlTags(String(u.bio_excerpt)) : undefined,
-        isFollowing: followers ? Boolean(u?.is_followed ?? u?.following) : true,
+        trustLevel: u?.trust_level != null ? Number(u.trust_level) : undefined,
+        title: u?.title ? String(u.title).trim() : undefined,
+        isFollowing: crossCheckedFollowing,
       };
     })
     .filter((x): x is FollowUserEntry => Boolean(x));
 }
 
+export async function fetchUserBookmarksPage(
+  username: string,
+  page = 0
+): Promise<{ bookmarks: any[]; hasMore: boolean }> {
+  const qs = page > 0 ? `?page=${page}` : "";
+  const data = await getJsonOrThrow(
+    `https://linux.do/u/${encodeURIComponent(username)}/bookmarks.json${qs}`
+  );
+  const bookmarks: any[] = data?.user_bookmark_list?.bookmarks ?? [];
+  const moreUrl = String(data?.user_bookmark_list?.more_bookmarks_url || "").trim();
+  return {
+    bookmarks,
+    hasMore: Boolean(moreUrl) && bookmarks.length > 0,
+  };
+}
+
 export async function fetchUserBookmarks(username: string): Promise<any[]> {
-  const data = await getJsonOrThrow(`https://linux.do/u/${encodeURIComponent(username)}/bookmarks.json`);
-  return data?.user_bookmark_list?.bookmarks ?? [];
+  const res = await fetchUserBookmarksPage(username, 0);
+  return res.bookmarks;
+}
+
+export async function fetchBadgeDetailById(badgeId: number): Promise<GrantedBadge | null> {
+  if (!badgeId || badgeId <= 0) return null;
+  const data = await getJsonOrThrow(`https://linux.do/badges/${badgeId}.json`);
+  const raw = data?.badge || data?.badges?.[0] || data;
+  return parseGrantedBadgeObj(raw, badgeId);
 }
 
 export async function fetchUserActions(username: string, filter = "1,4,5", offset = 0): Promise<any[]> {
@@ -3617,6 +4067,20 @@ export async function fetchUserAccountPreferences(
     new Set([...badgeTitles, ...groupTitles, ...(currentTitle ? [currentTitle] : [])])
   );
 
+  const activeDeviceCount = Array.isArray(u.user_auth_tokens)
+    ? u.user_auth_tokens.length
+    : null;
+  const associatedAccounts: string[] = Array.isArray(u.associated_accounts)
+    ? u.associated_accounts
+        .map((acc: any) => {
+          const name = String(acc?.name || "").trim();
+          const desc = String(acc?.description || "").trim();
+          if (!name) return "";
+          return desc ? `${name} (${desc})` : name;
+        })
+        .filter(Boolean)
+    : [];
+
   return {
     username: String(u.username || username),
     displayName: String(u.name || ""),
@@ -3627,8 +4091,12 @@ export async function fetchUserAccountPreferences(
     website: String(u.website || ""),
     trustLevel: Number(u.trust_level ?? 1),
     createdAtText: String(u.created_at || "").slice(0, 10),
+    twoFactorEnabled:
+      typeof u.second_factor_enabled === "boolean" ? u.second_factor_enabled : null,
     hideProfileAndPresence: Boolean(uOpt.hide_profile_and_presence),
     allowPrivateMessages: uOpt.allow_private_messages !== false,
+    activeDeviceCount,
+    associatedAccounts,
     availableTitles,
   };
 }

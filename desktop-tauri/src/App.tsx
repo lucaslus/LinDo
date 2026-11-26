@@ -36,7 +36,6 @@ import {
   getCachedCategories,
   getCachedTopicDetail,
   getEchStatus,
-  importManualCredentialInRust,
   invalidateNotificationShortCache,
   logoutAccount,
   markManualRetryIntent,
@@ -58,6 +57,14 @@ import {
   triggerInteractiveVerifyOnce,
 } from "./lib/api";
 import { applyPaletteToDocument, performSmoothThemeSwitch } from "./lib/palette";
+import {
+  DEFAULT_GUEST_LOGIN_PROMPT,
+  MESSAGES_GUEST_LOGIN_PROMPT,
+  PROFILE_GUEST_LOGIN_PROMPT,
+  buildExpiredSessionGuestPrompt,
+  resolveAccountManagementTarget,
+  resolveRestrictedCategorySelection,
+} from "./lib/guestLoginFlow";
 import { parseInternalTopicLink } from "./lib/cooked";
 import { applyTopicFilterResult } from "./lib/topicTransition";
 import {
@@ -282,6 +289,8 @@ export const App: React.FC = () => {
   const [isDraggingSplit, setIsDraggingSplit] = useState(false);
   const [cfAttentionNeeded, setCfAttentionNeeded] = useState(false);
   const [cfAttentionDismissed, setCfAttentionDismissed] = useState(false);
+  const [manualVerifyBusy, setManualVerifyBusy] = useState(false);
+  const [lastVerifiedAtMs, setLastVerifiedAtMs] = useState<number | null>(null);
   const [verifyPill, setVerifyPill] = useState<{
     visible: boolean;
     round: number;
@@ -1089,6 +1098,51 @@ export const App: React.FC = () => {
     }
   }, [isWideLayout, currentTab, openMessageTopic, openTopic]);
 
+  const requestGuestLogin = useCallback(
+    (
+      title: string = DEFAULT_GUEST_LOGIN_PROMPT.title,
+      subtitle: string = DEFAULT_GUEST_LOGIN_PROMPT.subtitle
+    ) => {
+      setShowAuthModal(false);
+      setAuthModalStartAdding(false);
+      setAuthStatusHint(null);
+      setGuestPrompt({ title, subtitle });
+    },
+    []
+  );
+
+  const openAccountManagement = useCallback(() => {
+    if (resolveAccountManagementTarget(isAuthorized, savedAccounts.length) === "guest_guide") {
+      requestGuestLogin();
+      return;
+    }
+    setGuestPrompt(null);
+    setAuthStatusHint(null);
+    setAuthModalStartAdding(false);
+    setShowAuthModal(true);
+  }, [isAuthorized, savedAccounts.length, requestGuestLogin]);
+
+  const openQrLoginRedeem = useCallback(() => {
+    setGuestPrompt(null);
+    setShowAuthModal(false);
+    setAuthModalStartAdding(false);
+    setAuthStatusHint(null);
+    setQrLoginInitialMode("redeem");
+    setShowQrLoginModal(true);
+  }, []);
+
+  const handleSelectHomeCategory = useCallback(
+    (catId: number | null) => {
+      const decision = resolveRestrictedCategorySelection(catId, categories, isAuthorized);
+      if (decision.blocked) {
+        requestGuestLogin(decision.prompt.title, decision.prompt.subtitle);
+        return;
+      }
+      setSelectedCategoryId(decision.categoryId);
+    },
+    [categories, isAuthorized, requestGuestLogin]
+  );
+
   const handleSelectCategoryFromReader = useCallback(
     (categoryId?: number, slug?: string) => {
       let targetCat =
@@ -1101,11 +1155,9 @@ export const App: React.FC = () => {
       }
       const resolvedId = targetCat?.id ?? categoryId;
       if (!resolvedId) return;
-      if (targetCat?.readRestricted && !isAuthorized) {
-        setGuestPrompt({
-          title: `登录后查看「${targetCat.name}」`,
-          subtitle: "该版块仅对登录会员开放，登录后即可浏览对应等级内容",
-        });
+      const decision = resolveRestrictedCategorySelection(resolvedId, categories, isAuthorized);
+      if (decision.blocked) {
+        requestGuestLogin(decision.prompt.title, decision.prompt.subtitle);
         return;
       }
       setSelectedCategoryId(resolvedId);
@@ -1114,7 +1166,7 @@ export const App: React.FC = () => {
       setNarrowShowingReader(false);
       if (feedCollapsed) setFeedCollapsed(false);
     },
-    [categories, isAuthorized, feedCollapsed]
+    [categories, isAuthorized, feedCollapsed, requestGuestLogin]
   );
 
   const handleSelectTagFromReader = useCallback(
@@ -1208,6 +1260,8 @@ export const App: React.FC = () => {
               setAuthStatusHint(null);
               setAuthModalStartAdding(false);
               setShowAuthModal(false);
+              setShowQrLoginModal(false);
+              setQrLoginInitialMode(undefined);
               setGuestPrompt(null);
               if (b.state.currentUser?.username) {
                 setGlobalNotice(`已登录 @${b.state.currentUser.username}`);
@@ -1222,6 +1276,7 @@ export const App: React.FC = () => {
         listen("lindo://verified", () => {
           setCfAttentionNeeded(false);
           setCfAttentionDismissed(false);
+          setLastVerifiedAtMs(Date.now());
           resumeTimingsAfterVerify();
           void drainPendingMarkReads();
           void flushTopicTimingsNow();
@@ -1683,10 +1738,10 @@ export const App: React.FC = () => {
             initialCategoryId: selectedCategoryId ?? undefined,
           });
         else
-          setGuestPrompt({
-            title: "登录后发布话题",
-            subtitle: "登录 LINUX DO 账号，与佬友分享你的发现与见解",
-          });
+          requestGuestLogin(
+            "登录后发布话题",
+            "登录 LINUX DO 账号，与佬友分享你的发现与见解"
+          );
       } else if (mod && e.key.toLowerCase() === "r" && inMainApp) {
         e.preventDefault();
         loadFeed();
@@ -1704,7 +1759,13 @@ export const App: React.FC = () => {
         else if (showGlobalSearch) setShowGlobalSearch(false);
         else if (guestPrompt) setGuestPrompt(null);
         else if (showLogoutConfirm) setShowLogoutConfirm(false);
-        else if (showAuthModal) setShowAuthModal(false);
+        else if (showQrLoginModal) {
+          setShowQrLoginModal(false);
+          setQrLoginInitialMode(undefined);
+        } else if (showAuthModal) {
+          setAuthModalStartAdding(false);
+          setShowAuthModal(false);
+        }
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -1733,10 +1794,12 @@ export const App: React.FC = () => {
     showGlobalSearch,
     guestPrompt,
     showLogoutConfirm,
+    showQrLoginModal,
     showAuthModal,
     isWideLayout,
     toggleFeedCollapse,
     platform,
+    requestGuestLogin,
   ]);
 
   const handlePrimaryWebLogin = useCallback(async () => {
@@ -1745,6 +1808,7 @@ export const App: React.FC = () => {
       browserAuthWatchdogRef.current = null;
     }
     setGuestPrompt(null);
+    setAuthModalStartAdding(false);
     setShowAuthModal(false);
     setAuthStatusHint(null);
     try {
@@ -1765,6 +1829,7 @@ export const App: React.FC = () => {
 
   const handleAddAccountWebLogin = useCallback(async () => {
     setGuestPrompt(null);
+    setAuthModalStartAdding(false);
     setShowAuthModal(false);
     setAuthStatusHint(null);
     try {
@@ -1797,23 +1862,22 @@ export const App: React.FC = () => {
     }
     try {
       await startBrowserOneClickAuth();
-      setAuthStatusHint("已在默认浏览器打开授权页，点击「授权」并在弹窗确认「打开 Lindo」即可自动完成登录");
-      setGlobalNotice("已在默认浏览器打开授权页，点击「授权」即可返回");
+      setAuthStatusHint("已在系统浏览器打开授权页，点击「授权」后返回即可");
+      setGlobalNotice("已在系统浏览器打开授权页");
       browserAuthWatchdogRef.current = setTimeout(() => {
         browserAuthWatchdogRef.current = null;
         diagLog(
           "WARN",
           "AUTH",
           "BrowserAuth",
-          "超过 45 秒未收到浏览器 discourse:// 授权回调（浏览器可能未放行打开应用弹窗）",
-          "请在浏览器弹窗点击「打开 Lindo」，或在登录窗点击「粘贴回调链接或 _t 完成登录」"
+          "超过 45 秒未收到浏览器授权返回（浏览器可能未放行打开应用弹窗）",
+          "请在浏览器弹窗点击「打开 Lindo」，或改用「使用 Linuxdo 登录」"
         );
-        setAuthStatusHint(
-          "暂未收到浏览器回调：请在浏览器弹窗点击「打开 Lindo」，或点击下方手动粘贴回调链接完成登录"
-        );
+        setAuthStatusHint("未收到浏览器返回，请重试或换一种方式登录");
       }, 45000);
     } catch (err: any) {
       setAuthStatusHint(err?.message || "无法打开系统浏览器授权");
+      setAuthModalStartAdding(true);
       setShowAuthModal(true);
     }
   }, [inMainApp]);
@@ -1834,54 +1898,73 @@ export const App: React.FC = () => {
             .catch(() => {});
           loadFeed();
           setGlobalNotice(`已切换至 @${uname}`);
-        } else {
-          setAuthStatusHint(`@${uname} 登录凭证已过期，请重新登录`);
+        } else if (isAuthorized) {
+          setAuthStatusHint(`@${uname} 登录已过期，请重新登录`);
           setAuthModalStartAdding(true);
           setShowAuthModal(true);
+        } else {
+          const prompt = buildExpiredSessionGuestPrompt(uname);
+          requestGuestLogin(prompt.title, prompt.subtitle);
         }
       } finally {
         setSwitchingBusy(false);
       }
     },
-    [syncFromRustState, loadFeed]
+    [isAuthorized, requestGuestLogin, syncFromRustState, loadFeed]
   );
 
-  const handleTriggerVerify = useCallback(async () => {
-    try {
-      const ok = await triggerInteractiveVerifyOnce();
-      if (ok) {
-        setCfAttentionNeeded(false);
-        setCfAttentionDismissed(false);
-        setFeedError(null);
-        setLoadMoreError(null);
-        setReaderError(null);
-        setMsgReaderError(null);
-        fetchSiteCategories(true)
-          .then(setCategories)
-          .catch(() => {});
-        loadFeed();
-        if (activeSummary && readerError) {
-          openTopic(activeSummary, { floor: targetFloor, forceRefresh: true });
+  const handleTriggerVerify = useCallback(
+    async (opts?: { forceRefresh?: boolean }) => {
+      const forceRefresh = Boolean(opts?.forceRefresh);
+      setManualVerifyBusy(true);
+      try {
+        const ok = await triggerInteractiveVerifyOnce({ manual: true, forceRefresh });
+        if (ok) {
+          setCfAttentionNeeded(false);
+          setCfAttentionDismissed(false);
+          setLastVerifiedAtMs(Date.now());
+          setFeedError(null);
+          setLoadMoreError(null);
+          setReaderError(null);
+          setMsgReaderError(null);
+          fetchSiteCategories(true)
+            .then(setCategories)
+            .catch(() => {});
+          loadFeed();
+          if (activeSummary) {
+            openTopic(activeSummary, { floor: targetFloor, forceRefresh: true });
+          }
+          if (msgSummary) {
+            openMessageTopic(msgSummary, { floor: msgTargetFloor, forceRefresh: true });
+          }
+          setGlobalNotice(forceRefresh ? "安全验证已刷新" : "连接验证正常");
         }
-        if (msgSummary && msgReaderError) {
-          openMessageTopic(msgSummary, { floor: msgTargetFloor, forceRefresh: true });
-        }
+      } catch {
+        setGlobalNotice("连接未完成，请重试");
+      } finally {
+        setManualVerifyBusy(false);
       }
-    } catch {
-      setGlobalNotice("连接未完成，请重试");
-    }
-  }, [
-    isDark,
-    loadFeed,
-    activeSummary,
-    readerError,
-    openTopic,
-    targetFloor,
-    msgSummary,
-    msgReaderError,
-    openMessageTopic,
-    msgTargetFloor,
-  ]);
+    },
+    [
+      loadFeed,
+      activeSummary,
+      openTopic,
+      targetFloor,
+      msgSummary,
+      openMessageTopic,
+      msgTargetFloor,
+    ]
+  );
+
+  // Entry A: Reactive verify (SideRail shield, banners, error cards) -> NEVER force-purges healthy ticket
+  const handleReactiveVerify = useCallback(() => {
+    void handleTriggerVerify({ forceRefresh: false });
+  }, [handleTriggerVerify]);
+
+  // Entry B: Explicit Settings -> 站点安全验证 -> single-shot manual forceRefresh
+  const handleForceRefreshVerify = useCallback(() => {
+    void handleTriggerVerify({ forceRefresh: true });
+  }, [handleTriggerVerify]);
 
   const handleLoadMoreTopics = useCallback(async () => {
     if (loadingMoreTopics || !hasMoreTopics || feedLoading) return;
@@ -2194,7 +2277,7 @@ export const App: React.FC = () => {
             openTopic(activeSummary, { forceRefresh: true });
           }
         }}
-        onTriggerVerify={handleTriggerVerify}
+        onTriggerVerify={handleReactiveVerify}
       />
     );
   };
@@ -2212,25 +2295,8 @@ export const App: React.FC = () => {
           hasSavedAccounts={savedAccounts.length > 0}
           onPrimaryWebLogin={handlePrimaryWebLogin}
           onBrowserOneClickAuth={handleBrowserOneClickAuth}
-          onOpenQrLogin={() => {
-            setQrLoginInitialMode("redeem");
-            setShowQrLoginModal(true);
-          }}
-          onImportAuthCallback={async (raw) => {
-            const ok = await importManualCredentialInRust(raw, isDark);
-            if (ok) {
-              await syncFromRustState();
-              fetchSiteCategories(true)
-                .then(setCategories)
-                .catch(() => {});
-              loadFeed();
-            }
-            return ok;
-          }}
-          onOpenSavedAccounts={() => {
-            setAuthStatusHint(null);
-            setShowAuthModal(true);
-          }}
+          onOpenQrLogin={openQrLoginRedeem}
+          onOpenSavedAccounts={openAccountManagement}
           onGuestBrowse={() => {
             setIsGuestMode(true);
             setAuthStatusHint(null);
@@ -2248,7 +2314,10 @@ export const App: React.FC = () => {
             isMacos={platform === "macos"}
             showFeedToggle={isWideLayout && (currentTab === "HOME" || currentTab === "MESSAGES")}
             feedCollapsed={feedCollapsed}
+            cfAttentionNeeded={cfAttentionNeeded && !cfAttentionDismissed}
+            verifyActive={Boolean(verifyPill?.visible) || manualVerifyBusy}
             onToggleFeedCollapse={toggleFeedCollapse}
+            onTriggerVerify={handleReactiveVerify}
             onSelectTab={(tab) => {
               if (tab === currentTab) {
                 setNarrowShowingReader(false);
@@ -2260,10 +2329,10 @@ export const App: React.FC = () => {
             }}
             onPublishClick={() => {
               if (!isAuthorized) {
-                setGuestPrompt({
-                  title: "登录后发布话题",
-                  subtitle: "登录 LINUX DO 账号，与佬友分享你的发现与见解",
-                });
+                requestGuestLogin(
+                  "登录后发布话题",
+                  "登录 LINUX DO 账号，与佬友分享你的发现与见解"
+                );
               } else {
                 launchOrAppendComposer({
                   action: "NEW_TOPIC",
@@ -2285,12 +2354,9 @@ export const App: React.FC = () => {
                   openTopic(t);
                 }}
                 onSelectCategoryInHome={(catId) => {
-                  const targetCat = categories.find((c) => c.id === catId);
-                  if (targetCat?.readRestricted && !isAuthorized) {
-                    setGuestPrompt({
-                      title: `登录后查看「${targetCat.name}」`,
-                      subtitle: "该版块仅对登录会员开放，登录后即可浏览对应等级内容",
-                    });
+                  const decision = resolveRestrictedCategorySelection(catId, categories, isAuthorized);
+                  if (decision.blocked) {
+                    requestGuestLogin(decision.prompt.title, decision.prompt.subtitle);
                     return;
                   }
                   setSelectedCategoryId(catId);
@@ -2303,7 +2369,7 @@ export const App: React.FC = () => {
                 onOpenGlobalSearch={() => setShowGlobalSearch(true)}
                 onOpenPortalUrl={(url, requiresAuth, gTitle, gSub) => {
                   if (requiresAuth && !isAuthorized) {
-                    setGuestPrompt({ title: gTitle, subtitle: gSub });
+                    requestGuestLogin(gTitle, gSub);
                   } else if (/^https?:\/\/linux\.do\/badges\/?$/i.test(url.trim())) {
                     setShowSiteBadgesModal(true);
                   } else if (/^https?:\/\/connect\.linux\.do\/?$/i.test(url.trim()) && currentUser) {
@@ -2327,16 +2393,18 @@ export const App: React.FC = () => {
                 knownTopics={topics}
                 onUpdatePreferences={updatePreferences}
                 onToggleDark={toggleDarkPref}
-                onPrimaryWebLogin={handlePrimaryWebLogin}
-                onOpenAuthSheet={() => {
-                  setAuthStatusHint(null);
-                  setShowAuthModal(true);
-                }}
+                onRequestLogin={() =>
+                  requestGuestLogin(
+                    PROFILE_GUEST_LOGIN_PROMPT.title,
+                    PROFILE_GUEST_LOGIN_PROMPT.subtitle
+                  )
+                }
+                onOpenAuthSheet={openAccountManagement}
                 onOpenQrLoginSheet={() => {
-                  setQrLoginInitialMode(undefined);
+                  setQrLoginInitialMode(isAuthorized ? "generate" : "redeem");
                   setShowQrLoginModal(true);
                 }}
-                onRequestGuestLogin={(title, subtitle) => setGuestPrompt({ title, subtitle })}
+                onRequestGuestLogin={requestGuestLogin}
                 onOpenInAppUrl={(url) => {
                   if (/^https?:\/\/connect\.linux\.do\/?$/i.test(url.trim()) && currentUser) {
                     setShowConnectModal(true);
@@ -2366,6 +2434,10 @@ export const App: React.FC = () => {
                 onRefreshEchStatus={() => {
                   getEchStatus().then(setEchStatus).catch(() => {});
                 }}
+                cfAttentionNeeded={cfAttentionNeeded}
+                verifyActive={Boolean(verifyPill?.visible) || manualVerifyBusy}
+                lastVerifiedAtMs={lastVerifiedAtMs}
+                onTriggerVerify={handleForceRefreshVerify}
               />
             ) : isWideLayout ? (
               <>
@@ -2428,16 +2500,18 @@ export const App: React.FC = () => {
                       onSyncUnreadCount={handleSyncUnreadCount}
                       onInspectUser={(uname) => setInspectedUsername(uname)}
                       onInspectBadge={(b) => setInspectedBadge(b)}
-                      onOpenAuth={() => {
-                        setAuthStatusHint(null);
-                        setShowAuthModal(true);
-                      }}
+                      onOpenAuth={() =>
+                        requestGuestLogin(
+                          MESSAGES_GUEST_LOGIN_PROMPT.title,
+                          MESSAGES_GUEST_LOGIN_PROMPT.subtitle
+                        )
+                      }
                       onOpenChat={() => {
                         openInAppForumPanel("https://linux.do/chat", isDark).catch(() =>
                           openUrl("https://linux.do/chat")
                         );
                       }}
-                      onTriggerVerify={handleTriggerVerify}
+                      onTriggerVerify={handleReactiveVerify}
                     />
                   ) : (
                     <HomeFeedPane
@@ -2462,19 +2536,7 @@ export const App: React.FC = () => {
                       readFloors={readFloors}
                       onSelectSort={setCurrentSort}
                       onSelectTopPeriod={setTopPeriod}
-                      onSelectCategory={(catId) => {
-                        if (catId !== null) {
-                          const cat = categories.find((c) => c.id === catId);
-                          if (cat?.readRestricted && !isAuthorized) {
-                            setGuestPrompt({
-                              title: `登录后查看「${cat.name}」`,
-                              subtitle: "该版块仅对登录会员开放，登录后即可浏览对应等级内容",
-                            });
-                            return;
-                          }
-                        }
-                        setSelectedCategoryId(catId);
-                      }}
+                      onSelectCategory={handleSelectHomeCategory}
                       onSelectTag={setSelectedTag}
                       onSelectTopic={(t, resumeFloor) => {
                         setHomeReaderHistory([]);
@@ -2494,15 +2556,8 @@ export const App: React.FC = () => {
                       }
                       onOpenSearch={() => setShowGlobalSearch(true)}
                       onOpenNotifications={() => setCurrentTab("MESSAGES")}
-                      onOpenAuth={() => {
-                        setAuthStatusHint(null);
-                        if (isAuthorized || savedAccounts.length > 0) {
-                          setShowAuthModal(true);
-                        } else {
-                          handlePrimaryWebLogin();
-                        }
-                      }}
-                      onTriggerVerify={handleTriggerVerify}
+                      onOpenAuth={() => requestGuestLogin()}
+                      onTriggerVerify={handleReactiveVerify}
                     />
                   )}
                   </div>
@@ -2525,19 +2580,19 @@ export const App: React.FC = () => {
                       className="group absolute inset-y-0 -left-[6px] w-[12px] cursor-pointer"
                     >
                       <div
-                        className={`pointer-events-none mx-auto h-full transition-all duration-150 ${
+                        className={`pointer-events-none mx-auto h-full w-[2px] transition-opacity duration-150 ${
                           isDraggingSplit
-                            ? "w-[2px] opacity-100"
-                            : "w-[1.5px] opacity-0 group-hover:opacity-90"
+                            ? "opacity-100"
+                            : "opacity-0 group-hover:opacity-90"
                         }`}
                         style={{ backgroundColor: "var(--brand-gold)" }}
                       />
                       <div
                         ref={splitHandlePillRef}
-                        className={`absolute left-1/2 -translate-x-1/2 -translate-y-1/2 flex h-[38px] w-[18px] items-center justify-center rounded-full shadow-md transition-[opacity,transform,border-color,background-color] duration-150 ${
+                        className={`absolute left-1/2 -translate-x-1/2 -translate-y-1/2 flex h-[38px] w-[18px] items-center justify-center rounded-full shadow-md transition-[opacity,border-color,background-color] duration-150 ${
                           isDraggingSplit
-                            ? "pointer-events-auto scale-100 opacity-100"
-                            : "pointer-events-none scale-90 opacity-0 group-hover:pointer-events-auto group-hover:scale-100 group-hover:opacity-100"
+                            ? "pointer-events-auto opacity-100"
+                            : "pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100"
                         }`}
                         style={{
                           top: "50%",
@@ -2686,8 +2741,8 @@ export const App: React.FC = () => {
                       onSelectTag={handleSelectTagFromReader}
                       onOpenInAppUrl={handleOpenInAppUrl}
                       onPmArchiveChanged={() => setPmRefreshNonce((n) => n + 1)}
-                      onRequestGuestLogin={(title, subtitle) => setGuestPrompt({ title, subtitle })}
-                      onTriggerVerify={handleTriggerVerify}
+                      onRequestGuestLogin={requestGuestLogin}
+                      onTriggerVerify={handleReactiveVerify}
                       cfAttentionNeeded={cfAttentionNeeded && !cfAttentionDismissed}
                       onDismissCfAttention={() => setCfAttentionDismissed(true)}
                       onFloorSeen={handleFloorSeen}
@@ -2715,13 +2770,18 @@ export const App: React.FC = () => {
                 onSyncUnreadCount={handleSyncUnreadCount}
                 onInspectUser={(uname) => setInspectedUsername(uname)}
                 onInspectBadge={(b) => setInspectedBadge(b)}
-                onOpenAuth={() => setShowAuthModal(true)}
+                onOpenAuth={() =>
+                  requestGuestLogin(
+                    MESSAGES_GUEST_LOGIN_PROMPT.title,
+                    MESSAGES_GUEST_LOGIN_PROMPT.subtitle
+                  )
+                }
                 onOpenChat={() => {
                   openInAppForumPanel("https://linux.do/chat", isDark).catch(() =>
                     openUrl("https://linux.do/chat")
                   );
                 }}
-                onTriggerVerify={handleTriggerVerify}
+                onTriggerVerify={handleReactiveVerify}
               />
             ) : narrowShowingReader && activeSummary ? (
               <TopicReaderPane
@@ -2818,8 +2878,8 @@ export const App: React.FC = () => {
                 onSelectTag={handleSelectTagFromReader}
                 onOpenInAppUrl={handleOpenInAppUrl}
                 onPmArchiveChanged={() => setPmRefreshNonce((n) => n + 1)}
-                onRequestGuestLogin={(title, subtitle) => setGuestPrompt({ title, subtitle })}
-                onTriggerVerify={handleTriggerVerify}
+                onRequestGuestLogin={requestGuestLogin}
+                onTriggerVerify={handleReactiveVerify}
                 cfAttentionNeeded={cfAttentionNeeded && !cfAttentionDismissed}
                 onDismissCfAttention={() => setCfAttentionDismissed(true)}
                 onFloorSeen={handleFloorSeen}
@@ -2847,7 +2907,7 @@ export const App: React.FC = () => {
                 readFloors={readFloors}
                 onSelectSort={setCurrentSort}
                 onSelectTopPeriod={setTopPeriod}
-                onSelectCategory={setSelectedCategoryId}
+                onSelectCategory={handleSelectHomeCategory}
                 onSelectTag={setSelectedTag}
                 onSelectTopic={(t, resumeFloor) => openTopic(t, { floor: resumeFloor ?? null })}
                 onRefresh={() => loadFeed()}
@@ -2858,12 +2918,8 @@ export const App: React.FC = () => {
                 }
                 onOpenSearch={() => setShowGlobalSearch(true)}
                 onOpenNotifications={() => setCurrentTab("MESSAGES")}
-                onOpenAuth={() => {
-                  setAuthStatusHint(null);
-                  if (isAuthorized || savedAccounts.length > 0) setShowAuthModal(true);
-                  else handlePrimaryWebLogin();
-                }}
-                onTriggerVerify={handleTriggerVerify}
+                onOpenAuth={() => requestGuestLogin()}
+                onTriggerVerify={handleReactiveVerify}
               />
             )}
           </div>
@@ -2871,7 +2927,12 @@ export const App: React.FC = () => {
       )}
 
       {/* 被动过期温和提醒胶囊 */}
-      {inMainApp && !isAuthorized && expiredUsername && !showAuthModal && !guestPrompt && (
+      {inMainApp &&
+        !isAuthorized &&
+        expiredUsername &&
+        !showAuthModal &&
+        !guestPrompt &&
+        !showQrLoginModal && (
         <div
           className="fixed bottom-6 left-1/2 z-40 flex -translate-x-1/2 items-center gap-2.5 rounded-full pl-4 pr-2 py-1.5 shadow-2xl"
           style={{
@@ -2885,9 +2946,8 @@ export const App: React.FC = () => {
           <button
             type="button"
             onClick={() => {
-              setAuthStatusHint(null);
-              setAuthModalStartAdding(true);
-              setShowAuthModal(true);
+              const prompt = buildExpiredSessionGuestPrompt(expiredUsername);
+              requestGuestLogin(prompt.title, prompt.subtitle);
             }}
             className="rounded-full px-3 py-1 text-[12px] font-semibold transition-opacity hover:opacity-90 active:opacity-80 cursor-pointer"
             style={{
@@ -2916,8 +2976,11 @@ export const App: React.FC = () => {
         <GuestLoginGuideModal
           title={guestPrompt.title}
           subtitle={guestPrompt.subtitle}
+          hasSavedAccounts={savedAccounts.length > 0}
           onPrimaryWebLogin={handlePrimaryWebLogin}
           onBrowserOneClickAuth={handleBrowserOneClickAuth}
+          onOpenQrLogin={openQrLoginRedeem}
+          onOpenSavedAccounts={savedAccounts.length > 0 ? openAccountManagement : undefined}
           onDismiss={() => setGuestPrompt(null)}
         />
       )}
@@ -2934,25 +2997,20 @@ export const App: React.FC = () => {
           onWebLogin={handlePrimaryWebLogin}
           onAddAccountWebLogin={handleAddAccountWebLogin}
           onBrowserOneClick={handleBrowserOneClickAuth}
-          onOpenQrLogin={() => {
-            setQrLoginInitialMode("redeem");
-            setShowQrLoginModal(true);
-          }}
+          onOpenQrLogin={openQrLoginRedeem}
+          onOpenQrGenerate={
+            isAuthorized
+              ? () => {
+                  setQrLoginInitialMode("generate");
+                  setShowQrLoginModal(true);
+                }
+              : undefined
+          }
+          onRequestGuestLogin={(title, subtitle) => requestGuestLogin(title, subtitle)}
           onSwitchAccount={handleSwitchSavedAccount}
           onRemoveAccount={async (uname) => {
             await removeSavedAccountInRust(uname);
             await syncFromRustState();
-          }}
-          onManualImported={async () => {
-            if (browserAuthWatchdogRef.current) {
-              clearTimeout(browserAuthWatchdogRef.current);
-              browserAuthWatchdogRef.current = null;
-            }
-            await syncFromRustState();
-            fetchSiteCategories(true)
-              .then(setCategories)
-              .catch(() => {});
-            loadFeed();
           }}
           onLogout={() => setShowLogoutConfirm(true)}
           onClose={() => {
@@ -3041,7 +3099,14 @@ export const App: React.FC = () => {
             setCurrentTab("MESSAGES");
           }}
           onOpenTopic={(tid, title, floor) => openTopicById(tid, title, floor, false)}
+          onInspectUser={(uname) => setInspectedUsername(uname)}
           onInspectBadge={(b) => setInspectedBadge(b)}
+          onOpenSiteBadges={() => setShowSiteBadgesModal(true)}
+          onOpenInAppUrl={handleOpenInAppUrl}
+          onRequestGuestLogin={(title, subtitle) => {
+            setInspectedUsername(null);
+            requestGuestLogin(title, subtitle);
+          }}
           onClose={() => setInspectedUsername(null)}
         />
       )}
@@ -3056,7 +3121,13 @@ export const App: React.FC = () => {
 
       {/* 荣誉徽章详情弹窗 */}
       {inspectedBadge && (
-        <BadgeDetailModal badge={inspectedBadge} onClose={() => setInspectedBadge(null)} />
+        <BadgeDetailModal
+          badge={inspectedBadge}
+          isAuthorized={isAuthorized}
+          currentUser={currentUser}
+          onProfileUpdated={() => syncFromRustState()}
+          onClose={() => setInspectedBadge(null)}
+        />
       )}
 
       {/* 原生 Connect 保级与成长面板 */}
@@ -3110,16 +3181,18 @@ export const App: React.FC = () => {
         </div>
       )}
 
-      {/* 4 档渐进式安全校验轻胶囊 / 跨视图安全确认入口（打字或未挂载阅读器时保持可见、不抢输入焦点，关闭验证窗保留原样） */}
-      {(verifyPill?.visible ||
-        (inMainApp &&
-          cfAttentionNeeded &&
-          !cfAttentionDismissed &&
-          (Boolean(composerReq) ||
-            currentTab === "DISCOVER" ||
-            currentTab === "PROFILE" ||
-            (!isWideLayout &&
-              (currentTab === "MESSAGES" || !narrowShowingReader || !activeSummary))))) &&
+      {/* 4 档渐进式安全校验轻胶囊 / 窄屏或欢迎页安全确认入口（宽屏主界面已整合至 SideRail 盾牌指示器，避免双重提示） */}
+      {(!inMainApp || !isWideLayout) &&
+        (verifyPill?.visible ||
+          (inMainApp &&
+            cfAttentionNeeded &&
+            !cfAttentionDismissed &&
+            (Boolean(composerReq) ||
+              currentTab === "DISCOVER" ||
+              currentTab === "PROFILE" ||
+              currentTab === "MESSAGES" ||
+              !narrowShowingReader ||
+              !activeSummary))) &&
         !authCompleting &&
         !switchingBusy && (
           <button
@@ -3127,10 +3200,10 @@ export const App: React.FC = () => {
             onMouseDown={(e) => e.preventDefault()}
             onClick={() => {
               if (verifyPill?.visible) setVerifyPill(null);
-              handleTriggerVerify();
+              handleReactiveVerify();
             }}
             title="点击展开安全确认面板"
-            className="lindo-interactive group fixed bottom-5 right-5 z-[45] flex items-center gap-2 rounded-full px-3.5 py-1.5 shadow-lg transition-all duration-200 cursor-pointer"
+            className="lindo-interactive group fixed bottom-5 right-5 z-[45] flex items-center gap-2 rounded-full px-3.5 py-1.5 shadow-lg transition-[background-color,color,border-color,opacity] duration-150 cursor-pointer"
             style={{
               backgroundColor: "color-mix(in srgb, var(--card-surface) 92%, transparent)",
               backdropFilter: "blur(12px)",

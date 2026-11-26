@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -16,6 +16,10 @@ pub struct UserProfile {
     pub trust_level: i32,
     #[serde(default)]
     pub user_title: Option<String>,
+    #[serde(default)]
+    pub admin: bool,
+    #[serde(default)]
+    pub moderator: bool,
 }
 
 fn default_trust_level() -> i32 {
@@ -32,6 +36,8 @@ pub struct SavedAccountEntry {
     pub needs_login: bool,
     #[serde(default)]
     pub read_floors: HashMap<String, i32>,
+    #[serde(default)]
+    pub drafts: HashMap<String, LocalDraftRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -324,6 +330,7 @@ pub fn load_or_migrate_state() -> PersistedState {
     if legacy_file.exists() {
         let _ = fs::rename(&legacy_file, legacy_file.with_extension("properties.migrated"));
     }
+    enforce_private_file_permissions(&state_file);
     existing
 }
 
@@ -353,6 +360,8 @@ fn apply_legacy_props(target: &mut PersistedState, props: &HashMap<String, Strin
             animated_avatar,
             trust_level,
             user_title,
+            admin: false,
+            moderator: false,
         });
     }
     if let Some(unread) = props.get("unread_notifications").and_then(|v| v.parse::<i32>().ok()) {
@@ -369,6 +378,7 @@ fn apply_legacy_props(target: &mut PersistedState, props: &HashMap<String, Strin
                     cookies: s.cookies,
                     needs_login: s.needs_login,
                     read_floors: HashMap::new(),
+                    drafts: HashMap::new(),
                 })
                 .collect();
         }
@@ -409,7 +419,94 @@ fn apply_legacy_props(target: &mut PersistedState, props: &HashMap<String, Strin
     }
 }
 
-pub fn save_state(state: &PersistedState) {
+pub fn snapshot_active_account_state(st: &mut PersistedState) {
+    let Some(ref active) = st.current_user else {
+        return;
+    };
+    let active_username = active.username.trim();
+    if active_username.is_empty() || active_username == "linuxdo_user" {
+        return;
+    }
+    if let Some(entry) = st
+        .saved_accounts
+        .iter_mut()
+        .find(|a| a.profile.username.eq_ignore_ascii_case(active_username))
+    {
+        entry.profile = active.clone();
+        entry.read_floors = st.read_floors.clone();
+        entry.drafts = st.drafts.clone();
+    } else {
+        st.saved_accounts.push(SavedAccountEntry {
+            profile: active.clone(),
+            cookies: st.raw_cookies.clone(),
+            needs_login: false,
+            read_floors: st.read_floors.clone(),
+            drafts: st.drafts.clone(),
+        });
+    }
+}
+
+pub fn apply_switch_saved_account_state(
+    st: &mut PersistedState,
+    target_username: &str,
+) -> Option<SavedAccountEntry> {
+    snapshot_active_account_state(st);
+    let target = st
+        .saved_accounts
+        .iter()
+        .find(|a| a.profile.username.eq_ignore_ascii_case(target_username))
+        .cloned()?;
+    if target.needs_login || target.cookies.is_empty() {
+        return None;
+    }
+    st.current_user = Some(target.profile.clone());
+    st.raw_cookies = target.cookies.clone();
+    st.expired_username = None;
+    st.read_floors = target.read_floors.clone();
+    st.drafts = target.drafts.clone();
+    Some(target)
+}
+
+pub fn apply_logout_state(st: &mut PersistedState, remove_saved: bool) {
+    if remove_saved {
+        if let Some(ref u) = st.current_user {
+            let uname = u.username.clone();
+            st.saved_accounts
+                .retain(|a| !a.profile.username.eq_ignore_ascii_case(&uname));
+        }
+    } else {
+        snapshot_active_account_state(st);
+    }
+    st.current_user = None;
+    st.expired_username = None;
+    st.unread_notifications = 0;
+    st.read_floors.clear();
+    st.drafts.clear();
+    let cf_only: Vec<String> = st
+        .raw_cookies
+        .split(';')
+        .map(|s| s.trim())
+        .filter(|s| {
+            !s.is_empty() && !s.starts_with("_t=") && !s.starts_with("_forum_session=")
+        })
+        .map(|s| s.to_string())
+        .collect();
+    st.raw_cookies = cf_only.join("; ");
+}
+
+fn enforce_private_file_permissions(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
+pub fn save_state_to_path(state: &PersistedState, path: &Path) {
     let mut sanitized = state.clone();
     sanitized.raw_cookies = sanitized
         .raw_cookies
@@ -425,11 +522,156 @@ pub fn save_state(state: &PersistedState) {
         .join("; ");
     sanitized.cf_clearance_updated_at_ms = 0;
 
-    let path = tauri_state_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
     let tmp = path.with_extension("json.tmp");
     if let Ok(serialized) = serde_json::to_string_pretty(&sanitized) {
         if fs::write(&tmp, serialized).is_ok() {
-            let _ = fs::rename(&tmp, &path);
+            enforce_private_file_permissions(&tmp);
+            if fs::rename(&tmp, path).is_ok() {
+                enforce_private_file_permissions(path);
+            }
         }
+    }
+}
+
+pub fn save_state(state: &PersistedState) {
+    save_state_to_path(state, &tauri_state_path());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_user(id: i64, username: &str) -> UserProfile {
+        UserProfile {
+            user_id: id,
+            username: username.to_string(),
+            display_name: username.to_string(),
+            avatar_template: String::new(),
+            animated_avatar: None,
+            trust_level: 2,
+            user_title: None,
+            admin: false,
+            moderator: false,
+        }
+    }
+
+    fn sample_draft(key: &str, raw: &str) -> LocalDraftRecord {
+        LocalDraftRecord {
+            key: key.to_string(),
+            action: "REPLY".to_string(),
+            topic_id: Some(42),
+            post_id: None,
+            reply_to_post_number: None,
+            category_id: None,
+            title: "Draft Title".to_string(),
+            raw: raw.to_string(),
+            tags: vec![],
+            sequence: 1,
+            updated_at: 1_700_000_000,
+        }
+    }
+
+    #[test]
+    fn saved_account_entry_deserializes_legacy_json_without_drafts_field() {
+        let legacy_json = r#"{
+            "profile": { "userId": 1, "username": "alice", "displayName": "Alice", "avatarTemplate": "" },
+            "cookies": "_t=tok_a",
+            "needsLogin": false,
+            "readFloors": { "100": 5 }
+        }"#;
+        let parsed: SavedAccountEntry = serde_json::from_str(legacy_json).expect("legacy parse");
+        assert_eq!(parsed.profile.username, "alice");
+        assert!(!parsed.profile.admin);
+        assert!(!parsed.profile.moderator);
+        assert_eq!(parsed.read_floors.get("100"), Some(&5));
+        assert!(parsed.drafts.is_empty());
+    }
+
+    #[test]
+    fn switch_and_logout_isolate_read_floors_and_drafts_per_account() {
+        let mut st = PersistedState::default();
+        st.current_user = Some(sample_user(1, "alice"));
+        st.raw_cookies = "_t=tok_alice".to_string();
+        st.read_floors.insert("101".to_string(), 12);
+        st.drafts
+            .insert("topic_101".to_string(), sample_draft("topic_101", "Alice secret draft"));
+
+        let mut bob_floors = HashMap::new();
+        bob_floors.insert("202".to_string(), 7);
+        let mut bob_drafts = HashMap::new();
+        bob_drafts.insert("new_topic".to_string(), sample_draft("new_topic", "Bob draft"));
+        st.saved_accounts.push(SavedAccountEntry {
+            profile: sample_user(1, "alice"),
+            cookies: "_t=tok_alice".to_string(),
+            needs_login: false,
+            read_floors: HashMap::new(),
+            drafts: HashMap::new(),
+        });
+        st.saved_accounts.push(SavedAccountEntry {
+            profile: sample_user(2, "bob"),
+            cookies: "_t=tok_bob".to_string(),
+            needs_login: false,
+            read_floors: bob_floors,
+            drafts: bob_drafts,
+        });
+
+        // Switch Alice -> Bob: Alice's floors & drafts snapshotted, Bob's restored
+        assert!(apply_switch_saved_account_state(&mut st, "bob").is_some());
+        assert_eq!(st.current_user.as_ref().unwrap().username, "bob");
+        assert_eq!(st.read_floors.get("202"), Some(&7));
+        assert!(!st.read_floors.contains_key("101"));
+        assert!(st.drafts.contains_key("new_topic"));
+        assert!(!st.drafts.contains_key("topic_101"));
+
+        // Logout Bob (keep saved): active floors/drafts cleared, Bob's saved snapshot intact
+        st.read_floors.insert("303".to_string(), 9);
+        apply_logout_state(&mut st, false);
+        assert!(st.current_user.is_none());
+        assert!(st.read_floors.is_empty());
+        assert!(st.drafts.is_empty());
+
+        // Switch back to Alice: Alice's original floors & drafts restored with zero Bob leakage
+        assert!(apply_switch_saved_account_state(&mut st, "alice").is_some());
+        assert_eq!(st.read_floors.get("101"), Some(&12));
+        assert_eq!(st.drafts.get("topic_101").unwrap().raw, "Alice secret draft");
+        assert!(!st.drafts.contains_key("new_topic"));
+
+        // Switch to Bob: Bob's updated floor 303 preserved
+        assert!(apply_switch_saved_account_state(&mut st, "bob").is_some());
+        assert_eq!(st.read_floors.get("303"), Some(&9));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_state_to_path_enforces_0600_permissions_even_on_existing_loose_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "lindo_state_perm_test_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let path = dir.join("tauri_state.json");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&path, "{}").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let mut st = PersistedState::default();
+        st.raw_cookies = "_t=secret_session_cookie; cf_clearance=drop_me".to_string();
+        save_state_to_path(&st, &path);
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "tauri_state.json must have 0o600 permissions");
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "temporary file must be renamed atomically"
+        );
+        let saved_text = fs::read_to_string(&path).unwrap();
+        assert!(saved_text.contains("_t=secret_session_cookie"));
+        assert!(!saved_text.contains("cf_clearance="));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

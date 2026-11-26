@@ -11,6 +11,8 @@ export interface UserProfile {
   animatedAvatar?: string | null;
   trustLevel: number;
   userTitle?: string | null;
+  admin?: boolean;
+  moderator?: boolean;
 }
 
 export interface SavedAccountEntry {
@@ -18,6 +20,7 @@ export interface SavedAccountEntry {
   cookies: string;
   needsLogin: boolean;
   readFloors: Record<string, number>;
+  drafts?: Record<string, LocalDraftRecord>;
 }
 
 export type EchRoutingModePref =
@@ -53,7 +56,7 @@ export interface LocalDraftRecord {
 export interface CloudDraftItem {
   draftKey: string;
   sequence: number;
-  action: "NEW_TOPIC" | "REPLY" | "EDIT";
+  action: "NEW_TOPIC" | "REPLY" | "EDIT" | "PRIVATE_MESSAGE";
   topicId?: number | null;
   postId?: number | null;
   replyToPostNumber?: number | null;
@@ -61,6 +64,7 @@ export interface CloudDraftItem {
   title: string;
   raw: string;
   tags: string[];
+  recipients?: string;
   createdAt?: string;
 }
 
@@ -504,7 +508,15 @@ export interface FollowUserEntry {
   avatarTemplate: string;
   animatedAvatar?: string | null;
   bio?: string;
+  trustLevel?: number;
+  title?: string;
   isFollowing: boolean;
+}
+
+export interface CustomEmojiItem {
+  name: string;
+  url: string;
+  group: string;
 }
 
 export interface UserAccountPreferencesSnapshot {
@@ -517,9 +529,64 @@ export interface UserAccountPreferencesSnapshot {
   website: string;
   trustLevel: number;
   createdAtText: string;
+  twoFactorEnabled?: boolean | null;
   hideProfileAndPresence: boolean;
   allowPrivateMessages: boolean;
+  activeDeviceCount?: number | null;
+  associatedAccounts?: string[];
   availableTitles: string[];
+}
+
+export interface PublicUserProfile {
+  id: number;
+  username: string;
+  displayName: string;
+  avatarTemplate: string;
+  animatedAvatar?: string | null;
+  trustLevel: number;
+  title: string;
+  bioExcerptHtml: string;
+  primaryGroupName?: string | null;
+  admin: boolean;
+  moderator: boolean;
+  flair?: FlairInfo | null;
+  status?: UserStatusInfo | null;
+  createdAtText: string;
+  lastSeenText: string;
+  location: string;
+  websiteName: string;
+  websiteUrl: string;
+  solvedCount: number;
+  daysVisited: number;
+  timeReadSeconds: number;
+  topicsEntered: number;
+  postsReadCount: number;
+  likesReceived: number;
+  likesGiven: number;
+  topicCount: number;
+  postCount: number;
+  badgeCount: number;
+  badges: GrantedBadge[];
+  canFollow: boolean;
+  isFollowedHint?: boolean;
+}
+
+export interface UserActivityItem {
+  id: number;
+  topicId: number;
+  postNumber: number;
+  title: string;
+  excerpt: string;
+  actionType: number;
+  createdAt: string;
+  categoryId?: number;
+  categoryName?: string;
+  categoryColorHex?: string;
+}
+
+export interface ClearLocalCachesResult {
+  freedBytes: number;
+  clearedEntries: number;
 }
 
 export interface ComposerLaunchRequest {

@@ -349,6 +349,10 @@ html.lindo-scrolling .lindo-title-holo {
   will-change: scroll-position;
 }
 
+.lindo-reader-scroll {
+  overflow-anchor: auto;
+}
+
 .lindo-scroll::-webkit-scrollbar {
   width: 5px;
   height: 5px;
@@ -393,9 +397,12 @@ a:focus-visible,
   box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--brand-gold) 72%, transparent);
 }
 
-/* Instant zero-lag interactive controls (toolbar icons, menu items, pills — never used on scrollable list cards) */
+/* Native macOS desktop interactive controls: quiet color/background hover & press feedback, zero scale wobble */
 .lindo-interactive {
   cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
 }
 .lindo-interactive:hover {
   background-color: var(--hover-overlay);
@@ -404,11 +411,46 @@ a:focus-visible,
   background-color: var(--press-overlay);
 }
 
+/* Calm feed card hover feedback (paused automatically during active 144Hz scroll) */
+.lindo-feed-card {
+  user-select: none;
+  -webkit-user-select: none;
+  transition: background-color 120ms ease;
+}
+.lindo-feed-card[data-selected="false"]:hover {
+  background-color: var(--hover-overlay);
+}
+.lindo-feed-card[data-selected="false"]:active {
+  background-color: var(--press-overlay);
+}
+
+/* Zero-reflow tab label: reserves active SemiBold width invisibly so toggling tab weight causes 0px sibling shift */
+.lindo-tab-label {
+  display: inline-grid;
+  align-items: center;
+  justify-items: center;
+}
+.lindo-tab-label > span {
+  grid-area: 1 / 1;
+}
+.lindo-tab-label::after {
+  content: attr(data-label);
+  grid-area: 1 / 1;
+  font-weight: 600;
+  height: 0;
+  visibility: hidden;
+  overflow: hidden;
+  pointer-events: none;
+  user-select: none;
+}
+
 /* Eliminate stationary-cursor :hover transition repaint churn during active 144Hz scrolling */
-html.lindo-scrolling .lindo-interactive {
+html.lindo-scrolling .lindo-interactive,
+html.lindo-scrolling .lindo-feed-card {
   transition: none !important;
 }
-html.lindo-scrolling .lindo-interactive:hover:not(:active) {
+html.lindo-scrolling .lindo-interactive:hover:not(:active),
+html.lindo-scrolling .lindo-feed-card[data-selected="false"]:hover:not(:active) {
   background-color: transparent;
 }
 
@@ -707,6 +749,93 @@ html:not(.dark) .lindo-cooked ins {
   margin: 0.55em 0;
   cursor: pointer;
   background: var(--subtle-surface);
+}
+
+@keyframes lindo-img-skeleton-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+@keyframes lindo-img-fade-in {
+  from {
+    opacity: 0.25;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Ensure shrink-to-fit wrappers expand while inner image reserves its zero-CLS skeleton box */
+.lindo-cooked .lightbox-wrapper:has(img.lindo-img-loading),
+.lindo-cooked a[data-image-link="1"]:has(> img.lindo-img-loading) {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+}
+
+.lindo-cooked img.lindo-img-loading {
+  display: block;
+  width: min(100%, var(--lindo-img-w, 100%), calc(440px * var(--lindo-img-ar, 100)));
+  max-width: 100%;
+  height: auto;
+  max-height: 440px;
+  border-radius: 10px;
+  border: 0.5px solid var(--hairline);
+  background: linear-gradient(90deg, #1a1e27 25%, #232836 50%, #1a1e27 75%);
+  background-size: 200% 100%;
+  animation: lindo-img-skeleton-shimmer 1.6s ease-in-out infinite;
+  color: transparent;
+}
+
+html:not(.dark) .lindo-cooked img.lindo-img-loading {
+  background: linear-gradient(90deg, #e7e9ed 25%, #eef1f5 50%, #e7e9ed 75%);
+  background-size: 200% 100%;
+}
+
+.lindo-cooked img.lindo-img-loading.lindo-img-loading-fallback {
+  width: min(100%, 480px);
+  aspect-ratio: 16 / 10;
+  min-height: 160px;
+}
+
+.lindo-cooked .d-image-grid img.lindo-img-loading {
+  width: 100%;
+  max-height: 280px;
+}
+
+.lindo-cooked img.lindo-img-loaded {
+  animation: lindo-img-fade-in 180ms ease-out;
+}
+
+.lindo-cooked img.lindo-img-error {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 160px;
+  min-height: 72px;
+  padding: 12px 16px;
+  border-radius: 10px;
+  border: 0.5px dashed var(--hairline);
+  background: var(--subtle-surface);
+  color: var(--ink-tertiary);
+  font-size: 12px;
+  line-height: 1.4;
+  animation: none;
+}
+
+html.lindo-reduce-motion .lindo-cooked img.lindo-img-loading,
+html.lindo-reduce-motion .lindo-cooked img.lindo-img-loaded {
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .lindo-cooked img.lindo-img-loading,
+  .lindo-cooked img.lindo-img-loaded {
+    animation: none;
+  }
 }
 
 .lindo-cooked .lightbox-wrapper {

@@ -42,6 +42,21 @@ export function needsSameOriginMediaBridge(url?: string | null): boolean {
   }
 }
 
+export function clearForumMediaBlobCache(): number {
+  const count = blobUrlCache.size;
+  for (const blobUrl of blobUrlCache.values()) {
+    try {
+      URL.revokeObjectURL(blobUrl);
+    } catch {
+      // ignore
+    }
+  }
+  blobUrlCache.clear();
+  inFlightFetches.clear();
+  loggedMediaFailures.clear();
+  return count;
+}
+
 export function getCachedForumMediaBlobUrl(url: string): string | null {
   const hit = blobUrlCache.get(url);
   if (!hit) return null;
@@ -202,21 +217,63 @@ export function useForumImageSrc(
 
 let sharedCookedObserver: IntersectionObserver | null = null;
 
+export function markCookedImageLoaded(img: HTMLImageElement): void {
+  img.classList.remove("lindo-img-loading", "lindo-img-loading-fallback", "lindo-img-error");
+  img.removeAttribute("data-lindo-loading");
+  img.style.removeProperty("aspect-ratio");
+  img.classList.add("lindo-img-loaded");
+}
+
+export function markCookedImageError(img: HTMLImageElement): void {
+  img.classList.remove("lindo-img-loading", "lindo-img-loading-fallback", "lindo-img-loaded");
+  img.removeAttribute("data-lindo-loading");
+  img.style.removeProperty("aspect-ratio");
+  img.classList.add("lindo-img-error");
+}
+
+function attachDecodeCleanupOnce(img: HTMLImageElement): () => void {
+  const onLoad = () => {
+    cleanup();
+    markCookedImageLoaded(img);
+  };
+  const onError = () => {
+    cleanup();
+    markCookedImageError(img);
+  };
+  const cleanup = () => {
+    img.removeEventListener("load", onLoad);
+    img.removeEventListener("error", onError);
+  };
+  img.addEventListener("load", onLoad, { once: true });
+  img.addEventListener("error", onError, { once: true });
+  return cleanup;
+}
+
+function applyResolvedBlobToImage(img: HTMLImageElement, blobUrl: string): void {
+  attachDecodeCleanupOnce(img);
+  img.src = blobUrl;
+  img.removeAttribute("data-lindo-src");
+  if (img.complete && img.naturalWidth > 0) {
+    markCookedImageLoaded(img);
+  }
+}
+
 function hydrateImageElement(img: HTMLImageElement): void {
   const targetUrl = img.getAttribute("data-lindo-src");
   if (!targetUrl || img.getAttribute("data-lindo-hydrating") === "1") return;
   const cached = getCachedForumMediaBlobUrl(targetUrl);
   if (cached) {
-    img.src = cached;
-    img.removeAttribute("data-lindo-src");
+    applyResolvedBlobToImage(img, cached);
     return;
   }
   img.setAttribute("data-lindo-hydrating", "1");
   fetchForumMediaBlobUrl(targetUrl).then((blobUrl) => {
     img.removeAttribute("data-lindo-hydrating");
     if (blobUrl) {
-      img.src = blobUrl;
+      applyResolvedBlobToImage(img, blobUrl);
+    } else {
       img.removeAttribute("data-lindo-src");
+      markCookedImageError(img);
     }
   });
 }
@@ -242,15 +299,42 @@ function getSharedCookedObserver(): IntersectionObserver | null {
 
 export function observeCookedForumImages(container: HTMLElement | null): () => void {
   if (!container) return () => {};
+  const cleanups: Array<() => void> = [];
+
+  // 1. Track direct/external images marked with skeleton loading state (cached or still fetching)
+  const externalLoading = Array.from(
+    container.querySelectorAll<HTMLImageElement>('img[data-lindo-loading="1"]:not([data-lindo-src])')
+  );
+  for (const img of externalLoading) {
+    if (img.complete) {
+      if (img.naturalWidth > 0) {
+        markCookedImageLoaded(img);
+      } else if (img.getAttribute("src") && !img.getAttribute("src")?.startsWith("data:image/gif")) {
+        markCookedImageError(img);
+      } else {
+        cleanups.push(attachDecodeCleanupOnce(img));
+      }
+    } else {
+      cleanups.push(attachDecodeCleanupOnce(img));
+    }
+  }
+
+  // 2. Hydrate same-origin bridged images via IntersectionObserver + cache
   const pending = Array.from(
     container.querySelectorAll<HTMLImageElement>("img[data-lindo-src]")
   );
-  if (pending.length === 0) return () => {};
+  if (pending.length === 0) {
+    return () => {
+      cleanups.forEach((fn) => fn());
+    };
+  }
 
   const observer = getSharedCookedObserver();
   if (!observer) {
     pending.forEach(hydrateImageElement);
-    return () => {};
+    return () => {
+      cleanups.forEach((fn) => fn());
+    };
   }
 
   for (const img of pending) {
@@ -258,14 +342,14 @@ export function observeCookedForumImages(container: HTMLElement | null): () => v
     if (!targetUrl) continue;
     const syncHit = getCachedForumMediaBlobUrl(targetUrl);
     if (syncHit) {
-      img.src = syncHit;
-      img.removeAttribute("data-lindo-src");
+      applyResolvedBlobToImage(img, syncHit);
     } else {
       observer.observe(img);
     }
   }
 
   return () => {
+    cleanups.forEach((fn) => fn());
     for (const img of pending) {
       observer.unobserve(img);
     }

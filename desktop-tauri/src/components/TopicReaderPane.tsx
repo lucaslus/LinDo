@@ -9,6 +9,7 @@ import {
 } from "./LinDoIcons";
 import type {
   ComposerLaunchRequest,
+  CustomEmojiItem,
   GrantedBadge,
   PostItemModel,
   PostPollModel,
@@ -21,19 +22,19 @@ import {
   archivePrivateMessage,
   deletePostBoost,
   deletePostFloor,
+  desktopScreenTrack,
   fetchPollVoters,
   fetchPostByNumber,
   fetchPostLocationById,
   fetchPostReplies,
   fetchPostsByIds,
+  fetchSiteCustomEmojis,
   fetchTopicAiSummary,
   fetchTopicTailNewPosts,
   flagPost,
-  flushTopicTimingsNow,
   handleTitlebarMouseDown,
   markManualRetryIntent,
   removePollVote,
-  reportTopicTimings,
   sendPostBoost,
   setTopicNotificationLevel,
   SiteError,
@@ -199,8 +200,30 @@ const BOOST_QUICK_PHRASES = [
   "🫡 瑞思拜",
 ];
 
-function resolveReactionFallbackImg(reactionId: string): string {
+/**
+ * Computes unloaded post stream IDs strictly between two consecutive rendered posts (`P1-11`),
+ * enabling non-contiguous floor preservation and inline gap expansion.
+ */
+export function computeMiddlePostGapIds(
+  streamIds: number[],
+  prevPostId: number,
+  nextPostId: number
+): number[] {
+  if (!streamIds || streamIds.length === 0) return [];
+  const prevIdx = streamIds.indexOf(prevPostId);
+  const nextIdx = streamIds.indexOf(nextPostId);
+  if (prevIdx < 0 || nextIdx <= prevIdx + 1) return [];
+  return streamIds.slice(prevIdx + 1, nextIdx);
+}
+
+function resolveReactionFallbackImg(
+  reactionId: string,
+  customMap?: Record<string, string>
+): string {
   const clean = reactionId.trim().replace(/^:|:$/g, "").toLowerCase();
+  if (customMap && customMap[clean]) {
+    return customMap[clean];
+  }
   const normalized = ["+1", "thumbsup", "thumb_up"].includes(clean)
     ? "+1"
     : ["-1", "thumbsdown"].includes(clean)
@@ -238,7 +261,7 @@ const ReplyThumbPreview = React.memo<{
           onOpenLightbox(url);
         }
       }}
-      className="ml-2 h-9 w-9 shrink-0 overflow-hidden rounded-lg transition-transform hover:scale-[1.04] cursor-pointer"
+      className="ml-2 h-9 w-9 shrink-0 overflow-hidden rounded-lg transition-opacity hover:opacity-85 cursor-pointer"
       style={{
         backgroundColor: "var(--subtle-surface)",
         border: "0.5px solid var(--hairline)",
@@ -413,13 +436,39 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
   const [tailFeedback, setTailFeedback] = useState<string | null>(null);
   const tailFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
+  const [loadingGapKey, setLoadingGapKey] = useState<string | null>(null);
   const [activeReactionPickerPostId, setActiveReactionPickerPostId] = useState<number | null>(null);
+  const [reactionEmojiSearch, setReactionEmojiSearch] = useState("");
   const [activeFloorMorePostId, setActiveFloorMorePostId] = useState<number | null>(null);
   const pendingReactionPostsRef = useRef<Set<number>>(new Set());
   const [pendingReactionPostIds, setPendingReactionPostIds] = useState<Set<number>>(() => new Set());
   const [activeBoostComposerPostId, setActiveBoostComposerPostId] = useState<number | null>(null);
   const [expandedLinkPostIds, setExpandedLinkPostIds] = useState<Set<number>>(() => new Set());
   const [boostEmojiOpen, setBoostEmojiOpen] = useState(false);
+  const [boostEmojiTab, setBoostEmojiTab] = useState<"QUICK" | "CUSTOM">("QUICK");
+  const [boostEmojiSearch, setBoostEmojiSearch] = useState("");
+  const [siteCustomEmojis, setSiteCustomEmojis] = useState<CustomEmojiItem[]>([]);
+  const customEmojiUrlMap = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const item of siteCustomEmojis) {
+      map[item.name.toLowerCase()] = item.url;
+    }
+    return map;
+  }, [siteCustomEmojis]);
+
+  useEffect(() => {
+    if (!boostEmojiOpen && activeReactionPickerPostId === null) return;
+    if (siteCustomEmojis.length > 0) return;
+    let alive = true;
+    fetchSiteCustomEmojis()
+      .then((list) => {
+        if (alive) setSiteCustomEmojis(list);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [boostEmojiOpen, activeReactionPickerPostId, siteCustomEmojis.length]);
   const [boostDraftText, setBoostDraftText] = useState("");
   const [boostSubmitting, setBoostSubmitting] = useState(false);
   const [expandedBoostId, setExpandedBoostId] = useState<number | null>(null);
@@ -1197,7 +1246,6 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
     let rafId = 0;
     let settleTimer: ReturnType<typeof setTimeout> | null = null;
     let dwellTimer: ReturnType<typeof setTimeout> | null = null;
-    let reportTimer: ReturnType<typeof setTimeout> | null = null;
     let lastMeasureMs = 0;
     let lastSettleArmMs = 0;
     const topicEnteredAtMs = performance.now();
@@ -1242,15 +1290,6 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
           setLocallyViewedFloors(new Set(locallyViewedRef.current));
         }
         onFloorSeen(curDetail.id, computeEffectiveFloor(curDetail, maxFloor));
-
-        if (reportTimer) clearTimeout(reportTimer);
-        reportTimer = setTimeout(() => {
-          if (isAuthorized && seenServerBatch.size > 0 && detailRef.current) {
-            const batch = Array.from(seenServerBatch);
-            seenServerBatch.clear();
-            reportTopicTimings(detailRef.current.id, batch);
-          }
-        }, 650);
       }, 1000);
     };
 
@@ -1264,6 +1303,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
       const viewBottom = viewTop + viewHeight;
 
       let bestFloor = visibleFloorRef.current;
+      const visibleNow: number[] = [];
       for (let i = 0; i < floorNodes.length; i++) {
         const node = floorNodes[i];
         const top = node.offsetTop;
@@ -1271,12 +1311,16 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
         if (top <= viewMid) {
           bestFloor = f;
         }
-        if (commitReactState) {
-          const bottom = top + node.offsetHeight;
-          if (top < viewBottom - 16 && bottom > viewTop + 16) {
+        const bottom = top + node.offsetHeight;
+        if (top < viewBottom - 16 && bottom > viewTop + 16) {
+          visibleNow.push(f);
+          if (commitReactState) {
             pendingDwell.add(f);
           }
         }
+      }
+      if (isAuthorized && visibleNow.length > 0) {
+        desktopScreenTrack.updateVisiblePosts(visibleNow, confirmedReadFloorRef.current);
       }
 
       if (bestFloor !== visibleFloorRef.current) {
@@ -1335,6 +1379,9 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
     };
 
     const handleScroll = () => {
+      if (isAuthorized) {
+        desktopScreenTrack.markUserActivity();
+      }
       if (selectionQuoteRef.current !== null) {
         setSelectionQuote(null);
       }
@@ -1373,7 +1420,6 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
       if (rafId !== 0) cancelAnimationFrame(rafId);
       if (settleTimer) clearTimeout(settleTimer);
       if (dwellTimer) clearTimeout(dwellTimer);
-      if (reportTimer) clearTimeout(reportTimer);
       if (pendingDwell.size > 0 && detailRef.current && performance.now() - topicEnteredAtMs >= 450) {
         const curDetail = detailRef.current;
         let maxFloor = visibleFloorRef.current;
@@ -1386,13 +1432,47 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
         onFloorSeen(curDetail.id, computeEffectiveFloor(curDetail, maxFloor));
       }
       if (isAuthorized && seenServerBatch.size > 0 && detailRef.current) {
-        const batch = Array.from(seenServerBatch);
         seenServerBatch.clear();
-        void reportTopicTimings(detailRef.current.id, batch);
-        void flushTopicTimingsNow();
       }
     };
   }, [detail?.id, detail?.posts.length, isAuthorized, onlyOpFilter, summaryFilter, summary?.highestPostNumber, onAppendPosts, onFloorSeen]);
+
+  // Real 1s dwell-time ScreenTrack lifecycle (`P1-2`): pauses on idle (>3m) or hidden tab, flushes on leave/hide
+  useEffect(() => {
+    const topicId = detail?.id;
+    if (!isAuthorized || !topicId) return;
+    const initialFloor = targetFloor && targetFloor > 0 ? targetFloor : detail?.posts[0]?.postNumber ?? 1;
+    desktopScreenTrack.onTopicEntered(
+      topicId,
+      [initialFloor],
+      Math.max(detail?.lastReadPostNumber ?? 0, confirmedReadFloorRef.current)
+    );
+    desktopScreenTrack.setDocumentVisible(
+      typeof document === "undefined" ? true : !document.hidden
+    );
+
+    const onVisibility = () => {
+      desktopScreenTrack.setDocumentVisible(!document.hidden);
+    };
+    const onUserActivity = () => {
+      desktopScreenTrack.markUserActivity();
+    };
+    const tickId = setInterval(() => {
+      desktopScreenTrack.tick();
+    }, 1000);
+
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("pointerdown", onUserActivity, { passive: true });
+    window.addEventListener("keydown", onUserActivity, { passive: true });
+    return () => {
+      clearInterval(tickId);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("pointerdown", onUserActivity);
+      window.removeEventListener("keydown", onUserActivity);
+      void desktopScreenTrack.onTopicExited(topicId);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detail?.id, isAuthorized]);
 
   // Passive, zero-interference text selection quote (`引用并回复`): never runs while pointer is dragging!
   useEffect(() => {
@@ -1514,7 +1594,8 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
           effLastRead > 0 ? effLastRead : detail.lastReadPostNumber
         );
         if (fetched.length > 0) {
-          onAppendPosts(fetched, "replace");
+          // Preserve non-contiguous loaded slices (`P1-11`) instead of wiping previous floors!
+          onAppendPosts(fetched, "after");
           requestAnimationFrame(() => {
             const el = scrollContainerRef.current?.querySelector<HTMLElement>(
               `[data-floor="${floorNum}"]`
@@ -1561,6 +1642,27 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
       }
     } finally {
       setLoadingEarlier(false);
+    }
+  };
+
+  const handleLoadMiddleGap = async (gapKey: string, gapIds: number[]) => {
+    if (!detail || gapIds.length === 0 || loadingGapKey) return;
+    setLoadingGapKey(gapKey);
+    try {
+      const effLastRead = Math.max(detail.lastReadPostNumber ?? 0, confirmedReadFloor);
+      const loaded = await fetchPostsByIds(
+        detail.id,
+        gapIds.slice(0, 20),
+        knownAuthorBadges,
+        effLastRead > 0 ? effLastRead : detail.lastReadPostNumber
+      );
+      if (loaded.length > 0) {
+        onAppendPosts(loaded, "after");
+      }
+    } catch (e: any) {
+      setToastMsg(e?.message || "展开中间楼层失败，请重试");
+    } finally {
+      setLoadingGapKey(null);
     }
   };
 
@@ -1784,7 +1886,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
             <button
               type="button"
               onClick={() => jumpToFloor(detail.acceptedAnswerPostNumber!)}
-              className="lindo-no-drag ml-1 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold cursor-pointer"
+              className="lindo-no-drag ml-1 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold tabular-nums cursor-pointer"
               style={{
                 backgroundColor: "rgba(16, 185, 129, 0.14)",
                 color: "#10B981",
@@ -2200,7 +2302,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
       {/* 2. 主阅读滚动视口（全宽滚轮响应 + 900px 居中高信息密度舒适阅读版心） */}
       <div
         ref={scrollContainerRef}
-        className={`lindo-scroll relative flex-1 min-h-0 ${hideQuickReplyBar ? "pb-10" : "pb-16"}`}
+        className={`lindo-scroll lindo-reader-scroll relative flex-1 min-h-0 ${hideQuickReplyBar ? "pb-10" : "pb-16"}`}
       >
         <div className="mx-auto w-full max-w-[900px] px-5">
         {/* 话题大标题与元数据区 */}
@@ -2212,7 +2314,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
             className="lindo-selectable lindo-topic-headline select-text text-[21px] font-semibold leading-[1.38]"
             style={{ color: "var(--ink-primary)" }}
           >
-            {(detail?.closed ?? summary.closed) && (
+            {((detail?.closed ?? summary.closed) || (detail?.archived ?? summary.archived)) && (
               <LinDoIcons.Lock
                 size={15.5}
                 className="mr-1.5 inline-block align-[-2px]"
@@ -2321,6 +2423,11 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
               onClick={() => {
                 if (errorMessage.includes("验证")) {
                   onTriggerVerify();
+                } else if (!isAuthorized && errorMessage.includes("登录")) {
+                  onRequestGuestLogin(
+                    "该话题需要登录后查看",
+                    "登录 LINUX DO 账号后即可访问专属或受限话题"
+                  );
                 } else {
                   markManualRetryIntent();
                   onRefresh();
@@ -2332,7 +2439,11 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                 color: "var(--publish-btn-fg)",
               }}
             >
-              {errorMessage.includes("验证") ? "去验证" : "重试"}
+              {errorMessage.includes("验证")
+                ? "去验证"
+                : !isAuthorized && errorMessage.includes("登录")
+                  ? "去登录"
+                  : "重试"}
             </button>
           </div>
         ) : (
@@ -2361,32 +2472,67 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
             )}
 
             {detail?.posts.map((post, postIdx) => {
+              const prevPost = postIdx > 0 ? detail.posts[postIdx - 1] : null;
+              const middleGapIds =
+                prevPost && !onlyOpFilter && !summaryFilter
+                  ? computeMiddlePostGapIds(detail.streamIds, prevPost.id, post.id)
+                  : [];
+              const middleGapKey = prevPost ? `${prevPost.id}_${post.id}` : "";
+              const middleGapBanner =
+                middleGapIds.length > 0 ? (
+                  <div
+                    key={`gap_${middleGapKey}`}
+                    className="py-2.5"
+                    style={{ borderBottom: "0.5px solid var(--hairline-soft)" }}
+                  >
+                    <button
+                      type="button"
+                      disabled={loadingGapKey === middleGapKey}
+                      onClick={() => void handleLoadMiddleGap(middleGapKey, middleGapIds)}
+                      className="lindo-interactive flex w-full items-center justify-center gap-1.5 rounded-lg py-1.5 text-[12.5px] font-medium disabled:opacity-55"
+                      style={{
+                        backgroundColor: "var(--subtle-surface)",
+                        color: "var(--active-chip-text)",
+                      }}
+                    >
+                      <LinDoIcons.ChevronDown size={13} />
+                      <span>
+                        {loadingGapKey === middleGapKey
+                          ? "正在展开中间楼层..."
+                          : `展开中间 ${middleGapIds.length} 条楼层`}
+                      </span>
+                    </button>
+                  </div>
+                ) : null;
+
               if (post.isDeletedTombstone) {
                 return (
-                  <div
-                    key={post.id}
-                    data-floor={post.postNumber}
-                    className="flex items-center justify-between gap-3 py-2 text-[12.2px]"
-                    style={{
-                      color: "var(--ink-tertiary)",
-                      borderBottom: "0.5px solid var(--hairline-soft)",
-                    }}
-                  >
-                    <div className="flex min-w-0 items-center gap-2">
-                      <AvatarWithFlair
-                        username={post.username}
-                        avatarTemplate={post.avatarTemplate}
-                        sizePx={20}
-                      />
-                      <span className="truncate font-medium">
-                        {post.displayName || post.username}
+                  <React.Fragment key={post.id}>
+                    {middleGapBanner}
+                    <div
+                      data-floor={post.postNumber}
+                      className="flex items-center justify-between gap-3 py-2 text-[12.2px]"
+                      style={{
+                        color: "var(--ink-tertiary)",
+                        borderBottom: "0.5px solid var(--hairline-soft)",
+                      }}
+                    >
+                      <div className="flex min-w-0 items-center gap-2">
+                        <AvatarWithFlair
+                          username={post.username}
+                          avatarTemplate={post.avatarTemplate}
+                          sizePx={20}
+                        />
+                        <span className="truncate font-medium">
+                          {post.displayName || post.username}
+                        </span>
+                        <span>（帖子已被作者删除）</span>
+                      </div>
+                      <span className="shrink-0 tabular-nums">
+                        {formatRelativeTime(post.createdAt)} · #{post.postNumber}
                       </span>
-                      <span>（帖子已被作者删除）</span>
                     </div>
-                    <span className="shrink-0 tabular-nums">
-                      {formatRelativeTime(post.createdAt)} · #{post.postNumber}
-                    </span>
-                  </div>
+                  </React.Fragment>
                 );
               }
 
@@ -2402,44 +2548,46 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                   <LinDoIcons.Bell size={13} />
                 );
                 return (
-                  <div
-                    key={post.id}
-                    data-floor={post.postNumber}
-                    className="my-0.5 flex items-center justify-between gap-3 rounded-lg px-2.5 py-1.5 text-[12.2px]"
-                    style={{
-                      backgroundColor: "color-mix(in srgb, var(--subtle-surface) 45%, transparent)",
-                      color: "var(--ink-secondary)",
-                    }}
-                  >
-                    <div className="flex min-w-0 items-center gap-2">
-                      <span style={{ color: "var(--ink-tertiary)" }}>{smallIcon}</span>
-                      <AvatarWithFlair
-                        username={post.username}
-                        avatarTemplate={post.avatarTemplate}
-                        sizePx={20}
-                      />
-                      <button
-                        type="button"
-                        onClick={() => onInspectUser(post.username)}
-                        className="shrink-0 font-semibold hover:underline cursor-pointer"
-                        style={{ color: "var(--ink-primary)" }}
-                      >
-                        {post.displayName || post.username}
-                      </button>
-                      <span
-                        className="lindo-cooked truncate"
-                        dangerouslySetInnerHTML={{
-                          __html: prepareCookedHtmlCached(post.cookedHtml || post.actionCode || ""),
-                        }}
-                      />
-                    </div>
-                    <span
-                      className="shrink-0 text-[11.5px] tabular-nums"
-                      style={{ color: "var(--ink-tertiary)" }}
+                  <React.Fragment key={post.id}>
+                    {middleGapBanner}
+                    <div
+                      data-floor={post.postNumber}
+                      className="my-0.5 flex items-center justify-between gap-3 rounded-lg px-2.5 py-1.5 text-[12.2px]"
+                      style={{
+                        backgroundColor: "color-mix(in srgb, var(--subtle-surface) 45%, transparent)",
+                        color: "var(--ink-secondary)",
+                      }}
                     >
-                      {formatRelativeTime(post.createdAt)}
-                    </span>
-                  </div>
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span style={{ color: "var(--ink-tertiary)" }}>{smallIcon}</span>
+                        <AvatarWithFlair
+                          username={post.username}
+                          avatarTemplate={post.avatarTemplate}
+                          sizePx={20}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => onInspectUser(post.username)}
+                          className="shrink-0 font-semibold hover:underline cursor-pointer"
+                          style={{ color: "var(--ink-primary)" }}
+                        >
+                          {post.displayName || post.username}
+                        </button>
+                        <span
+                          className="lindo-cooked truncate"
+                          dangerouslySetInnerHTML={{
+                            __html: prepareCookedHtmlCached(post.cookedHtml || post.actionCode || ""),
+                          }}
+                        />
+                      </div>
+                      <span
+                        className="shrink-0 text-[11.5px] tabular-nums"
+                        style={{ color: "var(--ink-tertiary)" }}
+                      >
+                        {formatRelativeTime(post.createdAt)}
+                      </span>
+                    </div>
+                  </React.Fragment>
                 );
               }
 
@@ -2526,11 +2674,11 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                     // User dismissed the already-presented compact security card
                   } else if (err instanceof SiteError && err.isAuthRequired) {
                     onRequestGuestLogin(
-                      "登录状态已过期，请重新登录",
-                      "重新登录 LINUX DO 账号后即可继续发送助力与互动"
+                      "登录已过期",
+                      "重新登录后即可继续互动"
                     );
                   } else {
-                    setToastMsg(err?.message || "助力发送失败");
+                    setToastMsg(err?.message || "发送短评失败");
                   }
                 } finally {
                   setBoostSubmitting(false);
@@ -2539,13 +2687,12 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
 
               const isReplyFloor = post.postNumber > 1;
               const isLastRenderedPost = postIdx === (detail?.posts.length ?? 1) - 1;
-              const hasLeftFloorMeta = post.reactions.length > 0 || effectiveReplyCount > 0;
 
               const authorAvatarButton = (
                 <button
                   type="button"
                   onClick={() => onInspectUser(post.username)}
-                  className="mt-0.5 shrink-0 cursor-pointer transition-transform hover:scale-[1.03]"
+                  className="mt-0.5 shrink-0 cursor-pointer transition-opacity hover:opacity-85"
                 >
                   <AvatarWithFlair
                     username={post.username}
@@ -2605,7 +2752,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                               prev === post.id ? null : post.id
                             )
                           }
-                          className="inline-flex items-center rounded px-0.5 leading-none transition-transform hover:scale-110 cursor-pointer"
+                          className="lindo-interactive inline-flex items-center rounded px-0.5 leading-none cursor-pointer"
                         >
                           <StatusEmojiIcon emoji={post.userStatus.emoji} size={13.5} />
                         </button>
@@ -2952,7 +3099,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                     </div>
                   )}
 
-                  {/* 小火箭助力 (Boosts) 展示胶囊区（点击展开助力者账号与撤回入口，对齐移动端） */}
+                  {/* 短评 (Boosts) 展示胶囊区（点击展开作者账号与删除入口，对齐移动端） */}
                   {post.boosts.length > 0 && (
                     <div className="mt-2 flex flex-wrap items-center gap-1.5">
                       {post.boosts.map((boost) => {
@@ -3010,7 +3157,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                             {canRemoveBoost && (
                               <button
                                 type="button"
-                                title="撤回助力"
+                                title="删除短评"
                                 onClick={async (e) => {
                                   e.stopPropagation();
                                   try {
@@ -3025,7 +3172,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                                       "after"
                                     );
                                   } catch (err: any) {
-                                    setToastMsg(err?.message || "撤回助力失败");
+                                    setToastMsg(err?.message || "删除短评失败");
                                   }
                                 }}
                                 className="ml-0.5 inline-flex items-center gap-0.5 rounded-full px-1 py-0.5 text-[10.5px] opacity-75 hover:opacity-100 cursor-pointer"
@@ -3061,7 +3208,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                           style={{
                             backgroundColor: "var(--subtle-surface)",
                             border: counterOverLimit
-                              ? "0.6px solid #EF4444"
+                              ? "0.5px solid var(--error-border)"
                               : "0.5px solid var(--hairline)",
                           }}
                         >
@@ -3090,7 +3237,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                             onChange={(e) =>
                               setBoostDraftText(e.target.value.replace(/\n/g, " "))
                             }
-                            placeholder={`给 @${post.username} 助力…`}
+                            placeholder="说点什么…"
                             className="flex-1 bg-transparent px-1 text-[13px] outline-none"
                             style={{ color: "var(--ink-primary)" }}
                             onKeyDown={(e) => {
@@ -3107,9 +3254,8 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
 
                           {/* 右侧：精简字数提示 + 纯矢量发送图标 + 关闭按钮 */}
                           <span
-                            className="shrink-0 text-[11.8px] tabular-nums"
+                            className="shrink-0 text-[11.8px] font-medium tabular-nums"
                             style={{
-                              fontWeight: counterOverLimit ? 600 : 500,
                               color: counterOverLimit ? "#EF4444" : "var(--ink-tertiary)",
                             }}
                           >
@@ -3120,7 +3266,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                             type="button"
                             disabled={!canSendNow}
                             onClick={() => submitBoostNow(boostDraftText)}
-                            title="发送小火箭助力"
+                            title="发送短评"
                             className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-lg transition-colors cursor-pointer disabled:cursor-default"
                             style={{
                               backgroundColor: canSendNow
@@ -3136,7 +3282,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
 
                           <button
                             type="button"
-                            title="收起小火箭助力"
+                            title="收起短评"
                             onClick={() => {
                               setBoostEmojiOpen(false);
                               setActiveBoostComposerPostId(null);
@@ -3148,60 +3294,138 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                           </button>
                         </div>
 
-                        {/* 按需展开的表情与快捷短语抽屉（默认隐藏，保持阅读流极度整洁） */}
-                        {boostEmojiOpen && (
-                          <div
-                            className="rounded-xl p-2.5 space-y-2"
-                            style={{
-                              backgroundColor: "var(--subtle-surface)",
-                              border: "0.5px solid var(--hairline-soft)",
-                            }}
-                          >
-                            <div className="flex flex-wrap items-center gap-1">
-                              {BOOST_QUICK_PHRASES.map((phrase) => (
-                                <button
-                                  key={phrase}
-                                  type="button"
-                                  onClick={() => setBoostDraftText(phrase)}
-                                  className="lindo-interactive rounded-full px-2.5 py-0.5 text-[11.2px] font-medium"
-                                  style={{
-                                    backgroundColor: "var(--canvas)",
-                                    border: "0.5px solid var(--hairline)",
-                                    color: "var(--ink-secondary)",
-                                  }}
-                                >
-                                  {phrase}
-                                </button>
-                              ))}
-                            </div>
+                        {/* 按需展开的表情与快捷短语抽屉（含搜索 + `/emojis.json` 站内自定义表情, `P1-6`） */}
+                        {boostEmojiOpen && (() => {
+                          const bq = boostEmojiSearch.trim().toLowerCase();
+                          const filteredBoostCustom = siteCustomEmojis.filter(
+                            (ce) => !bq || ce.name.toLowerCase().includes(bq) || ce.group.toLowerCase().includes(bq)
+                          );
+                          return (
                             <div
-                              className="flex flex-wrap items-center gap-0.5 pt-1.5"
-                              style={{ borderTop: "0.5px solid var(--hairline-soft)" }}
+                              className="rounded-xl p-2.5 space-y-2"
+                              style={{
+                                backgroundColor: "var(--subtle-surface)",
+                                border: "0.5px solid var(--hairline-soft)",
+                              }}
                             >
-                              {BOOST_QUICK_EMOJIS.map((em) => (
-                                <button
-                                  key={em}
-                                  type="button"
-                                  disabled={!boostStats.canAddEmoji}
-                                  onClick={() =>
-                                    setBoostDraftText((prev) => `${prev}${em}`)
-                                  }
-                                  className="flex h-7 w-7 items-center justify-center rounded-lg text-[15px] transition-transform hover:scale-115 hover:bg-white/5 disabled:opacity-35 cursor-pointer"
-                                >
-                                  {em}
-                                </button>
-                              ))}
+                              <div className="flex flex-wrap items-center gap-1">
+                                {BOOST_QUICK_PHRASES.map((phrase) => (
+                                  <button
+                                    key={phrase}
+                                    type="button"
+                                    onClick={() => setBoostDraftText(phrase)}
+                                    className="lindo-interactive rounded-full px-2.5 py-0.5 text-[11.2px] font-medium"
+                                    style={{
+                                      backgroundColor: "var(--canvas)",
+                                      border: "0.5px solid var(--hairline)",
+                                      color: "var(--ink-secondary)",
+                                    }}
+                                  >
+                                    {phrase}
+                                  </button>
+                                ))}
+                              </div>
+                              <div
+                                className="flex flex-wrap items-center gap-1.5 pt-1.5"
+                                style={{ borderTop: "0.5px solid var(--hairline-soft)" }}
+                              >
+                                {[
+                                  { key: "QUICK", label: "常用" },
+                                  { key: "CUSTOM", label: `站内自定义 (${siteCustomEmojis.length})` },
+                                ].map((t) => (
+                                  <button
+                                    key={t.key}
+                                    type="button"
+                                    onClick={() => setBoostEmojiTab(t.key as "QUICK" | "CUSTOM")}
+                                    className="rounded-full px-2 py-0.5 text-[11px] font-medium cursor-pointer"
+                                    style={{
+                                      backgroundColor:
+                                        boostEmojiTab === t.key ? "var(--active-chip-bg)" : "var(--canvas)",
+                                      color:
+                                        boostEmojiTab === t.key
+                                          ? "var(--active-chip-text)"
+                                          : "var(--ink-secondary)",
+                                    }}
+                                  >
+                                    {t.label}
+                                  </button>
+                                ))}
+                                {boostEmojiTab === "CUSTOM" && (
+                                  <input
+                                    type="text"
+                                    value={boostEmojiSearch}
+                                    onChange={(e) => setBoostEmojiSearch(e.target.value)}
+                                    placeholder="搜索站内表情..."
+                                    className="ml-auto h-6 w-36 rounded-md px-2 text-[11.5px] outline-none"
+                                    style={{
+                                      backgroundColor: "var(--canvas)",
+                                      border: "0.5px solid var(--hairline)",
+                                      color: "var(--ink-primary)",
+                                    }}
+                                  />
+                                )}
+                              </div>
+                              {boostEmojiTab === "QUICK" ? (
+                                <div className="flex flex-wrap items-center gap-0.5">
+                                  {BOOST_QUICK_EMOJIS.map((em) => (
+                                    <button
+                                      key={em}
+                                      type="button"
+                                      disabled={!boostStats.canAddEmoji}
+                                      onClick={() =>
+                                        setBoostDraftText((prev) => `${prev}${em}`)
+                                      }
+                                      className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-lg text-[15px] disabled:opacity-35 cursor-pointer"
+                                    >
+                                      {em}
+                                    </button>
+                                  ))}
+                                </div>
+                              ) : (
+                                <div className="max-h-[110px] flex flex-wrap items-center gap-1 overflow-y-auto lindo-scroll">
+                                  {filteredBoostCustom.slice(0, 36).map((ce) => (
+                                    <button
+                                      key={ce.name}
+                                      type="button"
+                                      title={`:${ce.name}:`}
+                                      disabled={!boostStats.canAddEmoji}
+                                      onClick={() =>
+                                        setBoostDraftText((prev) => `${prev}:${ce.name}: `)
+                                      }
+                                      className="lindo-interactive inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] disabled:opacity-35"
+                                      style={{
+                                        backgroundColor: "var(--canvas)",
+                                        border: "0.5px solid var(--hairline)",
+                                        color: "var(--ink-secondary)",
+                                      }}
+                                    >
+                                      <img
+                                        src={ce.url}
+                                        alt={`:${ce.name}:`}
+                                        className="h-3.5 w-3.5 object-contain"
+                                      />
+                                      <span>:{ce.name}:</span>
+                                    </button>
+                                  ))}
+                                  {filteredBoostCustom.length === 0 && (
+                                    <span className="text-[11.5px]" style={{ color: "var(--ink-tertiary)" }}>
+                                      未找到匹配的站内表情
+                                    </span>
+                                  )}
+                                </div>
+                              )}
                             </div>
-                          </div>
-                        )}
+                          );
+                        })()}
                       </div>
                     );
                   })()}
 
-                  {/* 底部操作栏：表情胶囊 + 展开子回复 + 点赞/表情/小火箭/收藏/采纳/编辑/删除/回复 */}
+                  {/* 底部操作栏：固定基线高度（0 表态与 >=1 表态高度 0px 跳动）+ 表情胶囊 + 展开子回复 + 点赞/表情/小火箭/更多/回复 */}
                   <div
-                    className={`relative flex flex-wrap items-center justify-between gap-2 ${
-                      isReplyFloor ? (hasLeftFloorMeta ? "mt-1.5" : "mt-0.5") : "mt-2.5"
+                    data-floor-actions="1"
+                    className={`relative flex min-h-[28px] flex-wrap items-center justify-between gap-2 select-none ${
+                      isReplyFloor ? "mt-1.5" : "mt-2.5"
                     }`}
                   >
                     <div className="flex flex-wrap items-center gap-1.5">
@@ -3223,7 +3447,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                               }
                               await executeToggleReaction(post.id, r.id, "操作失败");
                             }}
-                            className="inline-flex items-center gap-1 rounded-full px-2 py-[1.5px] text-[11.2px] tabular-nums transition-colors cursor-pointer"
+                            className="box-border inline-flex h-[24px] items-center gap-1 rounded-full px-2 text-[11.2px] leading-none tabular-nums transition-colors cursor-pointer select-none"
                             style={{
                               backgroundColor: mine
                                 ? "var(--active-chip-bg)"
@@ -3233,10 +3457,12 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                             }}
                           >
                             {mappedEmoji ? (
-                              <span>{mappedEmoji}</span>
+                              <span className="inline-flex items-center justify-center text-[12.5px] leading-none">
+                                {mappedEmoji}
+                              </span>
                             ) : (
                               <img
-                                src={resolveReactionFallbackImg(r.id)}
+                                src={resolveReactionFallbackImg(r.id, customEmojiUrlMap)}
                                 alt={r.id}
                                 className="h-3.5 w-3.5 object-contain"
                                 onError={(e) => {
@@ -3249,12 +3475,12 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                         );
                       })}
 
-                      {/* 展开 N 条关联回复按钮（1:1 对齐移动端柔和无框设计） */}
+                      {/* 展开 N 条关联回复按钮（1:1 对齐移动端柔和无框设计，锁定 24px 高度零撑高） */}
                       {effectiveReplyCount > 0 && (
                         <button
                           type="button"
                           onClick={() => handleToggleInlineReplies(post)}
-                          className="lindo-interactive inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11.8px] font-medium"
+                          className="lindo-interactive inline-flex h-[24px] items-center gap-1 rounded-md px-1.5 text-[11.8px] font-medium leading-none"
                           style={{
                             color: inlineReplies ? "var(--brand-gold)" : "var(--ink-secondary)",
                           }}
@@ -3384,7 +3610,13 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                                       }
                                       await executeToggleReaction(post.id, "heart", "点赞未完成");
                                     }}
-                                    className={`flex ${btnHCls} items-center gap-1 rounded-full px-1.5 text-[11.5px] tabular-nums ${
+                                    className={`flex ${btnHCls} ${
+                                      post.likeCount > 0 && post.reactions.length === 0
+                                        ? "px-1.5"
+                                        : isReplyFloor
+                                          ? "w-[26px]"
+                                          : "w-[28px]"
+                                    } items-center justify-center gap-1 rounded-full text-[11.5px] leading-none tabular-nums ${
                                       isOwnPost
                                         ? "cursor-default opacity-45"
                                         : `lindo-interactive cursor-pointer ${
@@ -3399,11 +3631,13 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                                       color: isHeartActive ? "#E11D48" : "var(--ink-tertiary)",
                                     }}
                                   >
-                                    {isHeartActive ? (
-                                      <LinDoIcons.HeartFilled size={15} />
-                                    ) : (
-                                      <LinDoIcons.Heart size={15} />
-                                    )}
+                                    <span className="inline-flex items-center justify-center">
+                                      {isHeartActive ? (
+                                        <LinDoIcons.HeartFilled size={15} />
+                                      ) : (
+                                        <LinDoIcons.Heart size={15} />
+                                      )}
+                                    </span>
                                     {post.likeCount > 0 && post.reactions.length === 0 && (
                                       <span>{post.likeCount}</span>
                                     )}
@@ -3449,52 +3683,107 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                               );
                             })()}
 
-                            {showReactionBar && (
-                              <div
-                                className="absolute bottom-9 right-0 z-30 flex items-center gap-0.5 rounded-full px-2 py-1 shadow-xl"
-                                style={{
-                                  backgroundColor: "var(--subtle-surface)",
-                                  border: "0.5px solid var(--hairline)",
-                                }}
-                              >
-                                {REACTION_CHOICES.map((rc) => {
-                                  const isSelected = activeReactionId === rc.id;
-                                  return (
-                                    <button
-                                      key={rc.id}
-                                      type="button"
-                                      disabled={isReactionBusy}
-                                      title={rc.label}
-                                      onClick={() => {
-                                        void executeToggleReaction(post.id, rc.id, "回应未成功");
-                                      }}
-                                      className="rounded-full p-1 text-[15px] leading-none transition-transform hover:scale-125 cursor-pointer"
-                                      style={
-                                        isSelected
-                                          ? {
-                                              backgroundColor: "var(--active-chip-bg)",
-                                            }
-                                          : undefined
-                                      }
+                            {showReactionBar && (() => {
+                              const rq = reactionEmojiSearch.trim().toLowerCase();
+                              const customHits = siteCustomEmojis.filter(
+                                (ce) => !rq || ce.name.toLowerCase().includes(rq) || ce.group.toLowerCase().includes(rq)
+                              );
+                              return (
+                                <div
+                                  className="absolute bottom-9 right-0 z-30 w-[268px] rounded-2xl p-2 shadow-xl space-y-1.5"
+                                  style={{
+                                    backgroundColor: "var(--subtle-surface)",
+                                    border: "0.5px solid var(--hairline)",
+                                  }}
+                                >
+                                  <div className="flex items-center justify-between gap-0.5">
+                                    {REACTION_CHOICES.map((rc) => {
+                                      const isSelected = activeReactionId === rc.id;
+                                      return (
+                                        <button
+                                          key={rc.id}
+                                          type="button"
+                                          disabled={isReactionBusy}
+                                          title={rc.label}
+                                          onClick={() => {
+                                            void executeToggleReaction(post.id, rc.id, "回应未成功");
+                                          }}
+                                          className="lindo-interactive rounded-full p-1 text-[15px] leading-none cursor-pointer"
+                                          style={
+                                            isSelected
+                                              ? {
+                                                  backgroundColor: "var(--active-chip-bg)",
+                                                }
+                                              : undefined
+                                          }
+                                        >
+                                          {rc.emoji}
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                  {siteCustomEmojis.length > 0 && (
+                                    <div
+                                      className="space-y-1.5 pt-1.5"
+                                      style={{ borderTop: "0.5px solid var(--hairline-soft)" }}
                                     >
-                                      {rc.emoji}
-                                    </button>
-                                  );
-                                })}
-                              </div>
-                            )}
+                                      <input
+                                        type="text"
+                                        value={reactionEmojiSearch}
+                                        onChange={(e) => setReactionEmojiSearch(e.target.value)}
+                                        placeholder="搜索站内表情回应..."
+                                        className="h-6 w-full rounded-md px-2 text-[11px] outline-none"
+                                        style={{
+                                          backgroundColor: "var(--canvas)",
+                                          border: "0.5px solid var(--hairline)",
+                                          color: "var(--ink-primary)",
+                                        }}
+                                      />
+                                      <div className="max-h-[84px] flex flex-wrap gap-1 overflow-y-auto lindo-scroll">
+                                        {customHits.slice(0, 24).map((ce) => {
+                                          const isSelected = activeReactionId === ce.name;
+                                          return (
+                                            <button
+                                              key={ce.name}
+                                              type="button"
+                                              disabled={isReactionBusy}
+                                              title={`:${ce.name}:`}
+                                              onClick={() => {
+                                                void executeToggleReaction(post.id, ce.name, "回应未成功");
+                                              }}
+                                              className="lindo-interactive flex h-6 w-6 items-center justify-center rounded-md cursor-pointer"
+                                              style={
+                                                isSelected
+                                                  ? { backgroundColor: "var(--active-chip-bg)" }
+                                                  : undefined
+                                              }
+                                            >
+                                              <img
+                                                src={ce.url}
+                                                alt={`:${ce.name}:`}
+                                                className="h-4 w-4 object-contain"
+                                              />
+                                            </button>
+                                          );
+                                        })}
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })()}
                           </div>
 
-                          {/* 2. 小火箭助力按钮（1:1 对齐移动端：本人帖子自动隐藏） */}
+                          {/* 2. 短评按钮（1:1 对齐移动端：本人帖子自动隐藏） */}
                           {!isOwnPost && !post.isDeletedTombstone && !post.isSmallAction && (
                             <button
                               type="button"
-                              title={myBoost ? "查看我的小火箭助力" : "发送小火箭助力"}
+                              title={myBoost ? "查看我的短评" : "发短评"}
                               onClick={() => {
                                 if (!isAuthorized) {
                                   onRequestGuestLogin(
-                                    "登录后发送小火箭助力",
-                                    "用一句话或表情为这层回复助力"
+                                    "登录后发短评",
+                                    "给帖子发一条简短回应"
                                   );
                                   return;
                                 }
@@ -3872,7 +4161,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                               <button
                                 type="button"
                                 onClick={() => onInspectUser(rep.username)}
-                                className="mt-0.5 shrink-0 cursor-pointer transition-transform hover:scale-[1.03]"
+                                className="mt-0.5 shrink-0 cursor-pointer transition-opacity hover:opacity-85"
                               >
                                 <AvatarWithFlair
                                   username={rep.username}
@@ -4124,6 +4413,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
 
               return (
                 <React.Fragment key={post.id}>
+                  {middleGapBanner}
                   <article
                     data-floor={post.postNumber}
                     className={`${isReplyFloor ? "py-2.5 transition-opacity duration-150" : "py-3.5"}${
@@ -4199,7 +4489,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                       )}
                     </div>
                     <div
-                      className="inline-flex items-center rounded-lg p-[2px] text-[11.5px]"
+                      className="inline-flex select-none items-center rounded-lg p-[2px] text-[11.5px]"
                       style={{ backgroundColor: "var(--subtle-surface)" }}
                     >
                       <button
@@ -4219,7 +4509,9 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                           fontWeight: !onlyOpFilter && !summaryFilter ? 600 : 400,
                         }}
                       >
-                        全部
+                        <span className="lindo-tab-label" data-label="全部">
+                          <span>全部</span>
+                        </span>
                       </button>
                       {onToggleSummaryFilter && (detail.hasSummary || summaryFilter) && (
                         <button
@@ -4234,7 +4526,9 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                             fontWeight: summaryFilter ? 600 : 400,
                           }}
                         >
-                          热门回复
+                          <span className="lindo-tab-label" data-label="热门回复">
+                            <span>热门回复</span>
+                          </span>
                         </button>
                       )}
                       <button
@@ -4249,7 +4543,9 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                           fontWeight: onlyOpFilter ? 600 : 400,
                         }}
                       >
-                        只看楼主
+                        <span className="lindo-tab-label" data-label="只看楼主">
+                          <span>只看楼主</span>
+                        </span>
                       </button>
                     </div>
                   </div>
@@ -4583,36 +4879,45 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
               : "mx-auto flex w-full max-w-[900px] items-center justify-between gap-3 px-5"
           }
         >
-        {!hideQuickReplyBar && (
-          <button
-            type="button"
-            disabled={Boolean(detail?.closed)}
-            onClick={() => {
-              if (!isAuthorized) {
-                onRequestGuestLogin("登录后回复话题", "登录后即可参与社区讨论");
-                return;
-              }
-              onOpenComposer({
-                action: "REPLY",
-                topicId: summary.id,
-                topicTitle: detail?.title || summary.title,
-                replyToUsername: resolvedTopicOp.username || undefined,
-                replyToDisplayName: resolvedTopicOp.displayName || undefined,
-                replyToAvatarTemplate: resolvedTopicOp.avatarTemplate || undefined,
-                replyToAnimatedAvatar: resolvedTopicOp.animatedAvatar,
-              });
-            }}
-            className="pointer-events-auto flex h-[34px] min-w-0 flex-1 items-center gap-2 rounded-full px-4 text-[13px] transition-colors cursor-pointer disabled:opacity-55"
-            style={{
-              backgroundColor: "var(--subtle-surface)",
-              border: "0.5px solid var(--hairline)",
-              color: "var(--ink-tertiary)",
-            }}
-          >
-            {detail?.closed ? <LinDoIcons.Lock size={14} /> : <LinDoIcons.Edit size={14} />}
-            <span className="truncate">{detail?.closed ? "话题已关闭回复" : "回复话题"}</span>
-          </button>
-        )}
+        {!hideQuickReplyBar && (() => {
+          const isStaffUser = Boolean(currentUser?.admin || currentUser?.moderator);
+          const isReplyLocked = Boolean((detail?.closed || detail?.archived) && !isStaffUser);
+          const lockLabel = detail?.archived
+            ? "话题已归档，无法回复"
+            : detail?.closed
+              ? "话题已关闭回复"
+              : "回复话题";
+          return (
+            <button
+              type="button"
+              disabled={isReplyLocked}
+              onClick={() => {
+                if (!isAuthorized) {
+                  onRequestGuestLogin("登录后回复话题", "登录后即可参与社区讨论");
+                  return;
+                }
+                onOpenComposer({
+                  action: "REPLY",
+                  topicId: summary.id,
+                  topicTitle: detail?.title || summary.title,
+                  replyToUsername: resolvedTopicOp.username || undefined,
+                  replyToDisplayName: resolvedTopicOp.displayName || undefined,
+                  replyToAvatarTemplate: resolvedTopicOp.avatarTemplate || undefined,
+                  replyToAnimatedAvatar: resolvedTopicOp.animatedAvatar,
+                });
+              }}
+              className="pointer-events-auto flex h-[34px] min-w-0 flex-1 items-center gap-2 rounded-full px-4 text-[13px] transition-colors cursor-pointer disabled:opacity-55"
+              style={{
+                backgroundColor: "var(--subtle-surface)",
+                border: "0.5px solid var(--hairline)",
+                color: "var(--ink-tertiary)",
+              }}
+            >
+              {isReplyLocked ? <LinDoIcons.Lock size={14} /> : <LinDoIcons.Edit size={14} />}
+              <span className="truncate">{lockLabel}</span>
+            </button>
+          );
+        })()}
 
         {/* 楼层导航胶囊 + 跨楼层跳转一键返回原楼胶囊 */}
         <div className="pointer-events-auto relative flex shrink-0 items-center gap-2">
@@ -5016,7 +5321,7 @@ const InteractivePollCard: React.FC<{
               >
                 {showResults && (
                   <div
-                    className="pointer-events-none absolute inset-y-0 left-0 transition-all duration-300"
+                    className="pointer-events-none absolute inset-y-0 left-0 transition-[width] duration-300"
                     style={{
                       width: `${pct}%`,
                       backgroundColor: checked
@@ -5048,7 +5353,7 @@ const InteractivePollCard: React.FC<{
                   <button
                     type="button"
                     onClick={() => void toggleOptionVoters(opt.id)}
-                    className="text-[11px] hover:underline cursor-pointer"
+                    className="text-[11px] tabular-nums hover:underline cursor-pointer"
                     style={{ color: "var(--ink-tertiary)" }}
                   >
                     {isVotersExpanded ? "收起投票名单" : `查看 ${opt.votes} 位投票成员`}
@@ -5280,13 +5585,20 @@ const FlagPostModal: React.FC<{
                 }}
               >
                 <span
-                  className="mt-1 flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full"
+                  className="mt-1 box-border flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full transition-colors"
                   style={{
                     border: active
-                      ? "4px solid var(--brand-gold)"
+                      ? "1.5px solid var(--brand-gold)"
                       : "1.5px solid var(--ink-tertiary)",
                   }}
-                />
+                >
+                  {active && (
+                    <span
+                      className="h-1.5 w-1.5 rounded-full"
+                      style={{ backgroundColor: "var(--brand-gold)" }}
+                    />
+                  )}
+                </span>
                 <div className="min-w-0 flex-1">
                   <div
                     className="text-[13px] font-semibold"

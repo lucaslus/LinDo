@@ -62,6 +62,16 @@ const CUSTOM_SITE_EMOJI_IMG: Record<string, string> = {
   tieba_087: "https://linux.do/uploads/default/original/3X/2/e/2e092708f7b0a5e8f8a4b2520e3f452d62a3ef59.png",
 };
 
+export function registerCustomSiteEmojis(entries: Array<{ name: string; url: string }>): void {
+  for (const item of entries) {
+    const key = item.name.trim().toLowerCase().replace(/^:|:$/g, "");
+    const url = item.url.trim();
+    if (key && url) {
+      CUSTOM_SITE_EMOJI_IMG[key] = url;
+    }
+  }
+}
+
 function escapeHtml(text: string): string {
   return text
     .replace(/&/g, "&amp;")
@@ -193,6 +203,14 @@ function renderInlineMarkdown(
       const c = rawColor.trim();
       if (/(url|expression|;|\\)/i.test(c)) return inner;
       return `<span data-bbcode-color="${escapeAttr(c)}" data-has-custom-color="1" style="color:${escapeAttr(c)};">${inner}</span>`;
+    }
+  );
+  s = s.replace(
+    /\[bgcolor=([#a-zA-Z0-9(),.\s%-]{2,36})\]([\s\S]*?)\[\/bgcolor\]/gi,
+    (_m, rawColor: string, inner: string) => {
+      const c = rawColor.trim();
+      if (/(url|expression|;|\\)/i.test(c)) return inner;
+      return `<span data-bbcode-bgcolor="${escapeAttr(c)}" data-has-custom-bgcolor="1" style="background-color:${escapeAttr(c)};padding:0.08em 0.32em;border-radius:4px;">${inner}</span>`;
     }
   );
 

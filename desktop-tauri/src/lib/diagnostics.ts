@@ -41,6 +41,9 @@ const SENSITIVE_PATTERNS: Array<[RegExp, string]> = [
 export function redactDiagText(raw: string): string {
   if (!raw) return "";
   let out = raw;
+  out = out.replace(/(?:lindo|fluxdo):\/\/\/?qr-login\?[^\s"']+/gi, (match) =>
+    match.replace(/([?&](?:k|o)=)([^&#\s"']+)/gi, "$1<REDACTED>")
+  );
   for (const [re, rep] of SENSITIVE_PATTERNS) {
     out = out.replace(re, rep);
   }

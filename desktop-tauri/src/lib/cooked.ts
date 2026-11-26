@@ -499,6 +499,73 @@ function normalizeImageAnchors(doc: Document): void {
  * so native WebKit DOM renders emojis, uploads, tables, quotes, callouts, videos, embeds,
  * hashtags, spoilers, and code blocks cleanly.
  */
+function parsePositiveImgDimension(raw: string | null): number | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.endsWith("%")) return null;
+  const m = /^(\d+(?:\.\d+)?)(?:px)?$/i.exec(trimmed);
+  if (!m) return null;
+  const n = Math.round(Number(m[1]));
+  return Number.isFinite(n) && n > 0 && n <= 20000 ? n : null;
+}
+
+function extractImageDimensions(el: HTMLImageElement): { width: number; height: number } | null {
+  const attrW = parsePositiveImgDimension(el.getAttribute("width"));
+  const attrH = parsePositiveImgDimension(el.getAttribute("height"));
+  if (attrW && attrH) {
+    return { width: attrW, height: attrH };
+  }
+  const wrapper = el.closest(".lightbox-wrapper");
+  const infoText = wrapper?.querySelector(".meta .informations")?.textContent || "";
+  const match = /(\d{2,5})\s*[×xX]\s*(\d{2,5})/.exec(infoText);
+  if (match) {
+    const w = Number(match[1]);
+    const h = Number(match[2]);
+    if (w > 0 && h > 0 && w <= 20000 && h <= 20000) {
+      return { width: w, height: h };
+    }
+  }
+  return null;
+}
+
+export function isContentImageForSkeleton(el: HTMLImageElement, resolvedUrl: string): boolean {
+  if (!resolvedUrl || /^data:/i.test(resolvedUrl)) return false;
+  const cls = el.classList;
+  if (
+    cls.contains("emoji") ||
+    cls.contains("avatar") ||
+    cls.contains("site-icon") ||
+    cls.contains("badge-icon") ||
+    cls.contains("user-flair") ||
+    cls.contains("flair-icon") ||
+    cls.contains("favicon") ||
+    cls.contains("d-icon")
+  ) {
+    return false;
+  }
+  if (
+    el.closest(
+      ".avatar, aside.quote .title, .badge-category__wrapper, .hashtag-cooked, aside.onebox header.source"
+    )
+  ) {
+    return false;
+  }
+  if (/\/images\/emoji\/|\/user_avatar\/|\/letter_avatar|\/emoji\//i.test(resolvedUrl)) {
+    return false;
+  }
+  const attrW = parsePositiveImgDimension(el.getAttribute("width"));
+  const attrH = parsePositiveImgDimension(el.getAttribute("height"));
+  if (attrW !== null && attrW <= 48 && (attrH === null || attrH <= 48)) return false;
+  if (attrH !== null && attrH <= 48 && (attrW === null || attrW <= 48)) return false;
+  return true;
+}
+
+function appendInlineStyle(el: Element, cssFragment: string): void {
+  const existing = (el.getAttribute("style") || "").trim();
+  const sep = existing && !existing.endsWith(";") ? ";" : "";
+  el.setAttribute("style", `${existing}${sep}${cssFragment}`);
+}
+
 export function prepareCookedHtml(
   rawHtml: string,
   opts?: { stripPolls?: boolean; currentTopicId?: number }
@@ -577,13 +644,17 @@ export function prepareCookedHtml(
         el.getAttribute("data-orig-src") ||
         el.getAttribute("data-small-upload") ||
         "";
+      let resolvedImmediateCache = false;
+      let resolvedUrl = "";
       if (rawSrc) {
         const resolved = resolveForumAssetUrl(rawSrc);
+        resolvedUrl = resolved;
         el.setAttribute("data-canonical-src", resolved);
         if (needsSameOriginMediaBridge(resolved)) {
           const cachedBlob = getCachedForumMediaBlobUrl(resolved);
           if (cachedBlob) {
             el.setAttribute("src", cachedBlob);
+            resolvedImmediateCache = true;
           } else {
             el.setAttribute("src", TRANSPARENT_1PX_GIF);
             el.setAttribute("data-lindo-src", resolved);
@@ -594,6 +665,29 @@ export function prepareCookedHtml(
       }
       el.setAttribute("loading", "lazy");
       el.setAttribute("decoding", "async");
+
+      if (!resolvedImmediateCache && isContentImageForSkeleton(el, resolvedUrl)) {
+        el.classList.add("lindo-img-loading");
+        el.setAttribute("data-lindo-loading", "1");
+        const dims = extractImageDimensions(el);
+        const rawWidthAttr = (el.getAttribute("width") || "").trim();
+        const curStyle = el.getAttribute("style") || "";
+        const hasPercentageWidth =
+          rawWidthAttr.endsWith("%") || /(?:^|;)\s*width\s*:\s*[^;]*%/i.test(curStyle);
+        if (dims) {
+          if (hasPercentageWidth) {
+            appendInlineStyle(el, `aspect-ratio:${dims.width} / ${dims.height};`);
+          } else {
+            const ar = Number((dims.width / dims.height).toFixed(4));
+            appendInlineStyle(
+              el,
+              `--lindo-img-w:${dims.width}px;--lindo-img-ar:${ar};aspect-ratio:${dims.width} / ${dims.height};`
+            );
+          }
+        } else {
+          el.classList.add("lindo-img-loading-fallback");
+        }
+      }
     }
 
     // Normalize uploaded `<video>`, `<audio>`, and `<source>` elements so native playback works with auth cookies

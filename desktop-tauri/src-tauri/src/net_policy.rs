@@ -47,6 +47,160 @@ pub enum VerifyTicketOutcome {
     Absent,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanIpProbeResult {
+    /// Navigation/document still committing (`native_loading || !site_dom_ready`) or transient eval/fetch abort (`status == 0`).
+    /// Caller may wait cleanly up to the tight settle cap (NEVER reload `/challenge`).
+    TransientRetry,
+    /// Confirmed HTTP 2xx from `/session/csrf.json` without `cf-mitigated: challenge`.
+    Clean200,
+    /// Definitive HTTP challenge/error (`status > 0` and either `cf-mitigated: challenge` or non-2xx).
+    DefinitiveBlocked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanIpSettleAction {
+    WaitNoReload,
+    Proceed { clean_ip_csrf_200_ok: bool },
+}
+
+pub const MAX_CLEAN_IP_SETTLE_TICKS: u32 = 16; // ~3.5s at 220ms/tick
+pub const MAX_CLEAN_IP_PROBE_ATTEMPTS: u32 = 3; // initial + at most 2 transient retries
+
+pub fn classify_clean_ip_xhr_response(status: u16, cf_mitigated: &str) -> CleanIpProbeResult {
+    if status == 0 {
+        CleanIpProbeResult::TransientRetry
+    } else if (200..300).contains(&status) && !cf_mitigated.eq_ignore_ascii_case("challenge") {
+        CleanIpProbeResult::Clean200
+    } else {
+        CleanIpProbeResult::DefinitiveBlocked
+    }
+}
+
+/// Bounded zero-reload WKWebView settle & clean-IP probe decision:
+/// - Waits (without reloading `/challenge`) while `!page_settled && settle_ticks < MAX_CLEAN_IP_SETTLE_TICKS`
+///   so macOS `decidePolicyForNavigationResponse` (`origin404` pushed mid-commit) does not race
+///   `WKHTTPCookieStore` cookie flush or abort `fetch('/session/csrf.json')` on `about:blank`.
+/// - Retries transient `status == 0` / eval-abort errors at most `MAX_CLEAN_IP_PROBE_ATTEMPTS - 1` times
+///   within the settle cap (still zero `/challenge` reloads).
+/// - Exits immediately on `Clean200` (`true`), `DefinitiveBlocked` (`false`), or cap exhaustion (`false`).
+pub fn decide_clean_ip_settle_action(
+    page_settled: bool,
+    settle_ticks: u32,
+    probe_result: Option<CleanIpProbeResult>,
+    probe_attempts: u32,
+) -> CleanIpSettleAction {
+    if !page_settled && settle_ticks < MAX_CLEAN_IP_SETTLE_TICKS {
+        return CleanIpSettleAction::WaitNoReload;
+    }
+    match probe_result {
+        Some(CleanIpProbeResult::Clean200) => CleanIpSettleAction::Proceed {
+            clean_ip_csrf_200_ok: true,
+        },
+        Some(CleanIpProbeResult::DefinitiveBlocked) => CleanIpSettleAction::Proceed {
+            clean_ip_csrf_200_ok: false,
+        },
+        Some(CleanIpProbeResult::TransientRetry) => {
+            if probe_attempts < MAX_CLEAN_IP_PROBE_ATTEMPTS
+                && settle_ticks < MAX_CLEAN_IP_SETTLE_TICKS
+            {
+                CleanIpSettleAction::WaitNoReload
+            } else {
+                CleanIpSettleAction::Proceed {
+                    clean_ip_csrf_200_ok: false,
+                }
+            }
+        }
+        None => CleanIpSettleAction::Proceed {
+            clean_ip_csrf_200_ok: false,
+        },
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForceRefreshOutcomeDecision {
+    /// Brand-new unchallenged `cf_clearance` minted -> PASS.
+    PassRotated,
+    /// Healthy existing `cf_clearance` reused (ONLY when `!effective_force_refresh && !had_challenged`) -> PASS.
+    PassExistingValid,
+    /// Cookie store empty after single purge + clean origin pass (for `force_refresh`, confirmed by `/session/csrf.json` 200 without `cf-mitigated: challenge`) -> PASS (zero-loop clean IP exit).
+    PassCleanIpNoCookie,
+    /// Perform at most ONE purge + navigate (strictly forbidden if `stale_purged_once` is already true).
+    PurgeOnceAndNavigate,
+    /// Stop cleanly without looping or reloading `/challenge`.
+    FailNoLoop,
+}
+
+/// Invariant 1: `force_refresh` is strictly manual-only and non-sticky.
+/// Non-Manual presentations (`Silent`, `Proactive`, `Pill`, `Blocking`) MUST ALWAYS clamp to `false`.
+pub fn effective_force_refresh(requested: VerifyPresentation, force_refresh: bool) -> bool {
+    requested == VerifyPresentation::Manual && force_refresh
+}
+
+/// Strip ONLY Cloudflare clearance/bot-management cookies while strictly preserving Discourse
+/// login session cookies (`_t`, `_forum_session`) and all unrelated cookies.
+pub fn strip_cf_cookies_preserving_session(raw_cookies: &str) -> String {
+    raw_cookies
+        .split(';')
+        .map(|s| s.trim())
+        .filter(|s| {
+            !s.is_empty()
+                && !s.starts_with("cf_clearance=")
+                && !s.starts_with("__cf_bm=")
+                && !s.starts_with("_cfuvid=")
+                && !s.starts_with("cf_chl_rc_")
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Pure anti-loop decision table for `/challenge` origin-pass evaluation:
+/// - Invariant 2: `PurgeOnceAndNavigate` is NEVER returned when `stale_purged_once` is already true.
+/// - Invariant 3: On clean IPs where Cloudflare issues no `cf_clearance` after purge, a confirmed
+///   non-challenge `/session/csrf.json` 200 OK exits cleanly as `PassCleanIpNoCookie` (zero loop).
+/// - Stale unchanged `cf_clearance` after purge NEVER falsely passes (`FailNoLoop`).
+pub fn evaluate_force_refresh_decision(
+    ticket_outcome: VerifyTicketOutcome,
+    effective_force_refresh: bool,
+    had_challenged_before_verify: bool,
+    stale_purged_once: bool,
+    clean_ip_csrf_200_ok: bool,
+    is_silent_or_proactive: bool,
+) -> ForceRefreshOutcomeDecision {
+    match ticket_outcome {
+        VerifyTicketOutcome::Rotated => ForceRefreshOutcomeDecision::PassRotated,
+        VerifyTicketOutcome::ExistingValid => {
+            if effective_force_refresh || had_challenged_before_verify {
+                ForceRefreshOutcomeDecision::FailNoLoop
+            } else {
+                ForceRefreshOutcomeDecision::PassExistingValid
+            }
+        }
+        VerifyTicketOutcome::StaleUnchallenged404 => {
+            if !stale_purged_once {
+                ForceRefreshOutcomeDecision::PurgeOnceAndNavigate
+            } else {
+                ForceRefreshOutcomeDecision::FailNoLoop
+            }
+        }
+        VerifyTicketOutcome::Absent => {
+            if had_challenged_before_verify && !stale_purged_once {
+                ForceRefreshOutcomeDecision::PurgeOnceAndNavigate
+            } else if effective_force_refresh {
+                if clean_ip_csrf_200_ok {
+                    ForceRefreshOutcomeDecision::PassCleanIpNoCookie
+                } else {
+                    ForceRefreshOutcomeDecision::FailNoLoop
+                }
+            } else if is_silent_or_proactive && !stale_purged_once {
+                ForceRefreshOutcomeDecision::FailNoLoop
+            } else {
+                ForceRefreshOutcomeDecision::PassCleanIpNoCookie
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CfClearanceAuthority {
     pub incumbent: Option<String>,
@@ -2334,5 +2488,209 @@ mod tests {
             true,
             t0 + Duration::from_secs(3)
         ));
+    }
+
+    #[test]
+    fn force_refresh_clamps_non_manual_and_preserves_session_cookies() {
+        // Invariant 1: strictly Manual-only & non-sticky
+        assert!(!effective_force_refresh(VerifyPresentation::Silent, true));
+        assert!(!effective_force_refresh(VerifyPresentation::Pill, true));
+        assert!(!effective_force_refresh(VerifyPresentation::Proactive, true));
+        assert!(!effective_force_refresh(VerifyPresentation::Blocking, true));
+        assert!(!effective_force_refresh(VerifyPresentation::Manual, false));
+        assert!(effective_force_refresh(VerifyPresentation::Manual, true));
+
+        // `_t` and `_forum_session` login cookies MUST NEVER be touched when purging `cf_clearance`
+        let raw = "_t=secret_login_token; cf_clearance=old_cf_123; __cf_bm=bm_abc; _cfuvid=uv_1; cf_chl_rc_m=1; _forum_session=sess_xyz";
+        let stripped = strip_cf_cookies_preserving_session(raw);
+        assert_eq!(stripped, "_t=secret_login_token; _forum_session=sess_xyz");
+        assert!(stripped.contains("_t=secret_login_token"));
+        assert!(stripped.contains("_forum_session=sess_xyz"));
+        assert!(!stripped.contains("cf_clearance="));
+    }
+
+    #[test]
+    fn force_refresh_enforces_single_purge_clean_ip_exit_and_rejects_stale_cookie() {
+        let mut auth = CfClearanceAuthority::default();
+        auth.confirm_healthy("cf_old", 1_700_000_000_000);
+        let mut stale_cf = std::collections::HashSet::new();
+        stale_cf.insert("cf_old".to_string());
+
+        // 1. After single pre-navigate purge (`stale_purged_once = true`), brand-new cookie -> PassRotated
+        let rotated = auth.evaluate_verify_outcome(
+            &stale_cf,
+            &["cf_new_fresh".to_string()],
+            true, // require_fresh = had_challenged || effective_force_refresh
+            true,
+        );
+        assert_eq!(rotated, VerifyTicketOutcome::Rotated);
+        assert_eq!(
+            evaluate_force_refresh_decision(rotated, true, false, true, false, false),
+            ForceRefreshOutcomeDecision::PassRotated
+        );
+
+        // 2. Clean-IP zero-loop exit: cookie store empty after purge AND `/session/csrf.json` returns 200 OK -> PassCleanIpNoCookie (NEVER loops or reloads!)
+        let absent = auth.evaluate_verify_outcome(&stale_cf, &[], true, true);
+        assert_eq!(absent, VerifyTicketOutcome::Absent);
+        assert_eq!(
+            evaluate_force_refresh_decision(absent, true, false, true, true, false),
+            ForceRefreshOutcomeDecision::PassCleanIpNoCookie
+        );
+
+        // 3. Clean-IP probe still challenged (`clean_ip_csrf_200_ok = false`) after purge -> FailNoLoop (zero infinite reload!)
+        assert_eq!(
+            evaluate_force_refresh_decision(absent, true, false, true, false, false),
+            ForceRefreshOutcomeDecision::FailNoLoop
+        );
+
+        // 4. Stale unchanged `cf_old` somehow persisted after purge -> StaleUnchallenged404 + FailNoLoop (never falsely accepted, never purged a second time!)
+        let stale_unchanged =
+            auth.evaluate_verify_outcome(&stale_cf, &["cf_old".to_string()], true, true);
+        assert_eq!(stale_unchanged, VerifyTicketOutcome::StaleUnchallenged404);
+        assert_eq!(
+            evaluate_force_refresh_decision(stale_unchanged, true, false, true, true, false),
+            ForceRefreshOutcomeDecision::FailNoLoop
+        );
+
+        // 5. Reactive non-force verify with healthy existing cookie -> PassExistingValid
+        let healthy = auth.evaluate_verify_outcome(&stale_cf, &["cf_old".to_string()], false, true);
+        assert_eq!(healthy, VerifyTicketOutcome::ExistingValid);
+        assert_eq!(
+            evaluate_force_refresh_decision(healthy, false, false, false, false, false),
+            ForceRefreshOutcomeDecision::PassExistingValid
+        );
+    }
+
+    #[test]
+    fn user_dismiss_during_manual_force_refresh_arms_snooze_and_blocks_auto_reopen() {
+        let t0 = Instant::now();
+        let coord = Arc::new(StdMutex::new(VerifyCoordinator::default()));
+
+        // User starts manual force-refresh verify
+        let (round, pres) = match coord.lock().unwrap().join_or_start_with_context(
+            VerifyPresentation::Manual,
+            t0,
+            false,
+            false,
+            "net_sig_home",
+        ) {
+            VerifyJoin::Leader {
+                round,
+                presentation,
+                ..
+            } => (round, presentation),
+            _ => panic!("manual force refresh must start as leader"),
+        };
+        assert!(effective_force_refresh(VerifyPresentation::Manual, true));
+
+        // User closes `×` -> UserDismissed records 180s snooze and abandons flight cleanly
+        let snooze_ms = coord
+            .lock()
+            .unwrap()
+            .record_user_dismiss("net_sig_home", t0 + Duration::from_secs(2));
+        assert_eq!(snooze_ms, VERIFY_USER_DISMISS_SNOOZE_SECS * 1000);
+        let out = VerifyFlightGuard::new(Arc::clone(&coord), round, pres)
+            .abandon(t0 + Duration::from_secs(2));
+        assert!(!out.passed);
+
+        // Subsequent Proactive / Blocking auto-triggers MUST NOT auto-reopen during snooze!
+        let auto_join = coord.lock().unwrap().join_or_start_with_context(
+            VerifyPresentation::Blocking,
+            t0 + Duration::from_secs(10),
+            false,
+            false,
+            "net_sig_home",
+        );
+        assert!(matches!(auto_join, VerifyJoin::BlockedByCooldown { .. }));
+
+        // Only explicit Manual user click clears snooze and can start a new round
+        let manual_again = coord.lock().unwrap().join_or_start_with_context(
+            VerifyPresentation::Manual,
+            t0 + Duration::from_secs(15),
+            false,
+            false,
+            "net_sig_home",
+        );
+        assert!(matches!(manual_again, VerifyJoin::Leader { .. }));
+    }
+
+    #[test]
+    fn clean_ip_probe_settle_handles_webkit_commit_race_transient_and_definitive_outcomes() {
+        // 1. Response classifier separates transient abort (status=0) from Clean200 and DefinitiveBlocked
+        assert_eq!(
+            classify_clean_ip_xhr_response(0, ""),
+            CleanIpProbeResult::TransientRetry
+        );
+        assert_eq!(
+            classify_clean_ip_xhr_response(200, ""),
+            CleanIpProbeResult::Clean200
+        );
+        assert_eq!(
+            classify_clean_ip_xhr_response(200, "challenge"),
+            CleanIpProbeResult::DefinitiveBlocked
+        );
+        assert_eq!(
+            classify_clean_ip_xhr_response(403, "challenge"),
+            CleanIpProbeResult::DefinitiveBlocked
+        );
+        assert_eq!(
+            classify_clean_ip_xhr_response(403, ""),
+            CleanIpProbeResult::DefinitiveBlocked
+        );
+
+        // 2. While WKWebView is still mid-commit (`!page_settled`), wait cleanly without reloading `/challenge`
+        assert_eq!(
+            decide_clean_ip_settle_action(false, 1, None, 0),
+            CleanIpSettleAction::WaitNoReload
+        );
+        assert_eq!(
+            decide_clean_ip_settle_action(false, MAX_CLEAN_IP_SETTLE_TICKS - 1, None, 0),
+            CleanIpSettleAction::WaitNoReload
+        );
+        // Bounded cap: if document never settles after MAX_CLEAN_IP_SETTLE_TICKS, exit cleanly (false -> FailNoLoop)
+        assert_eq!(
+            decide_clean_ip_settle_action(false, MAX_CLEAN_IP_SETTLE_TICKS, None, 0),
+            CleanIpSettleAction::Proceed {
+                clean_ip_csrf_200_ok: false
+            }
+        );
+
+        // 3. Once settled, transient nav/eval abort (`status=0`) retries within tight attempt cap without reload
+        assert_eq!(
+            decide_clean_ip_settle_action(true, 2, Some(CleanIpProbeResult::TransientRetry), 1),
+            CleanIpSettleAction::WaitNoReload
+        );
+        assert_eq!(
+            decide_clean_ip_settle_action(true, 3, Some(CleanIpProbeResult::TransientRetry), 2),
+            CleanIpSettleAction::WaitNoReload
+        );
+        // At MAX_CLEAN_IP_PROBE_ATTEMPTS -> bounded exit (no infinite loop!)
+        assert_eq!(
+            decide_clean_ip_settle_action(
+                true,
+                4,
+                Some(CleanIpProbeResult::TransientRetry),
+                MAX_CLEAN_IP_PROBE_ATTEMPTS
+            ),
+            CleanIpSettleAction::Proceed {
+                clean_ip_csrf_200_ok: false
+            }
+        );
+
+        // 4. Clean 200 immediately proceeds as `true` -> PassCleanIpNoCookie
+        assert_eq!(
+            decide_clean_ip_settle_action(true, 2, Some(CleanIpProbeResult::Clean200), 1),
+            CleanIpSettleAction::Proceed {
+                clean_ip_csrf_200_ok: true
+            }
+        );
+
+        // 5. Definitive 403/challenge immediately proceeds as `false` -> FailNoLoop (zero retries!)
+        assert_eq!(
+            decide_clean_ip_settle_action(true, 2, Some(CleanIpProbeResult::DefinitiveBlocked), 1),
+            CleanIpSettleAction::Proceed {
+                clean_ip_csrf_200_ok: false
+            }
+        );
     }
 }

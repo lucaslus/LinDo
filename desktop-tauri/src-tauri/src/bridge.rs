@@ -1,12 +1,16 @@
 use crate::legacy::{
-    clear_pending_rsa, load_pending_rsa, save_pending_rsa, save_state, PendingRsaDiskRecord,
-    PersistedState, SavedAccountEntry, UserProfile,
+    apply_logout_state, apply_switch_saved_account_state, clear_pending_rsa, lindo_home_dir,
+    load_pending_rsa, save_pending_rsa, save_state, snapshot_active_account_state,
+    PendingRsaDiskRecord, PersistedState, SavedAccountEntry, UserProfile,
 };
 use crate::net_policy::{
-    compute_bridge_timeouts, is_logout_exempt_from_session_recovery, is_transient_retryable_status,
-    parse_retry_after_secs, should_trigger_near_expiry_silent_refresh, transient_backoff_ms,
-    AdaptiveTokenBucket, AttemptBudget, BackgroundChallengeTracker, BridgeTimeoutSpec,
-    CallDeadline, Cf429AdaptiveClassifier, Cf429Decision, CfClearanceAuthority,
+    classify_clean_ip_xhr_response, compute_bridge_timeouts, decide_clean_ip_settle_action,
+    effective_force_refresh, evaluate_force_refresh_decision,
+    is_logout_exempt_from_session_recovery, is_transient_retryable_status, parse_retry_after_secs,
+    should_trigger_near_expiry_silent_refresh, strip_cf_cookies_preserving_session,
+    transient_backoff_ms, AdaptiveTokenBucket, AttemptBudget, BackgroundChallengeTracker,
+    BridgeTimeoutSpec, CallDeadline, Cf429AdaptiveClassifier, Cf429Decision, CfClearanceAuthority,
+    CleanIpProbeResult, CleanIpSettleAction, ForceRefreshOutcomeDecision,
     IneffectiveClearanceDecision, PriorityGate, RequestPriority, VerifyCoordinator,
     VerifyFlightGuard, VerifyJoin, VerifyOutcome, VerifyPresentation, VerifyTicketOutcome,
     VERIFY_PILL_DELAY_MS, VERIFY_PROACTIVE_WIDGET_PROMOTE_MS, VERIFY_TYPING_QUIET_GUARD_MS,
@@ -374,6 +378,15 @@ impl Default for MediaCacheState {
 }
 
 impl MediaCacheState {
+    fn clear(&mut self) -> (usize, usize) {
+        let count = self.entries.len();
+        let bytes = self.total_bytes;
+        self.entries.clear();
+        self.order.clear();
+        self.total_bytes = 0;
+        (count, bytes)
+    }
+
     fn get(&mut self, url: &str) -> Option<ForumMediaPayload> {
         let payload = self.entries.get(url)?.0.clone();
         if let Some(pos) = self.order.iter().position(|k| k == url) {
@@ -654,6 +667,13 @@ pub struct DiagRuntimeSnapshot {
     pub media_cache_entries: usize,
     pub media_cache_bytes: usize,
     pub ech_state: crate::ech_desktop::EchDesktopSnapshot,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearLocalCachesResult {
+    pub freed_bytes: u64,
+    pub cleared_entries: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1046,22 +1066,35 @@ impl BridgeEngine {
         let eng = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
             let _ = eng.ensure_ready(false).await;
+            let has_user = eng
+                .state
+                .lock()
+                .map(|st| st.current_user.is_some())
+                .unwrap_or(false);
             let cold_challenged = eng
                 .inner
                 .lock()
                 .map(|rt| rt.bootstrap_challenged && !rt.verifying)
                 .unwrap_or(false);
-            if cold_challenged {
+            if cold_challenged && should_allow_proactive_prewarm(has_user) {
                 if let Some(app) = GLOBAL_APP_HANDLE.get().cloned() {
                     let _ = eng.trigger_proactive_cf_check(&app, "cold_start").await;
                 }
             }
 
-            // Idle near-expiry proactive refresh: wake every 15m; ONLY if incumbent age >= 10.5h
+            // Idle near-expiry proactive refresh: wake every 15m; ONLY if authenticated, incumbent age >= 10.5h
             // and app is idle (`active_fg_requests == 0 && !verifying`), precheck silently first (0 UI if auto-passed)
             // and promote to panel ONLY when human interaction is genuinely required & guards allow.
             loop {
                 tokio::time::sleep(Duration::from_secs(15 * 60)).await;
+                let has_user_now = eng
+                    .state
+                    .lock()
+                    .map(|st| st.current_user.is_some())
+                    .unwrap_or(false);
+                if !should_allow_proactive_prewarm(has_user_now) {
+                    continue;
+                }
                 let age_secs = eng
                     .cf_authority
                     .lock()
@@ -1488,6 +1521,10 @@ impl BridgeEngine {
     }
 
     async fn purge_cf_clearance_for_reverify(&self) -> Vec<String> {
+        self.purge_cf_clearance_with_options(true).await
+    }
+
+    async fn purge_cf_clearance_with_options(&self, mark_challenged: bool) -> Vec<String> {
         let deleted: Vec<String> = native_call("deleteCfClearance", json!({}), 6)
             .await
             .ok()
@@ -1500,30 +1537,24 @@ impl BridgeEngine {
                 })
             })
             .unwrap_or_default();
-        if !deleted.is_empty() {
+        {
             let mut auth = self.cf_authority.lock().unwrap();
-            for val in &deleted {
-                auth.note_challenged(Some(val));
+            if mark_challenged {
+                for val in &deleted {
+                    auth.note_challenged(Some(val));
+                }
+            } else {
+                // Single-shot manual `force_refresh` on a healthy ticket clears incumbent without
+                // falsely poisoning `last_challenged` if the user cancels or passes via clean IP.
+                auth.incumbent = None;
+                auth.updated_at_ms = 0;
             }
         }
         // Also strip any purged/stale cf_clearance & __cf_bm from persisted `raw_cookies`
-        // so guest/anonymous sessions never retain a ghost `cf_clearance` in memory!
+        // while strictly preserving `_t` and `_forum_session` login cookies!
         {
             let mut st = self.state.lock().unwrap();
-            let cleaned: Vec<String> = st
-                .raw_cookies
-                .split(';')
-                .map(|s| s.trim())
-                .filter(|s| {
-                    !s.is_empty()
-                        && !s.starts_with("cf_clearance=")
-                        && !s.starts_with("__cf_bm=")
-                        && !s.starts_with("_cfuvid=")
-                        && !s.starts_with("cf_chl_rc_")
-                })
-                .map(|s| s.to_string())
-                .collect();
-            let joined = cleaned.join("; ");
+            let joined = strip_cf_cookies_preserving_session(&st.raw_cookies);
             if st.raw_cookies != joined || st.cf_clearance_updated_at_ms != 0 {
                 st.raw_cookies = joined;
                 st.cf_clearance_updated_at_ms = 0;
@@ -1767,13 +1798,14 @@ impl BridgeEngine {
         app: &AppHandle,
         reason: &str,
     ) -> VerifyOutcome {
+        let has_user = self
+            .state
+            .lock()
+            .map(|st| st.current_user.is_some())
+            .unwrap_or(false);
         let visible = self.is_main_window_visible(app);
         let (composer_open, _) = self.ui_typing_guard_state(now_epoch_ms());
-        let pres = if visible && !composer_open {
-            VerifyPresentation::Proactive
-        } else {
-            VerifyPresentation::Silent
-        };
+        let pres = resolve_proactive_cf_presentation(reason, has_user, visible, composer_open);
         let is_dark = self.current_is_dark();
         let outcome = self
             .coordinate_cf_verification_ext(app, pres, is_dark, false, false)
@@ -1788,7 +1820,10 @@ impl BridgeEngine {
                 let _ = app.emit("lindo://cf-attention-needed", false);
             }
         } else {
-            let should_keep_banner = {
+            let is_guest_prewarm = !has_user && matches!(reason, "cold_start" | "near_expiry");
+            let should_keep_banner = if is_guest_prewarm {
+                false
+            } else {
                 let rt = self.inner.lock().unwrap();
                 !rt.verifying
                     && (rt.cf_attention_notified
@@ -1857,6 +1892,28 @@ impl BridgeEngine {
         is_post_pass_replay: bool,
         bypass_user_dismiss: bool,
     ) -> VerifyOutcome {
+        self.coordinate_cf_verification_with_force(
+            app,
+            requested,
+            is_dark,
+            is_post_pass_replay,
+            bypass_user_dismiss,
+            false,
+        )
+        .await
+    }
+
+    pub async fn coordinate_cf_verification_with_force(
+        &self,
+        app: &AppHandle,
+        requested: VerifyPresentation,
+        is_dark: bool,
+        is_post_pass_replay: bool,
+        bypass_user_dismiss: bool,
+        force_refresh: bool,
+    ) -> VerifyOutcome {
+        // Invariant 1: strictly Manual-only & non-sticky (clamped to false for all auto paths).
+        let force_refresh = effective_force_refresh(requested, force_refresh);
         if requested == VerifyPresentation::Manual {
             let need_manual_heal = self
                 .verify_coord
@@ -1963,6 +2020,7 @@ impl BridgeEngine {
                         &presentation,
                         &escalate_notify,
                         &mut saw_interactive_or_challenge,
+                        force_refresh,
                     )
                     .await
                     .unwrap_or(UnifiedVerifyDisposition::Failed);
@@ -2086,6 +2144,34 @@ impl BridgeEngine {
         false
     }
 
+    async fn probe_clean_origin_csrf_via_xhr(&self) -> CleanIpProbeResult {
+        let probe_js = r#"(async () => {
+            if (location.origin !== 'https://linux.do') return { status: 0, cf: '' };
+            try {
+                const r = await fetch('/session/csrf.json', {
+                    credentials: 'include',
+                    cache: 'no-store',
+                    headers: {
+                        'Accept': 'application/json',
+                        'X-Requested-With': 'XMLHttpRequest'
+                    },
+                    signal: AbortSignal.timeout(5000)
+                });
+                return { status: r.status, cf: r.headers.get('cf-mitigated') || '' };
+            } catch (_) {
+                return { status: 0, cf: '' };
+            }
+        })()"#;
+        let Ok(val) =
+            native_call("evaluate", json!({ "isolated": true, "script": probe_js }), 6).await
+        else {
+            return CleanIpProbeResult::TransientRetry;
+        };
+        let status = val.get("status").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+        let cf = val.get("cf").and_then(|v| v.as_str()).unwrap_or("");
+        classify_clean_ip_xhr_response(status, cf)
+    }
+
     async fn run_unified_cf_verify(
         &self,
         app: &AppHandle,
@@ -2094,28 +2180,37 @@ impl BridgeEngine {
         presentation: &Arc<AtomicU8>,
         escalate_notify: &Arc<Notify>,
         saw_interactive_or_challenge: &mut bool,
+        force_refresh: bool,
     ) -> Result<UnifiedVerifyDisposition, String> {
         native_call("init", json!({}), 10).await?;
         self.inner.lock().unwrap().initialized = true;
         let _ = self.seed_session_verified(true).await;
 
+        let effective_force = effective_force_refresh(
+            VerifyPresentation::from_u8(presentation.load(Ordering::SeqCst)),
+            force_refresh,
+        );
         let had_challenged_before_verify = self
             .cf_authority
             .lock()
             .map(|a| a.last_challenged.is_some())
             .unwrap_or(false);
+        let require_fresh_ticket = had_challenged_before_verify || effective_force;
         if had_challenged_before_verify {
             *saw_interactive_or_challenge = true;
         }
-        // Snapshot incumbent clearance (preserve healthy unchallenged cf_clearance, but pre-purge
-        // clearances already proven challenged so `/challenge` does not waste a stale-404 double reload!)
+        // Snapshot incumbent clearance (preserve healthy unchallenged cf_clearance unless proven challenged
+        // OR explicitly requested via single-shot manual `force_refresh`).
         let mut stale_cf: std::collections::HashSet<String> =
             self.browser_cf_clearances().await.into_iter().collect();
         let mut probed_fresh_cfs: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         let mut stale_purged_once = false;
-        if had_challenged_before_verify {
-            let purged = self.purge_cf_clearance_for_reverify().await;
+        // Invariant 2: AT MOST ONE purge before the single `/challenge` navigation, setting `stale_purged_once = true`.
+        if require_fresh_ticket {
+            let purged = self
+                .purge_cf_clearance_with_options(had_challenged_before_verify)
+                .await;
             for p in purged {
                 stale_cf.insert(p);
             }
@@ -2152,6 +2247,8 @@ impl BridgeEngine {
         let mut widget_mounted_since: Option<Instant> = None;
         let mut blank_healed_once = false;
         let mut quiet_rounds = 0u32;
+        let mut clean_ip_settle_ticks = 0u32;
+        let mut clean_ip_probe_attempts = 0u32;
         let mut last_reload_epoch: Option<u64> = None;
         let mut pass_mask_stuck_ticks = 0u32;
         let mut stuck_reloaded = false;
@@ -2486,6 +2583,14 @@ impl BridgeEngine {
                         && p.get("hasDiscourseDom").and_then(|v| v.as_bool()) == Some(true)
                 })
                 .unwrap_or(false);
+            let page_settled = !native_loading
+                && probe
+                    .as_ref()
+                    .map(|p| {
+                        p.get("site").and_then(|v| v.as_bool()) == Some(true)
+                            && p.get("domReady").and_then(|v| v.as_bool()) == Some(true)
+                    })
+                    .unwrap_or(false);
 
             if is_cf_error_page {
                 *saw_interactive_or_challenge = true;
@@ -2519,14 +2624,14 @@ impl BridgeEngine {
                     let _ = native_call("navigate", json!({ "url": "https://linux.do/challenge" }), 8).await;
                     continue;
                 }
-                if has_fresh || !had_challenged_before_verify {
+                if has_fresh || !require_fresh_ticket {
                     disposition = UnifiedVerifyDisposition::Passed;
                 }
                 break;
             }
 
             if (cur_pres.allows_ui() || panel_shown) && user_cancelled {
-                if (ready || is_origin_404) && !in_challenge {
+                if (ready || is_origin_404) && !in_challenge && (!effective_force || page_settled) {
                     // User closed right as verification finished
                 } else {
                     *saw_interactive_or_challenge = true;
@@ -2538,6 +2643,8 @@ impl BridgeEngine {
             if in_challenge {
                 *saw_interactive_or_challenge = true;
                 quiet_rounds = 0;
+                clean_ip_settle_ticks = 0;
+                clean_ip_probe_attempts = 0;
                 pass_mask_stuck_ticks = 0;
                 challenge_ticks += 1;
                 if panel_shown {
@@ -2555,7 +2662,7 @@ impl BridgeEngine {
                         .confirm_fresh_cf_clearance_via_xhr(
                             &mut stale_cf,
                             &mut probed_fresh_cfs,
-                            had_challenged_before_verify,
+                            require_fresh_ticket,
                         )
                         .await
                 {
@@ -2835,33 +2942,76 @@ impl BridgeEngine {
                 auth.evaluate_verify_outcome(
                     &stale_cf,
                     &current_cfs,
-                    had_challenged_before_verify,
+                    require_fresh_ticket,
                     is_origin_404 || ready,
                 )
             };
 
-            match ticket_outcome {
-                VerifyTicketOutcome::StaleUnchallenged404 => {
-                    if !stale_purged_once {
-                        stale_purged_once = true;
-                        quiet_rounds = 0;
-                        let purged = self.purge_cf_clearance_for_reverify().await;
-                        for p in purged {
-                            stale_cf.insert(p);
-                        }
-                        emit_diag(
-                            app,
-                            "INFO",
-                            "AUTH",
-                            "VerifyPurgeStale",
-                            "检测到陈旧 cf_clearance 未轮换即落入 404，已清理失效票据并重拉验证",
-                            Some(&format!("round={round}")),
-                        );
-                        let _ = native_call("navigate", json!({ "url": "https://linux.do/challenge" }), 8).await;
+            // Invariant 3 (Clean-IP Zero-Loop Exit with WKWebView settle guard):
+            // Wait for `!native_loading && site && domReady` (bounded by `MAX_CLEAN_IP_SETTLE_TICKS`,
+            // NEVER reloading `/challenge`) so macOS `decidePolicyForNavigationResponse` (`origin404`
+            // pushed mid-commit) never races `WKHTTPCookieStore` cookie flush or aborts the CSRF probe!
+            let clean_ip_csrf_ok = if effective_force
+                && matches!(ticket_outcome, VerifyTicketOutcome::Absent)
+                && !has_rendered_widget
+                && !in_challenge
+            {
+                clean_ip_settle_ticks = clean_ip_settle_ticks.saturating_add(1);
+                let probe_result = if page_settled {
+                    clean_ip_probe_attempts = clean_ip_probe_attempts.saturating_add(1);
+                    Some(self.probe_clean_origin_csrf_via_xhr().await)
+                } else {
+                    None
+                };
+                match decide_clean_ip_settle_action(
+                    page_settled,
+                    clean_ip_settle_ticks,
+                    probe_result,
+                    clean_ip_probe_attempts,
+                ) {
+                    CleanIpSettleAction::WaitNoReload => {
                         continue;
                     }
-                    // Already purged once, yet stale challenged cookie is still present without rotation:
-                    // NEVER wash `last_challenged` clean with `mark_rotation_open()`!
+                    CleanIpSettleAction::Proceed {
+                        clean_ip_csrf_200_ok,
+                    } => clean_ip_csrf_200_ok,
+                }
+            } else {
+                false
+            };
+
+            let decision = evaluate_force_refresh_decision(
+                ticket_outcome,
+                effective_force,
+                had_challenged_before_verify,
+                stale_purged_once,
+                clean_ip_csrf_ok,
+                matches!(cur_pres, VerifyPresentation::Silent | VerifyPresentation::Proactive),
+            );
+
+            let mut clean_ip_passed = false;
+            match decision {
+                ForceRefreshOutcomeDecision::PurgeOnceAndNavigate => {
+                    stale_purged_once = true;
+                    quiet_rounds = 0;
+                    let purged = self.purge_cf_clearance_for_reverify().await;
+                    for p in purged {
+                        stale_cf.insert(p);
+                    }
+                    emit_diag(
+                        app,
+                        "INFO",
+                        "AUTH",
+                        "VerifyPurgeStale",
+                        "检测到陈旧 cf_clearance 未轮换即落入 404，已清理失效票据并重拉验证",
+                        Some(&format!("round={round}")),
+                    );
+                    let _ = native_call("navigate", json!({ "url": "https://linux.do/challenge" }), 8).await;
+                    continue;
+                }
+                ForceRefreshOutcomeDecision::FailNoLoop => {
+                    // Already purged once, stale cookie unchanged, or clean-IP probe still challenged:
+                    // NEVER loop-reload `/challenge` and NEVER wash `last_challenged` clean!
                     let _ = self.sync_cookies_from_webkit_verified(false, false).await;
                     disposition = if matches!(cur_pres, VerifyPresentation::Silent | VerifyPresentation::Proactive)
                         && !had_challenged_before_verify
@@ -2872,33 +3022,21 @@ impl BridgeEngine {
                     };
                     break;
                 }
-                VerifyTicketOutcome::Absent => {
-                    if had_challenged_before_verify && !stale_purged_once {
-                        stale_purged_once = true;
-                        quiet_rounds = 0;
-                        let purged = self.purge_cf_clearance_for_reverify().await;
-                        for p in purged {
-                            stale_cf.insert(p);
-                        }
-                        let _ = native_call("navigate", json!({ "url": "https://linux.do/challenge" }), 8).await;
-                        continue;
+                ForceRefreshOutcomeDecision::PassCleanIpNoCookie => {
+                    clean_ip_passed = effective_force && clean_ip_csrf_ok;
+                    if clean_ip_passed {
+                        self.cf_authority.lock().unwrap().mark_rotation_open();
                     }
-                    // No `cf_clearance` in browser and `/challenge` reached origin without challenge:
-                    // keep `last_challenged` intact (`verified = false` — zero false whitewashing!).
                     let _ = self.sync_cookies_from_webkit_verified(false, false).await;
-                    if matches!(cur_pres, VerifyPresentation::Silent | VerifyPresentation::Proactive)
-                        && !stale_purged_once
-                    {
-                        disposition = UnifiedVerifyDisposition::Abandoned;
-                        break;
-                    }
                 }
-                VerifyTicketOutcome::Rotated | VerifyTicketOutcome::ExistingValid => {}
+                ForceRefreshOutcomeDecision::PassRotated
+                | ForceRefreshOutcomeDecision::PassExistingValid => {}
             }
 
             let ticket_verified = matches!(
-                ticket_outcome,
-                VerifyTicketOutcome::Rotated | VerifyTicketOutcome::ExistingValid
+                decision,
+                ForceRefreshOutcomeDecision::PassRotated
+                    | ForceRefreshOutcomeDecision::PassExistingValid
             );
 
             // Self-heal zombie local session if Discourse `data-preloaded` proves `_t` expired
@@ -2957,7 +3095,7 @@ impl BridgeEngine {
                 .sync_cookies_from_webkit_verified(false, ticket_verified)
                 .await;
             let pass_detail = format!(
-                "round={round}, panelShown={panel_shown}, elapsedMs={}, outcome={ticket_outcome:?}, hasFreshCf={has_fresh_cf}, origin404={is_origin_404}, ready={ready}",
+                "round={round}, panelShown={panel_shown}, elapsedMs={}, outcome={ticket_outcome:?}, forceRefresh={effective_force}, cleanIpPass={clean_ip_passed}, hasFreshCf={has_fresh_cf}, origin404={is_origin_404}, ready={ready}",
                 loop_started.elapsed().as_millis()
             );
             emit_diag(
@@ -3575,6 +3713,7 @@ impl BridgeEngine {
                 cookies,
                 needs_login,
                 read_floors: HashMap::new(),
+                drafts: HashMap::new(),
             });
         }
     }
@@ -5500,13 +5639,27 @@ impl BridgeEngine {
         is_dark: bool,
         manual: bool,
     ) -> Result<bool, String> {
+        self.verify_or_login_with_options(app, login, is_dark, manual, false)
+            .await
+    }
+
+    pub async fn verify_or_login_with_options(
+        &self,
+        app: &AppHandle,
+        login: bool,
+        is_dark: bool,
+        manual: bool,
+        force_refresh: bool,
+    ) -> Result<bool, String> {
         if !login {
             let pres = if manual {
                 VerifyPresentation::Manual
             } else {
                 VerifyPresentation::Blocking
             };
-            let outcome = self.coordinate_cf_verification(app, pres, is_dark, false).await;
+            let outcome = self
+                .coordinate_cf_verification_with_force(app, pres, is_dark, false, false, force_refresh)
+                .await;
             return Ok(outcome.passed);
         }
         self.verify_internal(app, true, is_dark, None).await
@@ -6556,6 +6709,8 @@ impl BridgeEngine {
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string()),
+            admin: u.get("admin").and_then(|v| v.as_bool()).unwrap_or(false),
+            moderator: u.get("moderator").and_then(|v| v.as_bool()).unwrap_or(false),
         })
     }
 
@@ -6573,6 +6728,26 @@ impl BridgeEngine {
         }
         {
             let mut st = self.state.lock().unwrap();
+            let switched_account = st
+                .current_user
+                .as_ref()
+                .map(|prev| !prev.username.eq_ignore_ascii_case(&profile.username))
+                .unwrap_or(true);
+            if switched_account {
+                snapshot_active_account_state(&mut st);
+                if let Some(saved) = st
+                    .saved_accounts
+                    .iter()
+                    .find(|a| a.profile.username.eq_ignore_ascii_case(&profile.username))
+                    .cloned()
+                {
+                    st.read_floors = saved.read_floors;
+                    st.drafts = saved.drafts;
+                } else {
+                    st.read_floors.clear();
+                    st.drafts.clear();
+                }
+            }
             let auth_cookies: String = st
                 .raw_cookies
                 .split(';')
@@ -7666,6 +7841,53 @@ impl BridgeEngine {
         Ok(())
     }
 
+    pub fn clear_local_caches(&self) -> ClearLocalCachesResult {
+        let (media_entries, media_bytes) = {
+            let mut mc = self.media_cache.lock().unwrap();
+            mc.clear()
+        };
+        let mut freed_bytes = media_bytes as u64;
+        let mut cleared_entries = media_entries;
+
+        fn dir_size_and_files(dir: &std::path::Path) -> (u64, usize) {
+            let mut bytes = 0u64;
+            let mut files = 0usize;
+            if let Ok(rd) = std::fs::read_dir(dir) {
+                for entry in rd.flatten() {
+                    let p = entry.path();
+                    if let Ok(meta) = entry.metadata() {
+                        if meta.is_dir() {
+                            let (sub_b, sub_f) = dir_size_and_files(&p);
+                            bytes = bytes.saturating_add(sub_b);
+                            files = files.saturating_add(sub_f);
+                        } else if meta.is_file() {
+                            bytes = bytes.saturating_add(meta.len());
+                            files = files.saturating_add(1);
+                        }
+                    }
+                }
+            }
+            (bytes, files)
+        }
+
+        // Safely clear ONLY disposable cache/update staging dirs; NEVER touch tauri_state.json or pending_rsa.json
+        let home = lindo_home_dir();
+        for sub in ["cache", "media_cache", "updates"] {
+            let dir = home.join(sub);
+            if dir.is_dir() {
+                let (b, f) = dir_size_and_files(&dir);
+                if std::fs::remove_dir_all(&dir).is_ok() {
+                    freed_bytes = freed_bytes.saturating_add(b);
+                    cleared_entries = cleared_entries.saturating_add(f);
+                }
+            }
+        }
+        ClearLocalCachesResult {
+            freed_bytes,
+            cleared_entries,
+        }
+    }
+
     pub async fn switch_saved_account(&self, app: &AppHandle, username: &str) -> Result<bool, String> {
         let target = {
             let st = self.state.lock().unwrap();
@@ -7690,9 +7912,7 @@ impl BridgeEngine {
         }
         {
             let mut st = self.state.lock().unwrap();
-            st.current_user = Some(entry.profile);
-            st.raw_cookies = entry.cookies;
-            st.expired_username = None;
+            apply_switch_saved_account_state(&mut st, username);
             save_state(&st);
         }
         let _ = self.sync_cookies_from_webkit(false).await;
@@ -7703,26 +7923,7 @@ impl BridgeEngine {
     pub async fn logout(&self, app: &AppHandle, remove_saved: bool) -> Result<(), String> {
         {
             let mut st = self.state.lock().unwrap();
-            if remove_saved {
-                if let Some(ref u) = st.current_user {
-                    let uname = u.username.clone();
-                    st.saved_accounts
-                        .retain(|a| !a.profile.username.eq_ignore_ascii_case(&uname));
-                }
-            }
-            st.current_user = None;
-            st.expired_username = None;
-            st.unread_notifications = 0;
-            let cf_only: Vec<String> = st
-                .raw_cookies
-                .split(';')
-                .map(|s| s.trim())
-                .filter(|s| {
-                    !s.is_empty() && !s.starts_with("_t=") && !s.starts_with("_forum_session=")
-                })
-                .map(|s| s.to_string())
-                .collect();
-            st.raw_cookies = cf_only.join("; ");
+            apply_logout_state(&mut st, remove_saved);
             save_state(&st);
         }
         self.set_dock_badge(0).await;
@@ -7743,20 +7944,33 @@ impl BridgeEngine {
     }
 
     pub async fn add_account_via_web(&self, app: &AppHandle, is_dark: bool) -> Result<bool, String> {
-        // Snapshot current account before clearing auth cookies for new login
+        // Snapshot current account (cookies + read_floors + drafts) before clearing auth cookies for new login
         let _ = self.sync_cookies_from_webkit(false).await;
         let backup = {
-            let st = self.state.lock().unwrap();
-            (st.current_user.clone(), st.raw_cookies.clone())
+            let mut st = self.state.lock().unwrap();
+            snapshot_active_account_state(&mut st);
+            let snap = (
+                st.current_user.clone(),
+                st.raw_cookies.clone(),
+                st.read_floors.clone(),
+                st.drafts.clone(),
+            );
+            st.read_floors.clear();
+            st.drafts.clear();
+            save_state(&st);
+            snap
         };
         let _ = self.replace_account_cookies("").await;
         let ok = self.verify_or_login(app, true, is_dark, true).await?;
         if !ok {
-            if let (Some(prev_user), prev_cookies) = backup {
+            let (prev_user, prev_cookies, prev_floors, prev_drafts) = backup;
+            if let Some(prev_user) = prev_user {
                 let _ = self.replace_account_cookies(&prev_cookies).await;
                 let mut st = self.state.lock().unwrap();
                 st.current_user = Some(prev_user);
                 st.raw_cookies = prev_cookies;
+                st.read_floors = prev_floors;
+                st.drafts = prev_drafts;
                 save_state(&st);
                 let _ = app.emit("lindo://state-updated", ());
             }
@@ -8091,6 +8305,29 @@ impl BridgeEngine {
     }
 }
 
+/// Aligns with Android `SilentVerifyPolicy.shouldAllowProactivePrewarm`:
+/// Unauthenticated guest/Welcome sessions must never auto-escalate background cold-start or
+/// near-expiry prewarms into interactive security modals.
+pub(crate) fn should_allow_proactive_prewarm(has_authenticated_user: bool) -> bool {
+    has_authenticated_user
+}
+
+pub(crate) fn resolve_proactive_cf_presentation(
+    reason: &str,
+    has_authenticated_user: bool,
+    main_window_visible: bool,
+    composer_open: bool,
+) -> VerifyPresentation {
+    if matches!(reason, "cold_start" | "near_expiry") && !should_allow_proactive_prewarm(has_authenticated_user) {
+        return VerifyPresentation::Silent;
+    }
+    if main_window_visible && !composer_open {
+        VerifyPresentation::Proactive
+    } else {
+        VerifyPresentation::Silent
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8300,5 +8537,110 @@ mod tests {
         let def_prefs = crate::legacy::UserPreferences::default();
         assert_eq!(def_prefs.theme_option, "WARM_ORANGE");
         assert!(def_prefs.compact_feed);
+    }
+
+    #[test]
+    fn media_cache_clear_resets_entries_and_reports_freed_bytes() {
+        let mut cache = MediaCacheState::default();
+        cache.insert(
+            "https://linux.do/uploads/a.png".to_string(),
+            ForumMediaPayload {
+                status: 200,
+                content_type: "image/png".to_string(),
+                data_base64: "AAAA".repeat(64),
+            },
+        );
+        cache.insert(
+            "https://linux.do/uploads/b.png".to_string(),
+            ForumMediaPayload {
+                status: 200,
+                content_type: "image/png".to_string(),
+                data_base64: "BBBB".repeat(32),
+            },
+        );
+        assert_eq!(cache.entries.len(), 2);
+        assert_eq!(cache.total_bytes, 256 + 128);
+
+        let (entries, bytes) = cache.clear();
+        assert_eq!(entries, 2);
+        assert_eq!(bytes, 384);
+        assert_eq!(cache.entries.len(), 0);
+        assert!(cache.order.is_empty());
+        assert_eq!(cache.total_bytes, 0);
+    }
+
+    #[test]
+    fn guest_welcome_prewarm_guard_blocks_proactive_escalation_for_cold_start_and_near_expiry() {
+        assert!(!should_allow_proactive_prewarm(false));
+        assert!(should_allow_proactive_prewarm(true));
+
+        // Unauthenticated Welcome screen: cold_start & near_expiry MUST stay Silent
+        assert_eq!(
+            resolve_proactive_cf_presentation("cold_start", false, true, false),
+            VerifyPresentation::Silent
+        );
+        assert_eq!(
+            resolve_proactive_cf_presentation("near_expiry", false, true, false),
+            VerifyPresentation::Silent
+        );
+
+        // Authenticated user with visible window & closed composer: Proactive allowed
+        assert_eq!(
+            resolve_proactive_cf_presentation("cold_start", true, true, false),
+            VerifyPresentation::Proactive
+        );
+        assert_eq!(
+            resolve_proactive_cf_presentation("near_expiry", true, true, false),
+            VerifyPresentation::Proactive
+        );
+
+        // Composer open or hidden window stays Silent even when authenticated
+        assert_eq!(
+            resolve_proactive_cf_presentation("cold_start", true, true, true),
+            VerifyPresentation::Silent
+        );
+        assert_eq!(
+            resolve_proactive_cf_presentation("cold_start", true, false, false),
+            VerifyPresentation::Silent
+        );
+
+        // Non-prewarm explicit/foreground triggers still escalate normally
+        assert_eq!(
+            resolve_proactive_cf_presentation("route_changed", false, true, false),
+            VerifyPresentation::Proactive
+        );
+    }
+
+    #[test]
+    fn extract_current_user_populates_admin_and_moderator_staff_flags() {
+        let staff_json = r#"{
+            "current_user": {
+                "id": 7,
+                "username": "mod_alice",
+                "name": "Alice",
+                "avatar_template": "/a.png",
+                "trust_level": 4,
+                "admin": true,
+                "moderator": true
+            }
+        }"#;
+        let staff = BridgeEngine::extract_current_user(staff_json).expect("staff profile");
+        assert_eq!(staff.username, "mod_alice");
+        assert!(staff.admin);
+        assert!(staff.moderator);
+
+        let regular_json = r#"{
+            "current_user": {
+                "id": 8,
+                "username": "regular_bob",
+                "name": "Bob",
+                "avatar_template": "/b.png",
+                "trust_level": 2
+            }
+        }"#;
+        let regular = BridgeEngine::extract_current_user(regular_json).expect("regular profile");
+        assert_eq!(regular.username, "regular_bob");
+        assert!(!regular.admin);
+        assert!(!regular.moderator);
     }
 }

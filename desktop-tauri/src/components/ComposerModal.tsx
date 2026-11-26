@@ -8,7 +8,9 @@ import {
 } from "./LinDoIcons";
 import type {
   CategoryMeta,
+  CloudDraftItem,
   ComposerLaunchRequest,
+  CustomEmojiItem,
   LocalDraftRecord,
   MentionUserCandidate,
   PostItemModel,
@@ -17,9 +19,13 @@ import type {
 } from "../lib/types";
 import {
   type CommunitySearchHit,
+  deleteCloudDraft,
   deleteLocalDraftInRust,
   fetchCategoryAllowedTags,
   fetchPostRawMarkdown,
+  fetchRecentTopicsForLinkPicker,
+  fetchSingleCloudDraft,
+  fetchSiteCustomEmojis,
   fetchTopicDetail,
   getCachedTopicDetail,
   publishReply,
@@ -46,7 +52,7 @@ import { renderDiscourseMarkdownPreview } from "../lib/markdownPreview";
 import { observeCookedForumImages } from "../lib/forumMedia";
 import { observeCookedRichContent } from "../lib/richDecorators";
 import { formatCompactCount, resolveCategoryVisual } from "../lib/palette";
-import { AvatarWithFlair, ConfirmDialog } from "./SecondaryScreens";
+import { AvatarWithFlair, ConfirmDialog, isValidSearchQuery } from "./SecondaryScreens";
 
 interface ComposerModalProps {
   request: ComposerLaunchRequest;
@@ -86,6 +92,84 @@ const SITE_SHORTCODE_EMOJIS: Array<{ code: string; label: string }> = [
   { code: ":heart:", label: "爱心" },
   { code: ":pray:", label: "感谢" },
 ];
+
+export const COMPOSER_CODE_LANGUAGES = [
+  "bash",
+  "python",
+  "typescript",
+  "javascript",
+  "rust",
+  "kotlin",
+  "java",
+  "go",
+  "cpp",
+  "sql",
+  "json",
+  "yaml",
+  "html",
+  "css",
+  "dockerfile",
+  "diff",
+] as const;
+
+export const COMPOSER_CALLOUT_KINDS: Array<{
+  kind: "note" | "tip" | "info" | "warning" | "danger";
+  label: string;
+  color: string;
+}> = [
+  { kind: "note", label: "笔记", color: "#3B82F6" },
+  { kind: "tip", label: "技巧", color: "#10B981" },
+  { kind: "info", label: "信息", color: "#0EA5E9" },
+  { kind: "warning", label: "警告", color: "#F59E0B" },
+  { kind: "danger", label: "危险", color: "#EF4444" },
+];
+
+export function buildMarkdownTableSnippet(rows: number, cols: number): string {
+  const safeCols = Math.max(2, Math.min(6, cols));
+  const safeRows = Math.max(2, Math.min(8, rows));
+  const headers = Array.from({ length: safeCols }, (_, i) => `列 ${i + 1}`);
+  const sep = Array.from({ length: safeCols }, () => "---");
+  const bodyLines = Array.from({ length: safeRows - 1 }, (_, r) =>
+    `| ${Array.from({ length: safeCols }, (_c, c) => `行${r + 1}列${c + 1}`).join(" | ")} |`
+  );
+  return `| ${headers.join(" | ")} |\n| ${sep.join(" | ")} |\n${bodyLines.join("\n")}`;
+}
+
+export function buildDiscoursePollSnippet(params: {
+  type: "regular" | "multiple" | "number";
+  results: "always" | "on_vote" | "on_close";
+  publicVoters: boolean;
+  options: string[];
+  min?: number;
+  max?: number;
+}): string {
+  const attrs: string[] = [
+    `type=${params.type}`,
+    `results=${params.results}`,
+    `public=${params.publicVoters ? "true" : "false"}`,
+    "chartType=bar",
+  ];
+  if (params.type === "multiple") {
+    const cleanOpts = params.options.map((o) => o.trim()).filter(Boolean);
+    const minVal = Math.max(1, params.min ?? 1);
+    const maxVal = Math.max(minVal, Math.min(cleanOpts.length || 2, params.max ?? Math.max(2, cleanOpts.length)));
+    attrs.push(`min=${minVal}`, `max=${maxVal}`);
+  } else if (params.type === "number") {
+    const minVal = params.min ?? 1;
+    const maxVal = Math.max(minVal + 1, params.max ?? 10);
+    attrs.push(`min=${minVal}`, `max=${maxVal}`, "step=1");
+  }
+  const openTag = `[poll ${attrs.join(" ")}]`;
+  if (params.type === "number") {
+    return `${openTag}\n[/poll]`;
+  }
+  const lines = params.options
+    .map((o) => o.trim())
+    .filter(Boolean)
+    .map((o) => `* ${o}`);
+  const finalLines = lines.length >= 2 ? lines : ["* 选项一", "* 选项二"];
+  return `${openTag}\n${finalLines.join("\n")}\n[/poll]`;
+}
 
 const MIN_TITLE_LEN = 5;
 const MIN_BODY_LEN = 5;
@@ -166,9 +250,45 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
     }
     return 320;
   });
+  const cloudDraftKey = useMemo(() => {
+    if (request.action === "NEW_TOPIC") return "new_topic";
+    if (request.topicId) return `topic_${request.topicId}`;
+    return null;
+  }, [request]);
+
   const [activePicker, setActivePicker] = useState<
-    "NONE" | "CATEGORY" | "TAG" | "EMOJI" | "MENTION" | "LINK"
+    | "NONE"
+    | "CATEGORY"
+    | "TAG"
+    | "EMOJI"
+    | "MENTION"
+    | "LINK"
+    | "HEADING"
+    | "CODE"
+    | "CALLOUT"
+    | "TABLE"
+    | "POLL"
   >("NONE");
+
+  // Cloud draft conflict state (`P1-4`)
+  const [cloudDraftConflict, setCloudDraftConflict] = useState<CloudDraftItem | null>(null);
+
+  // Server custom emojis & emoji picker state (`P1-6`)
+  const [siteCustomEmojis, setSiteCustomEmojis] = useState<CustomEmojiItem[]>([]);
+  const [emojiSearch, setEmojiSearch] = useState("");
+  const [emojiCategory, setEmojiCategory] = useState<string>("QUICK");
+
+  // Interactive Table & Poll builder states (`P1-5`)
+  const [tableHover, setTableHover] = useState<{ rows: number; cols: number }>({
+    rows: 3,
+    cols: 3,
+  });
+  const [pollType, setPollType] = useState<"regular" | "multiple" | "number">("regular");
+  const [pollResults, setPollResults] = useState<"always" | "on_vote" | "on_close">("always");
+  const [pollPublicVoters, setPollPublicVoters] = useState(true);
+  const [pollOptions, setPollOptions] = useState<string[]>(["选项一", "选项二"]);
+  const [pollNumberMin, setPollNumberMin] = useState(1);
+  const [pollNumberMax, setPollNumberMax] = useState(10);
 
   // Tag picker state
   const [tagQuery, setTagQuery] = useState("");
@@ -182,13 +302,14 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
   const [mentionHits, setMentionHits] = useState<MentionUserCandidate[]>([]);
   const [mentionLoading, setMentionLoading] = useState(false);
 
-  // Insert link / quote community topic state
-  const [linkMode, setLinkMode] = useState<"URL" | "TOPIC">("URL");
+  // Insert link / quote community topic state (default to `引用社区帖子`!)
+  const [linkMode, setLinkMode] = useState<"URL" | "TOPIC">("TOPIC");
   const [linkUrl, setLinkUrl] = useState("");
   const [linkText, setLinkText] = useState("");
   const [linkAttemptedError, setLinkAttemptedError] = useState(false);
   const [topicSearchQuery, setTopicSearchQuery] = useState("");
   const [topicSearchHits, setTopicSearchHits] = useState<CommunitySearchHit[]>([]);
+  const [recentTopicHits, setRecentTopicHits] = useState<CommunitySearchHit[]>([]);
   const [topicSearchLoading, setTopicSearchLoading] = useState(false);
 
   // Lottery 20-point confirmation state
@@ -404,15 +525,34 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
     };
   }, [activePicker, mentionQuery]);
 
-  // Live topic search for link picker
+  // Pre-load recent ~15 community topics & live search (1-char CJK supported!) for link picker
   useEffect(() => {
     if (activePicker !== "LINK" || linkMode !== "TOPIC") return;
     const q = topicSearchQuery.trim();
-    if (q.length < 2) {
+    let cancelled = false;
+    if (!q) {
+      setTopicSearchHits([]);
+      if (recentTopicHits.length === 0) {
+        setTopicSearchLoading(true);
+        fetchRecentTopicsForLinkPicker(15)
+          .then((list) => {
+            if (!cancelled) setRecentTopicHits(list);
+          })
+          .catch(() => {
+            if (!cancelled) setRecentTopicHits([]);
+          })
+          .finally(() => {
+            if (!cancelled) setTopicSearchLoading(false);
+          });
+      }
+      return () => {
+        cancelled = true;
+      };
+    }
+    if (!isValidSearchQuery(q)) {
       setTopicSearchHits([]);
       return;
     }
-    let cancelled = false;
     const timer = setTimeout(() => {
       setTopicSearchLoading(true);
       searchTopicsForLinkPicker(q)
@@ -425,14 +565,75 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
         .finally(() => {
           if (!cancelled) setTopicSearchLoading(false);
         });
-    }, 260);
+    }, 240);
     return () => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [activePicker, linkMode, topicSearchQuery]);
+  }, [activePicker, linkMode, topicSearchQuery, recentTopicHits.length]);
 
-  // Persist local draft quietly on edit
+  // Sync server custom emojis (`/emojis.json`) once per composer session (`P1-6`)
+  useEffect(() => {
+    let alive = true;
+    fetchSiteCustomEmojis()
+      .then((list) => {
+        if (alive) setSiteCustomEmojis(list);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Fetch remote cloud draft on open and detect conflicts vs local draft (`P1-4`)
+  useEffect(() => {
+    if (!cloudDraftKey) return;
+    let alive = true;
+    fetchSingleCloudDraft(cloudDraftKey)
+      .then((remote) => {
+        if (!alive || !remote) return;
+        // Never collide cross-action drafts (e.g. a REPLY draft on topic T when opening EDIT on a post in T)
+        if (remote.action !== request.action) return;
+        if (
+          request.action === "EDIT" &&
+          (!remote.postId || !request.postId || remote.postId !== request.postId)
+        ) {
+          return;
+        }
+        cloudDraftSeqRef.current = Math.max(cloudDraftSeqRef.current, remote.sequence);
+        const curRaw = rawRef.current.trim();
+        const curTitle = (savedDraft?.title ?? request.initialTitle ?? "").trim();
+        const remoteRaw = remote.raw.trim();
+        const remoteTitle = remote.title.trim();
+        if (!remoteRaw && !remoteTitle) return;
+
+        if (!curRaw && !curTitle && request.action !== "EDIT") {
+          // Local is empty -> silently hydrate cloud draft & preserve real sequence
+          if (remote.title && isNewTopic) setTitle(remote.title);
+          if (remote.raw) {
+            rawRef.current = remote.raw;
+            setRaw(remote.raw);
+          }
+          if (remote.categoryId && isNewTopic) setCategoryId(remote.categoryId);
+          if (remote.tags.length > 0 && isNewTopic) setTags(remote.tags);
+          return;
+        }
+
+        const differs =
+          remoteRaw !== curRaw || (isNewTopic && Boolean(remoteTitle) && remoteTitle !== curTitle);
+        if (differs) {
+          setCloudDraftConflict(remote);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+    // Run once on composer launch for this draft key
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cloudDraftKey]);
+
+  // Persist local draft quietly on edit (preserving real server sequence!)
   useEffect(() => {
     if (request.action === "EDIT") return;
     if (!title.trim() && !raw.trim() && tags.length === 0) return;
@@ -447,7 +648,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
         title,
         raw,
         tags,
-        sequence: 0,
+        sequence: cloudDraftSeqRef.current,
         updatedAt: Date.now(),
       })
         .then(() => setDraftSavedAt(Date.now()))
@@ -460,13 +661,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
   useEffect(() => {
     if (request.action === "EDIT") return;
     if (!title.trim() && !raw.trim()) return;
-    const cloudKey =
-      request.action === "NEW_TOPIC"
-        ? "new_topic"
-        : request.topicId
-          ? `topic_${request.topicId}`
-          : null;
-    if (!cloudKey) return;
+    if (!cloudDraftKey) return;
     const timer = setTimeout(() => {
       const payload =
         request.action === "NEW_TOPIC"
@@ -489,20 +684,33 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               typingTime: firstTypedAtRef.current ? Date.now() - firstTypedAtRef.current : 0,
             };
       saveCloudDraft({
-        draftKey: cloudKey,
+        draftKey: cloudDraftKey,
         sequence: cloudDraftSeqRef.current,
         data: payload,
       })
         .then((nextSeq) => {
           cloudDraftSeqRef.current = nextSeq;
           setCloudSyncedAt(Date.now());
+          saveLocalDraftInRust({
+            key: draftKey,
+            action: request.action,
+            topicId: request.topicId ?? null,
+            postId: request.postId ?? null,
+            replyToPostNumber: request.replyToPostNumber ?? null,
+            categoryId,
+            title,
+            raw,
+            tags,
+            sequence: nextSeq,
+            updatedAt: Date.now(),
+          }).catch(() => {});
         })
         .catch(() => {
           // silent fallback: local Rust draft is always authoritative
         });
     }, 2800);
     return () => clearTimeout(timer);
-  }, [request, categoryId, title, raw, tags]);
+  }, [cloudDraftKey, draftKey, request, categoryId, title, raw, tags]);
 
   // Live inline `@` mention fetch when user types `@term` directly in the editor
   useEffect(() => {
@@ -1586,12 +1794,11 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
             <button
               type="button"
               onClick={() => setActivePicker((p) => (p === "TAG" ? "NONE" : "TAG"))}
-              className="lindo-interactive flex items-center gap-1 rounded-md px-2.5 py-1 text-[13px]"
+              className="lindo-interactive flex items-center gap-1 rounded-md px-2.5 py-1 text-[13px] font-medium"
               style={{
                 backgroundColor: showTagError ? "var(--error-bg)" : "transparent",
                 border: showTagError ? "0.5px solid var(--error-border)" : "0.5px solid transparent",
                 color: showTagError ? "var(--error-fg)" : "var(--ink-secondary)",
-                fontWeight: showTagError ? 600 : 500,
               }}
             >
               <LinDoIcons.Plus size={13} />
@@ -1649,9 +1856,8 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                       className="relative flex shrink-0 flex-col items-center px-1.5 py-0.5 cursor-pointer"
                     >
                       <span
-                        className="flex items-center gap-1 text-[12.5px]"
+                        className="flex items-center gap-1 text-[12.5px] font-medium"
                         style={{
-                          fontWeight: categoryId === focusedParent.id ? 700 : 500,
                           color:
                             categoryId === focusedParent.id
                               ? "var(--active-chip-text)"
@@ -1686,9 +1892,8 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                           className="relative flex shrink-0 flex-col items-center px-1.5 py-0.5 cursor-pointer"
                         >
                           <span
-                            className="flex items-center gap-1 text-[12.5px]"
+                            className="flex items-center gap-1 text-[12.5px] font-medium"
                             style={{
-                              fontWeight: subSelected ? 700 : 500,
                               color: subSelected ? "var(--active-chip-text)" : "var(--ink-primary)",
                             }}
                           >
@@ -1780,9 +1985,8 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                                   />
                                 )}
                                 <span
-                                  className="truncate text-[13.5px]"
+                                  className="truncate text-[13.5px] font-medium"
                                   style={{
-                                    fontWeight: selected ? 700 : 500,
                                     color: selected ? "var(--active-chip-text)" : "var(--ink-primary)",
                                   }}
                                 >
@@ -1997,9 +2201,8 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                                         }}
                                       />
                                       <span
-                                        className="truncate text-[13px]"
+                                        className="truncate text-[13px] font-medium"
                                         style={{
-                                          fontWeight: checked ? 700 : 500,
                                           color: checked
                                             ? "var(--brand-gold)"
                                             : "var(--ink-primary)",
@@ -2134,8 +2337,15 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
             </button>
             <button
               type="button"
-              title={isNonMac ? "插入链接或引用帖子 (Ctrl+K)" : "插入链接或引用帖子 (⌘+K)"}
-              onClick={() => setActivePicker((p) => (p === "LINK" ? "NONE" : "LINK"))}
+              title={isNonMac ? "引用社区帖子或插入链接 (Ctrl+K)" : "引用社区帖子或插入链接 (⌘+K)"}
+              onClick={() => {
+                if (activePicker === "LINK") {
+                  setActivePicker("NONE");
+                } else {
+                  setLinkMode("TOPIC");
+                  setActivePicker("LINK");
+                }
+              }}
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
               style={{ color: activePicker === "LINK" ? "var(--brand-gold)" : "var(--ink-secondary)" }}
             >
@@ -2170,32 +2380,23 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
             </button>
             <button
               type="button"
-              title="二级标题"
-              onClick={() => prefixSelectedLines("## ", "小节标题")}
+              title="标题级别 (H1–H4)"
+              onClick={() => setActivePicker((p) => (p === "HEADING" ? "NONE" : "HEADING"))}
               className="lindo-interactive flex h-9 shrink-0 items-center justify-center rounded-lg px-2 text-[12px] font-semibold"
-              style={{ color: "var(--ink-secondary)" }}
+              style={{
+                color: activePicker === "HEADING" ? "var(--brand-gold)" : "var(--ink-secondary)",
+              }}
             >
-              H2
+              H1–4
             </button>
             <button
               type="button"
-              title={isNonMac ? "代码 / 代码块 (Ctrl+E)" : "代码 / 代码块 (⌘+E)"}
-              onClick={() => {
-                const el = bodyTextareaRef.current;
-                const sel =
-                  el && el.selectionEnd > el.selectionStart
-                    ? rawRef.current.slice(el.selectionStart, el.selectionEnd)
-                    : "";
-                if (sel && !sel.includes("\n")) {
-                  insertAroundSelection("`", "`");
-                } else if (sel) {
-                  insertBlockSnippet(`\`\`\`\n${sel}\n\`\`\``);
-                } else {
-                  insertBlockSnippet("```\n代码内容\n```", "代码内容");
-                }
-              }}
+              title={isNonMac ? "代码 / 16 语言代码块 (Ctrl+E)" : "代码 / 16 语言代码块 (⌘+E)"}
+              onClick={() => setActivePicker((p) => (p === "CODE" ? "NONE" : "CODE"))}
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
-              style={{ color: "var(--ink-secondary)" }}
+              style={{
+                color: activePicker === "CODE" ? "var(--brand-gold)" : "var(--ink-secondary)",
+              }}
             >
               <LinDoIcons.Code size={17.5} />
             </button>
@@ -2237,40 +2438,34 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
             </button>
             <button
               type="button"
-              title="插入提示卡片 (Obsidian Callout)"
-              onClick={() =>
-                insertBlockSnippet("> [!Note]+ 提示标题\n> 在此输入提示内容", "提示标题")
-              }
+              title="插入提示卡片 (5 种 Callout)"
+              onClick={() => setActivePicker((p) => (p === "CALLOUT" ? "NONE" : "CALLOUT"))}
               className="lindo-interactive flex h-9 shrink-0 items-center justify-center rounded-lg px-2 text-[12px] font-medium"
-              style={{ color: "var(--ink-secondary)" }}
+              style={{
+                color: activePicker === "CALLOUT" ? "var(--brand-gold)" : "var(--ink-secondary)",
+              }}
             >
               提示框
             </button>
             <button
               type="button"
-              title="插入表格"
-              onClick={() =>
-                insertBlockSnippet(
-                  "| 列一 | 列二 |\n| --- | --- |\n| 内容 | 内容 |",
-                  "列一"
-                )
-              }
+              title="可视化插入表格 (行 × 列)"
+              onClick={() => setActivePicker((p) => (p === "TABLE" ? "NONE" : "TABLE"))}
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
-              style={{ color: "var(--ink-secondary)" }}
+              style={{
+                color: activePicker === "TABLE" ? "var(--brand-gold)" : "var(--ink-secondary)",
+              }}
             >
               <LinDoIcons.Table size={17.5} />
             </button>
             <button
               type="button"
-              title="插入投票"
-              onClick={() =>
-                insertBlockSnippet(
-                  "[poll type=regular results=always public=true chartType=bar]\n* 选项一\n* 选项二\n[/poll]",
-                  "选项一"
-                )
-              }
+              title="可视化投票构造器"
+              onClick={() => setActivePicker((p) => (p === "POLL" ? "NONE" : "POLL"))}
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
-              style={{ color: "var(--ink-secondary)" }}
+              style={{
+                color: activePicker === "POLL" ? "var(--brand-gold)" : "var(--ink-secondary)",
+              }}
             >
               <LinDoIcons.BarChartPoll size={17.5} />
             </button>
@@ -2324,47 +2519,576 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
         </div>
       )}
 
-      {/* 表情与社区热梗快捷面板 */}
-      {activePicker === "EMOJI" && (
+      {/* 表情与社区热梗快捷面板（含搜索、分组与 `/emojis.json` 站点自定义表情） */}
+      {activePicker === "EMOJI" && (() => {
+        const customGroups = Array.from(
+          new Set(siteCustomEmojis.map((e) => e.group).filter(Boolean))
+        );
+        const eq = emojiSearch.trim().toLowerCase();
+        const filteredShortcodes = eq
+          ? SITE_SHORTCODE_EMOJIS.filter(
+              (sc) => sc.code.toLowerCase().includes(eq) || sc.label.toLowerCase().includes(eq)
+            )
+          : SITE_SHORTCODE_EMOJIS;
+        const filteredCustom = siteCustomEmojis.filter((e) => {
+          if (eq) return e.name.toLowerCase().includes(eq) || e.group.toLowerCase().includes(eq);
+          if (emojiCategory === "CUSTOM_ALL") return true;
+          return e.group === emojiCategory;
+        });
+
+        return (
+          <div
+            className="lindo-hairline-b shrink-0 space-y-2 px-5 py-2.5"
+            style={{ backgroundColor: "var(--subtle-surface)" }}
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              <div
+                className="flex h-7 w-48 items-center gap-1.5 rounded-lg px-2"
+                style={{
+                  backgroundColor: "var(--card-surface)",
+                  border: "0.5px solid var(--hairline)",
+                }}
+              >
+                <LinDoIcons.Search size={12.5} style={{ color: "var(--ink-tertiary)" }} />
+                <input
+                  type="text"
+                  value={emojiSearch}
+                  onChange={(e) => setEmojiSearch(e.target.value)}
+                  placeholder="搜索表情短代码..."
+                  className="min-w-0 flex-1 bg-transparent text-[12px] outline-none"
+                  style={{ color: "var(--ink-primary)" }}
+                />
+              </div>
+              <div className="no-scrollbar flex flex-1 items-center gap-1 overflow-x-auto text-[11.5px]">
+                {[
+                  { key: "QUICK", label: "常用" },
+                  { key: "SITE", label: "热梗" },
+                  ...(siteCustomEmojis.length > 0
+                    ? [
+                        { key: "CUSTOM_ALL", label: `站内自定义 (${siteCustomEmojis.length})` },
+                        ...customGroups.slice(0, 6).map((g) => ({ key: g, label: g })),
+                      ]
+                    : []),
+                ].map((tab) => {
+                  const active = !eq && emojiCategory === tab.key;
+                  return (
+                    <button
+                      key={tab.key}
+                      type="button"
+                      onClick={() => {
+                        setEmojiSearch("");
+                        setEmojiCategory(tab.key);
+                      }}
+                      className="shrink-0 rounded-full px-2.5 py-0.5 font-medium cursor-pointer"
+                      style={{
+                        backgroundColor: active ? "var(--active-chip-bg)" : "var(--card-surface)",
+                        color: active ? "var(--active-chip-text)" : "var(--ink-secondary)",
+                      }}
+                    >
+                      {tab.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {eq ? (
+              <div className="max-h-[140px] space-y-2 overflow-y-auto lindo-scroll">
+                {filteredCustom.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {filteredCustom.slice(0, 40).map((em) => (
+                      <button
+                        key={em.name}
+                        type="button"
+                        title={`:${em.name}:`}
+                        onClick={() => {
+                          insertAroundSelection(` :${em.name}: `);
+                          setActivePicker("NONE");
+                        }}
+                        className="lindo-interactive inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[11.5px]"
+                        style={{
+                          backgroundColor: "var(--card-surface)",
+                          border: "0.5px solid var(--hairline)",
+                          color: "var(--ink-secondary)",
+                        }}
+                      >
+                        <img
+                          src={em.url}
+                          alt={`:${em.name}:`}
+                          className="h-4 w-4 object-contain"
+                        />
+                        <span>:{em.name}:</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {filteredShortcodes.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {filteredShortcodes.map((sc) => (
+                      <button
+                        key={sc.code}
+                        type="button"
+                        onClick={() => {
+                          insertAroundSelection(` ${sc.code} `);
+                          setActivePicker("NONE");
+                        }}
+                        className="lindo-interactive rounded-md px-2 py-1 text-[11.8px]"
+                        style={{
+                          backgroundColor: "var(--card-surface)",
+                          color: "var(--ink-secondary)",
+                          border: "0.5px solid var(--hairline)",
+                        }}
+                      >
+                        {sc.label} <span style={{ color: "var(--ink-tertiary)" }}>{sc.code}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {filteredCustom.length === 0 && filteredShortcodes.length === 0 && (
+                  <div className="py-2 text-[12px]" style={{ color: "var(--ink-tertiary)" }}>
+                    未找到匹配的表情
+                  </div>
+                )}
+              </div>
+            ) : emojiCategory === "QUICK" ? (
+              <div className="flex flex-wrap gap-1">
+                {QUICK_EMOJIS.map((em, idx) => (
+                  <button
+                    key={`${em}_${idx}`}
+                    type="button"
+                    onClick={() => {
+                      insertAroundSelection(em);
+                      setActivePicker("NONE");
+                    }}
+                    className="lindo-interactive rounded-lg p-1.5 text-[18px] cursor-pointer"
+                  >
+                    {em}
+                  </button>
+                ))}
+              </div>
+            ) : emojiCategory === "SITE" ? (
+              <div className="flex flex-wrap items-center gap-1.5">
+                {SITE_SHORTCODE_EMOJIS.map((sc) => (
+                  <button
+                    key={sc.code}
+                    type="button"
+                    onClick={() => {
+                      insertAroundSelection(` ${sc.code} `);
+                      setActivePicker("NONE");
+                    }}
+                    className="lindo-interactive rounded-md px-2 py-1 text-[11.8px]"
+                    style={{
+                      backgroundColor: "var(--card-surface)",
+                      color: "var(--ink-secondary)",
+                      border: "0.5px solid var(--hairline)",
+                    }}
+                  >
+                    {sc.label} <span style={{ color: "var(--ink-tertiary)" }}>{sc.code}</span>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="max-h-[140px] flex flex-wrap items-center gap-1.5 overflow-y-auto lindo-scroll">
+                {filteredCustom.slice(0, 60).map((em) => (
+                  <button
+                    key={em.name}
+                    type="button"
+                    title={`:${em.name}:`}
+                    onClick={() => {
+                      insertAroundSelection(` :${em.name}: `);
+                      setActivePicker("NONE");
+                    }}
+                    className="lindo-interactive inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[11.5px]"
+                    style={{
+                      backgroundColor: "var(--card-surface)",
+                      border: "0.5px solid var(--hairline)",
+                      color: "var(--ink-secondary)",
+                    }}
+                  >
+                    <img
+                      src={em.url}
+                      alt={`:${em.name}:`}
+                      className="h-4 w-4 object-contain"
+                    />
+                    <span>:{em.name}:</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* H1–H4 标题选择器 (`P1-5`) */}
+      {activePicker === "HEADING" && (
+        <div
+          className="lindo-hairline-b flex shrink-0 items-center gap-2 px-5 py-2"
+          style={{ backgroundColor: "var(--subtle-surface)" }}
+        >
+          <span className="text-[12px] font-medium" style={{ color: "var(--ink-tertiary)" }}>
+            插入标题
+          </span>
+          {[
+            { level: 1, prefix: "# ", label: "H1 一级标题" },
+            { level: 2, prefix: "## ", label: "H2 二级标题" },
+            { level: 3, prefix: "### ", label: "H3 三级标题" },
+            { level: 4, prefix: "#### ", label: "H4 四级标题" },
+          ].map((h) => (
+            <button
+              key={h.level}
+              type="button"
+              onClick={() => {
+                prefixSelectedLines(h.prefix, "小节标题");
+                setActivePicker("NONE");
+              }}
+              className="lindo-interactive rounded-lg px-2.5 py-1 text-[12px] font-semibold"
+              style={{
+                backgroundColor: "var(--card-surface)",
+                border: "0.5px solid var(--hairline)",
+                color: "var(--ink-primary)",
+              }}
+            >
+              {h.label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* 16 语言代码块选择器 (`P1-5`) */}
+      {activePicker === "CODE" && (
         <div
           className="lindo-hairline-b shrink-0 space-y-2 px-5 py-2.5"
           style={{ backgroundColor: "var(--subtle-surface)" }}
         >
-          <div className="flex flex-wrap gap-1">
-            {QUICK_EMOJIS.map((em, idx) => (
+          <div className="flex items-center justify-between gap-2 text-[12px]">
+            <span className="font-semibold" style={{ color: "var(--ink-primary)" }}>
+              插入代码 / 选择代码块语言
+            </span>
+            <div className="flex items-center gap-1.5">
               <button
-                key={`${em}_${idx}`}
                 type="button"
                 onClick={() => {
-                  insertAroundSelection(em);
+                  insertAroundSelection("`", "`", "行内代码");
                   setActivePicker("NONE");
                 }}
-                className="rounded-lg p-1.5 text-[18px] hover:scale-125 transition-transform cursor-pointer"
+                className="lindo-interactive rounded-md px-2.5 py-0.5 text-[11.8px]"
+                style={{
+                  backgroundColor: "var(--card-surface)",
+                  border: "0.5px solid var(--hairline)",
+                  color: "var(--ink-secondary)",
+                }}
               >
-                {em}
+                行内代码
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  insertBlockSnippet("```\n代码内容\n```", "代码内容");
+                  setActivePicker("NONE");
+                }}
+                className="lindo-interactive rounded-md px-2.5 py-0.5 text-[11.8px]"
+                style={{
+                  backgroundColor: "var(--card-surface)",
+                  border: "0.5px solid var(--hairline)",
+                  color: "var(--ink-secondary)",
+                }}
+              >
+                纯文本块
+              </button>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {COMPOSER_CODE_LANGUAGES.map((lang) => (
+              <button
+                key={lang}
+                type="button"
+                onClick={() => {
+                  const el = bodyTextareaRef.current;
+                  const sel =
+                    el && el.selectionEnd > el.selectionStart
+                      ? rawRef.current.slice(el.selectionStart, el.selectionEnd)
+                      : "";
+                  if (sel) {
+                    insertBlockSnippet(`\`\`\`${lang}\n${sel}\n\`\`\``);
+                  } else {
+                    insertBlockSnippet(`\`\`\`${lang}\n代码内容\n\`\`\``, "代码内容");
+                  }
+                  setActivePicker("NONE");
+                }}
+                className="lindo-interactive rounded-md px-2.5 py-1 font-mono text-[11.8px]"
+                style={{
+                  backgroundColor: "var(--card-surface)",
+                  border: "0.5px solid var(--hairline)",
+                  color: "var(--ink-primary)",
+                }}
+              >
+                {lang}
               </button>
             ))}
           </div>
-          <div className="lindo-divider" />
-          <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-            {SITE_SHORTCODE_EMOJIS.map((sc) => (
-              <button
-                key={sc.code}
-                type="button"
-                onClick={() => {
-                  insertAroundSelection(` ${sc.code} `);
-                  setActivePicker("NONE");
-                }}
-                className="lindo-interactive rounded-md px-2 py-1 text-[11.8px]"
-                style={{
-                  backgroundColor: "var(--card-surface)",
-                  color: "var(--ink-secondary)",
-                  border: "0.5px solid var(--hairline)",
-                }}
+        </div>
+      )}
+
+      {/* 5 种 Callout 提示框选择器 (`P1-5`) */}
+      {activePicker === "CALLOUT" && (
+        <div
+          className="lindo-hairline-b flex shrink-0 flex-wrap items-center gap-2 px-5 py-2.5"
+          style={{ backgroundColor: "var(--subtle-surface)" }}
+        >
+          <span className="text-[12px] font-medium" style={{ color: "var(--ink-tertiary)" }}>
+            选择提示框类型
+          </span>
+          {COMPOSER_CALLOUT_KINDS.map((c) => (
+            <button
+              key={c.kind}
+              type="button"
+              onClick={() => {
+                insertBlockSnippet(`> [!${c.kind}]+ ${c.label}\n> 在此输入提示内容`, "在此输入提示内容");
+                setActivePicker("NONE");
+              }}
+              className="lindo-interactive inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[12px] font-medium"
+              style={{
+                backgroundColor: "var(--card-surface)",
+                border: "0.5px solid var(--hairline)",
+                color: "var(--ink-primary)",
+              }}
+            >
+              <span className="h-2 w-2 rounded-full" style={{ backgroundColor: c.color }} />
+              <span>
+                {c.label} ({c.kind})
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* 交互式表格 行 × 列 选择器 (2–8 行 × 2–6 列, `P1-5`) */}
+      {activePicker === "TABLE" && (
+        <div
+          className="lindo-hairline-b shrink-0 space-y-2 px-5 py-2.5"
+          style={{ backgroundColor: "var(--subtle-surface)" }}
+        >
+          <div className="flex items-center justify-between text-[12px]">
+            <span className="font-semibold" style={{ color: "var(--ink-primary)" }}>
+              插入 Markdown 表格：{tableHover.rows} 行 × {tableHover.cols} 列
+            </span>
+            <span style={{ color: "var(--ink-tertiary)" }}>悬停预览尺寸，点击插入</span>
+          </div>
+          <div className="inline-flex flex-col gap-1">
+            {Array.from({ length: 7 }, (_, rIdx) => {
+              const rows = rIdx + 2;
+              return (
+                <div key={rows} className="flex items-center gap-1">
+                  {Array.from({ length: 5 }, (_, cIdx) => {
+                    const cols = cIdx + 2;
+                    const active = rows <= tableHover.rows && cols <= tableHover.cols;
+                    return (
+                      <button
+                        key={`${rows}x${cols}`}
+                        type="button"
+                        aria-label={`插入 ${rows} 行 ${cols} 列表格`}
+                        onMouseEnter={() => setTableHover({ rows, cols })}
+                        onFocus={() => setTableHover({ rows, cols })}
+                        onClick={() => {
+                          insertBlockSnippet(buildMarkdownTableSnippet(rows, cols), "列 1");
+                          setActivePicker("NONE");
+                        }}
+                        className="h-5 w-7 rounded cursor-pointer transition-colors"
+                        style={{
+                          backgroundColor: active
+                            ? "var(--active-chip-bg)"
+                            : "var(--card-surface)",
+                          border: active
+                            ? "0.5px solid var(--brand-gold)"
+                            : "0.5px solid var(--hairline)",
+                        }}
+                      />
+                    );
+                  })}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* 交互式投票构造器 (`P1-5`) */}
+      {activePicker === "POLL" && (
+        <div
+          className="lindo-hairline-b shrink-0 space-y-2.5 px-5 py-3"
+          style={{ backgroundColor: "var(--subtle-surface)" }}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-[13px] font-bold" style={{ color: "var(--ink-primary)" }}>
+              构造社区投票
+            </span>
+            <div className="flex flex-wrap items-center gap-1.5 text-[11.5px]">
+              {(
+                [
+                  { key: "regular", label: "单选" },
+                  { key: "multiple", label: "多选" },
+                  { key: "number", label: "数字评分" },
+                ] as const
+              ).map((t) => (
+                <button
+                  key={t.key}
+                  type="button"
+                  onClick={() => setPollType(t.key)}
+                  className="rounded-full px-2.5 py-0.5 font-medium cursor-pointer"
+                  style={{
+                    backgroundColor:
+                      pollType === t.key ? "var(--active-chip-bg)" : "var(--card-surface)",
+                    color: pollType === t.key ? "var(--active-chip-text)" : "var(--ink-secondary)",
+                  }}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {pollType === "number" ? (
+            <div className="flex flex-wrap items-center gap-3 text-[12px]">
+              <label className="flex items-center gap-1.5" style={{ color: "var(--ink-secondary)" }}>
+                <span>最小值</span>
+                <input
+                  type="number"
+                  value={pollNumberMin}
+                  onChange={(e) => setPollNumberMin(Number(e.target.value) || 1)}
+                  className="h-7 w-16 rounded-md px-2 text-[12px] outline-none"
+                  style={{
+                    backgroundColor: "var(--card-surface)",
+                    border: "0.5px solid var(--hairline)",
+                    color: "var(--ink-primary)",
+                  }}
+                />
+              </label>
+              <label className="flex items-center gap-1.5" style={{ color: "var(--ink-secondary)" }}>
+                <span>最大值</span>
+                <input
+                  type="number"
+                  value={pollNumberMax}
+                  onChange={(e) => setPollNumberMax(Number(e.target.value) || 10)}
+                  className="h-7 w-16 rounded-md px-2 text-[12px] outline-none"
+                  style={{
+                    backgroundColor: "var(--card-surface)",
+                    border: "0.5px solid var(--hairline)",
+                    color: "var(--ink-primary)",
+                  }}
+                />
+              </label>
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              {pollOptions.map((opt, idx) => (
+                <div key={idx} className="flex items-center gap-1.5">
+                  <input
+                    type="text"
+                    value={opt}
+                    onChange={(e) =>
+                      setPollOptions((prev) =>
+                        prev.map((item, i) => (i === idx ? e.target.value : item))
+                      )
+                    }
+                    placeholder={`选项 ${idx + 1}`}
+                    className="h-7 flex-1 rounded-md px-2.5 text-[12.5px] outline-none"
+                    style={{
+                      backgroundColor: "var(--card-surface)",
+                      border: "0.5px solid var(--hairline)",
+                      color: "var(--ink-primary)",
+                    }}
+                  />
+                  {pollOptions.length > 2 && (
+                    <button
+                      type="button"
+                      aria-label={`删除选项 ${idx + 1}`}
+                      onClick={() =>
+                        setPollOptions((prev) => prev.filter((_, i) => i !== idx))
+                      }
+                      className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-md"
+                      style={{ color: "var(--ink-tertiary)" }}
+                    >
+                      <LinDoIcons.Close size={13} />
+                    </button>
+                  )}
+                </div>
+              ))}
+              {pollOptions.length < 10 && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setPollOptions((prev) => [...prev, `选项 ${prev.length + 1}`])
+                  }
+                  className="lindo-interactive inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11.8px] font-medium"
+                  style={{ color: "var(--active-chip-text)" }}
+                >
+                  <LinDoIcons.Plus size={12} />
+                  <span>添加选项</span>
+                </button>
+              )}
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-1 text-[11.8px]">
+            <div className="flex flex-wrap items-center gap-2">
+              <span style={{ color: "var(--ink-tertiary)" }}>结果可见：</span>
+              {(
+                [
+                  { key: "always", label: "始终可见" },
+                  { key: "on_vote", label: "投票后" },
+                  { key: "on_close", label: "结束后" },
+                ] as const
+              ).map((r) => (
+                <button
+                  key={r.key}
+                  type="button"
+                  onClick={() => setPollResults(r.key)}
+                  className="rounded-md px-2 py-0.5 cursor-pointer"
+                  style={{
+                    backgroundColor:
+                      pollResults === r.key ? "var(--active-chip-bg)" : "var(--card-surface)",
+                    color:
+                      pollResults === r.key ? "var(--active-chip-text)" : "var(--ink-secondary)",
+                  }}
+                >
+                  {r.label}
+                </button>
+              ))}
+              <label
+                className="ml-1 inline-flex items-center gap-1 cursor-pointer select-none"
+                style={{ color: "var(--ink-secondary)" }}
               >
-                {sc.label} <span style={{ color: "var(--ink-tertiary)" }}>{sc.code}</span>
-              </button>
-            ))}
+                <input
+                  type="checkbox"
+                  checked={pollPublicVoters}
+                  onChange={(e) => setPollPublicVoters(e.target.checked)}
+                  className="accent-amber-400 cursor-pointer"
+                />
+                <span>公开投票人</span>
+              </label>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                const snippet = buildDiscoursePollSnippet({
+                  type: pollType,
+                  results: pollResults,
+                  publicVoters: pollPublicVoters,
+                  options: pollOptions,
+                  min: pollNumberMin,
+                  max: pollNumberMax,
+                });
+                insertBlockSnippet(snippet);
+                setActivePicker("NONE");
+              }}
+              className="rounded-full px-3.5 py-1 text-[12px] font-semibold cursor-pointer"
+              style={{
+                backgroundColor: "var(--publish-btn-bg)",
+                color: "var(--publish-btn-fg)",
+              }}
+            >
+              插入投票
+            </button>
           </div>
         </div>
       )}
@@ -2437,20 +3161,22 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
         </div>
       )}
 
-      {/* 插入外部链接 / 搜索并引用社区帖子双模式面板 */}
+      {/* 引用社区帖子 / 插入外部链接双模式面板（默认选中「引用社区帖子」） */}
       {activePicker === "LINK" && (
         <div
           className="lindo-hairline-b shrink-0 space-y-2.5 px-5 py-2.5"
           style={{ backgroundColor: "var(--subtle-surface)" }}
         >
-          <div className="flex items-center gap-2 text-[12px]">
+          <div role="tablist" aria-label="链接模式" className="flex items-center gap-2 text-[12px]">
             {[
-              { key: "URL", label: "外部链接" },
               { key: "TOPIC", label: "引用社区帖子" },
+              { key: "URL", label: "外部链接" },
             ].map((m) => (
               <button
                 key={m.key}
                 type="button"
+                role="tab"
+                aria-selected={linkMode === m.key}
                 onClick={() => setLinkMode(m.key as any)}
                 className="rounded-full px-3 py-0.5 font-medium cursor-pointer"
                 style={{
@@ -2465,10 +3191,96 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
             ))}
           </div>
 
-          {linkMode === "URL" ? (
+          {linkMode === "TOPIC" ? (
+            (() => {
+              const q = topicSearchQuery.trim();
+              const displayedTopics = q ? topicSearchHits : recentTopicHits;
+              return (
+                <div className="space-y-2">
+                  <div
+                    className="flex h-[34px] max-w-md items-center gap-2 rounded-lg px-2.5"
+                    style={{
+                      backgroundColor: "var(--card-surface)",
+                      border: "0.5px solid var(--hairline)",
+                    }}
+                  >
+                    <LinDoIcons.Search size={14} style={{ color: "var(--ink-tertiary)" }} />
+                    <input
+                      type="text"
+                      autoFocus
+                      value={topicSearchQuery}
+                      onChange={(e) => setTopicSearchQuery(e.target.value)}
+                      placeholder="搜索要引用的社区帖子（支持单字中文）..."
+                      className="flex-1 bg-transparent text-[12.5px] outline-none"
+                      style={{ color: "var(--ink-primary)" }}
+                    />
+                    {topicSearchQuery && (
+                      <button
+                        type="button"
+                        onClick={() => setTopicSearchQuery("")}
+                        className="rounded-full p-0.5 opacity-70 hover:opacity-100 cursor-pointer"
+                      >
+                        <LinDoIcons.Close size={12} style={{ color: "var(--ink-tertiary)" }} />
+                      </button>
+                    )}
+                  </div>
+                  {topicSearchLoading ? (
+                    <div className="text-[12px]" style={{ color: "var(--ink-tertiary)" }}>
+                      {q ? "正在检索话题..." : "正在加载近期社区话题..."}
+                    </div>
+                  ) : displayedTopics.length > 0 ? (
+                    <div
+                      className="max-h-[168px] rounded-lg overflow-hidden lindo-scroll divide-y"
+                      style={{
+                        backgroundColor: "var(--card-surface)",
+                        border: "0.5px solid var(--hairline)",
+                      }}
+                    >
+                      {!q && (
+                        <div
+                          className="px-3 py-1 text-[11px] font-medium"
+                          style={{ color: "var(--ink-tertiary)" }}
+                        >
+                          近期社区话题
+                        </div>
+                      )}
+                      {displayedTopics.map((hit) => (
+                        <button
+                          key={hit.id}
+                          type="button"
+                          onClick={() => {
+                            const targetUrl =
+                              hit.postNumber > 1
+                                ? `https://linux.do/t/topic/${hit.topicId}/${hit.postNumber}`
+                                : `https://linux.do/t/topic/${hit.topicId}`;
+                            insertAroundSelection(`[${hit.title}](${targetUrl}) `);
+                            setTopicSearchQuery("");
+                            setActivePicker("NONE");
+                          }}
+                          className="lindo-interactive flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-[12.5px]"
+                        >
+                          <span className="truncate font-medium" style={{ color: "var(--ink-primary)" }}>
+                            {hit.title}
+                          </span>
+                          <span className="shrink-0 text-[11px]" style={{ color: "var(--ink-tertiary)" }}>
+                            @{hit.username}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : q && isValidSearchQuery(q) ? (
+                    <div className="text-[12px]" style={{ color: "var(--ink-tertiary)" }}>
+                      未找到匹配的社区帖子
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })()
+          ) : (
             <div className="flex flex-wrap items-center gap-2.5">
               <input
                 type="text"
+                autoFocus
                 value={linkUrl}
                 onChange={(e) => {
                   setLinkUrl(e.target.value);
@@ -2526,66 +3338,6 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                 <span className="text-[12px]" style={{ color: "var(--error-fg)" }}>
                   请输入有效链接地址
                 </span>
-              )}
-            </div>
-          ) : (
-            <div className="space-y-2">
-              <div
-                className="flex h-[34px] max-w-md items-center gap-2 rounded-lg px-2.5"
-                style={{
-                  backgroundColor: "var(--card-surface)",
-                  border: "0.5px solid var(--hairline)",
-                }}
-              >
-                <LinDoIcons.Search size={14} style={{ color: "var(--ink-tertiary)" }} />
-                <input
-                  type="text"
-                  autoFocus
-                  value={topicSearchQuery}
-                  onChange={(e) => setTopicSearchQuery(e.target.value)}
-                  placeholder="输入关键词搜索要引用的社区话题..."
-                  className="flex-1 bg-transparent text-[12.5px] outline-none"
-                  style={{ color: "var(--ink-primary)" }}
-                />
-              </div>
-              {topicSearchLoading ? (
-                <div className="text-[12px]" style={{ color: "var(--ink-tertiary)" }}>
-                  正在检索话题...
-                </div>
-              ) : (
-                topicSearchHits.length > 0 && (
-                  <div
-                    className="max-h-[150px] rounded-lg overflow-hidden lindo-scroll divide-y"
-                    style={{
-                      backgroundColor: "var(--card-surface)",
-                      border: "0.5px solid var(--hairline)",
-                    }}
-                  >
-                    {topicSearchHits.map((hit) => (
-                      <button
-                        key={hit.id}
-                        type="button"
-                        onClick={() => {
-                          const targetUrl =
-                            hit.postNumber > 1
-                              ? `https://linux.do/t/topic/${hit.topicId}/${hit.postNumber}`
-                              : `https://linux.do/t/topic/${hit.topicId}`;
-                          insertAroundSelection(`[${hit.title}](${targetUrl}) `);
-                          setTopicSearchQuery("");
-                          setActivePicker("NONE");
-                        }}
-                        className="lindo-interactive flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-[12.5px]"
-                      >
-                        <span className="truncate font-medium" style={{ color: "var(--ink-primary)" }}>
-                          {hit.title}
-                        </span>
-                        <span className="shrink-0 text-[11px]" style={{ color: "var(--ink-tertiary)" }}>
-                          @{hit.username}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                )
               )}
             </div>
           )}
@@ -2648,6 +3400,62 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               className="p-0.5 opacity-60 hover:opacity-100 cursor-pointer"
             >
               <LinDoIcons.Close size={13} />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 云端草稿冲突提示条 (`P1-4`) */}
+      {cloudDraftConflict && (
+        <div
+          className="lindo-hairline-b flex shrink-0 flex-wrap items-center justify-between gap-2 px-5 py-2 text-[12px]"
+          style={{
+            backgroundColor: "color-mix(in srgb, var(--brand-gold) 10%, var(--subtle-surface))",
+          }}
+        >
+          <span style={{ color: "var(--ink-primary)" }}>
+            检测到云端草稿与本地内容不同，请选择要保留的版本
+          </span>
+          <div className="flex shrink-0 items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => {
+                if (cloudDraftConflict.title && isNewTopic) setTitle(cloudDraftConflict.title);
+                if (cloudDraftConflict.raw) {
+                  rawRef.current = cloudDraftConflict.raw;
+                  setRaw(cloudDraftConflict.raw);
+                }
+                if (cloudDraftConflict.categoryId && isNewTopic) {
+                  setCategoryId(cloudDraftConflict.categoryId);
+                }
+                if (cloudDraftConflict.tags.length > 0 && isNewTopic) {
+                  setTags(cloudDraftConflict.tags);
+                }
+                cloudDraftSeqRef.current = Math.max(
+                  cloudDraftSeqRef.current,
+                  cloudDraftConflict.sequence
+                );
+                setCloudDraftConflict(null);
+              }}
+              className="rounded-full px-3 py-0.5 font-semibold cursor-pointer"
+              style={{
+                backgroundColor: "var(--publish-btn-bg)",
+                color: "var(--publish-btn-fg)",
+              }}
+            >
+              使用云端草稿
+            </button>
+            <button
+              type="button"
+              onClick={() => setCloudDraftConflict(null)}
+              className="lindo-interactive rounded-full px-2.5 py-0.5 font-medium"
+              style={{
+                backgroundColor: "var(--card-surface)",
+                border: "0.5px solid var(--hairline)",
+                color: "var(--ink-secondary)",
+              }}
+            >
+              保留本地草稿
             </button>
           </div>
         </div>
@@ -2726,9 +3534,24 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                   const emojiMatch = beforeCaret.match(/(?:^|[\s(（【]):([a-z0-9_+-]{2,20})$/i);
                   if (emojiMatch) {
                     const q = emojiMatch[1].toLowerCase();
-                    const matches = SITE_SHORTCODE_EMOJIS.filter(
-                      (sc) => sc.code.toLowerCase().includes(q) || sc.label.includes(q)
-                    ).slice(0, 6);
+                    const seenCodes = new Set<string>();
+                    const mergedPool: Array<{ code: string; label: string }> = [];
+                    for (const sc of SITE_SHORTCODE_EMOJIS) {
+                      seenCodes.add(sc.code.toLowerCase());
+                      mergedPool.push(sc);
+                    }
+                    for (const ce of siteCustomEmojis) {
+                      const code = `:${ce.name}:`;
+                      if (!seenCodes.has(code.toLowerCase())) {
+                        seenCodes.add(code.toLowerCase());
+                        mergedPool.push({ code, label: ce.group || ce.name });
+                      }
+                    }
+                    const matches = mergedPool
+                      .filter(
+                        (sc) => sc.code.toLowerCase().includes(q) || sc.label.toLowerCase().includes(q)
+                      )
+                      .slice(0, 8);
                     if (matches.length > 0) {
                       setInlineSuggest({
                         kind: "EMOJI",
@@ -2848,7 +3671,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                       if (sel && !sel.includes("\n")) {
                         setLinkText(sel);
                       }
-                      setLinkMode("URL");
+                      setLinkMode("TOPIC");
                       setActivePicker("LINK");
                       return;
                     }
@@ -3163,6 +3986,9 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               pendingProceedRef.current = null;
               setShowExitConfirm(false);
               deleteLocalDraftInRust(draftKey).catch(() => {});
+              if (cloudDraftKey) {
+                deleteCloudDraft(cloudDraftKey, cloudDraftSeqRef.current).catch(() => {});
+              }
               onClose();
               after?.();
             }}
@@ -3181,7 +4007,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                   title,
                   raw,
                   tags,
-                  sequence: 0,
+                  sequence: cloudDraftSeqRef.current,
                   updatedAt: Date.now(),
                 }).catch(() => {});
               }

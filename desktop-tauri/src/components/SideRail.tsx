@@ -11,10 +11,13 @@ interface SideRailProps {
   isMacos: boolean;
   showFeedToggle?: boolean;
   feedCollapsed?: boolean;
+  cfAttentionNeeded?: boolean;
+  verifyActive?: boolean;
   onSelectTab: (tab: MainTab) => void;
   onPublishClick: () => void;
   onToggleTheme: () => void;
   onToggleFeedCollapse?: () => void;
+  onTriggerVerify?: () => void;
 }
 
 export const SideRail: React.FC<SideRailProps> = ({
@@ -25,10 +28,13 @@ export const SideRail: React.FC<SideRailProps> = ({
   isMacos,
   showFeedToggle = false,
   feedCollapsed = false,
+  cfAttentionNeeded = false,
+  verifyActive = false,
   onSelectTab,
   onPublishClick,
   onToggleTheme,
   onToggleFeedCollapse,
+  onTriggerVerify,
 }) => {
   const [earHovered, setEarHovered] = React.useState(false);
   const hasOrganicEar = Boolean(showFeedToggle && onToggleFeedCollapse);
@@ -51,7 +57,7 @@ export const SideRail: React.FC<SideRailProps> = ({
         onClick={() => onSelectTab(tab)}
         className={`lindo-no-drag group relative flex ${
           isHomeMascot ? "h-[56px]" : "h-[52px]"
-        } w-full flex-col items-center justify-center gap-[3px] cursor-pointer`}
+        } w-full items-center justify-center cursor-pointer select-none`}
       >
         {selected && (
           <span
@@ -63,48 +69,58 @@ export const SideRail: React.FC<SideRailProps> = ({
           />
         )}
         <div
-          className={`relative flex items-center justify-center ${
-            isHomeMascot ? "h-[30px] w-[32px]" : "h-[24px] w-[28px]"
-          }`}
-        >
-          <div
-            className={`flex items-center justify-center transition-all duration-150 group-hover:scale-[1.06] ${
-              isHomeMascot ? "h-[29px] w-[29px]" : "h-[22px] w-[22px]"
-            }`}
-            style={{
-              color: selected ? "var(--brand-gold)" : "var(--ink-secondary)",
-              opacity: isHomeMascot ? 1 : selected ? 1 : 0.82,
-            }}
-          >
-            {iconNode(selected)}
-          </div>
-          {badgeText ? (
-            <span
-              className="absolute -top-[4px] -right-[8px] flex h-[15px] min-w-[15px] items-center justify-center rounded-full px-1 text-[9px] font-bold leading-none tabular-nums"
-              style={{
-                backgroundColor: "var(--brand-gold)",
-                color: isDark ? "#101217" : "#FFFFFF",
-              }}
-            >
-              {badgeText}
-            </span>
-          ) : showDot ? (
-            <span
-              className="absolute -top-[1px] -right-[2px] h-[7px] w-[7px] rounded-full"
-              style={{ backgroundColor: "var(--brand-gold)" }}
-            />
-          ) : null}
-        </div>
-        <span
-          className="text-[10.5px] leading-tight transition-colors duration-150"
+          className={`lindo-interactive flex ${
+            isHomeMascot ? "h-[50px]" : "h-[46px]"
+          } w-[54px] flex-col items-center justify-center gap-[3px] rounded-[11px]`}
           style={{
-            fontWeight: selected ? 600 : 500,
-            color: selected ? "var(--brand-gold)" : "var(--ink-secondary)",
-            opacity: selected ? 1 : 0.86,
+            backgroundColor: selected
+              ? "color-mix(in srgb, var(--brand-gold) 9%, transparent)"
+              : undefined,
           }}
         >
-          {label}
-        </span>
+          <div
+            className={`relative flex items-center justify-center ${
+              isHomeMascot ? "h-[28px] w-[30px]" : "h-[22px] w-[26px]"
+            }`}
+          >
+            <div
+              className={`flex items-center justify-center transition-colors duration-150 ${
+                isHomeMascot ? "h-[28px] w-[28px]" : "h-[21px] w-[21px]"
+              }`}
+              style={{
+                color: selected ? "var(--brand-gold)" : "var(--ink-secondary)",
+                opacity: isHomeMascot ? 1 : selected ? 1 : 0.84,
+              }}
+            >
+              {iconNode(selected)}
+            </div>
+            {badgeText ? (
+              <span
+                className="absolute -top-[4px] -right-[8px] flex h-[15px] min-w-[15px] items-center justify-center rounded-full px-1 text-[9px] font-bold leading-none tabular-nums"
+                style={{
+                  backgroundColor: "var(--brand-gold)",
+                  color: isDark ? "#101217" : "#FFFFFF",
+                }}
+              >
+                {badgeText}
+              </span>
+            ) : showDot ? (
+              <span
+                className="absolute -top-[1px] -right-[2px] h-[7px] w-[7px] rounded-full"
+                style={{ backgroundColor: "var(--brand-gold)" }}
+              />
+            ) : null}
+          </div>
+          <span
+            className="text-[10.5px] font-medium leading-tight transition-colors duration-150"
+            style={{
+              color: selected ? "var(--brand-gold)" : "var(--ink-secondary)",
+              opacity: selected ? 1 : 0.86,
+            }}
+          >
+            {label}
+          </span>
+        </div>
       </button>
     );
   };
@@ -143,29 +159,31 @@ export const SideRail: React.FC<SideRailProps> = ({
             selected ? <LinDoIcons.CompassSelected size={19.5} /> : <LinDoIcons.Compass size={19.5} />
           )}
 
-          {/* 发布新话题按钮（38px 正圆微描边，与上下 56×52 圆角方块导航形成清晰语义区分） */}
+          {/* 发布新话题按钮（稳定 54px 圆角热区 + 38px 圆形徽章，原生 macOS 悬停色阶、零按压缩放晃动） */}
           <button
             type="button"
             onClick={onPublishClick}
             title="发布新话题"
-            className="lindo-no-drag group flex w-full flex-col items-center py-[6px] cursor-pointer"
+            className="lindo-no-drag group flex w-full items-center justify-center py-[3px] cursor-pointer select-none"
           >
-            <div
-              className="flex h-[38px] w-[38px] items-center justify-center rounded-full transition-all duration-150 group-hover:scale-[1.04] group-active:scale-[0.96]"
-              style={{
-                backgroundColor: "var(--tonal-pill)",
-                color: "var(--brand-gold)",
-                border: "0.5px solid var(--hairline)",
-              }}
-            >
-              <LinDoIcons.Plus size={18.5} />
+            <div className="lindo-interactive flex w-[54px] flex-col items-center rounded-[11px] py-[4px]">
+              <div
+                className="flex h-[36px] w-[36px] items-center justify-center rounded-full transition-colors duration-150"
+                style={{
+                  backgroundColor: "var(--tonal-pill)",
+                  color: "var(--brand-gold)",
+                  border: "0.5px solid var(--hairline)",
+                }}
+              >
+                <LinDoIcons.Plus size={18} />
+              </div>
+              <span
+                className="mt-[4px] text-[10.5px] font-medium leading-tight transition-colors duration-150"
+                style={{ color: "var(--ink-secondary)" }}
+              >
+                发布
+              </span>
             </div>
-            <span
-              className="mt-[4px] text-[10.5px] font-medium leading-tight transition-colors group-hover:opacity-95"
-              style={{ color: "var(--ink-secondary)" }}
-            >
-              发布
-            </span>
           </button>
 
           {renderTab(
@@ -199,6 +217,35 @@ export const SideRail: React.FC<SideRailProps> = ({
           >
             {isDark ? <LinDoIcons.Sun size={18} /> : <LinDoIcons.Moon size={18} />}
           </button>
+
+          {(cfAttentionNeeded || verifyActive) && onTriggerVerify && (
+            <button
+              type="button"
+              data-testid="siderail-shield-verify"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={onTriggerVerify}
+              title={verifyActive ? "安全校验中…" : "需要站点安全确认 · 点击验证"}
+              aria-label={verifyActive ? "安全校验中" : "需要站点安全确认，点击验证"}
+              className="lindo-no-drag lindo-interactive relative mt-1.5 flex h-9 w-9 items-center justify-center rounded-full cursor-pointer select-none"
+              style={{
+                color: "var(--brand-gold)",
+                backgroundColor: "color-mix(in srgb, var(--brand-gold) 13%, transparent)",
+                border: "0.5px solid color-mix(in srgb, var(--brand-gold) 34%, transparent)",
+              }}
+            >
+              <LinDoIcons.ShieldCheck
+                size={17.5}
+                className={verifyActive ? "animate-pulse" : undefined}
+              />
+              <span
+                className="pointer-events-none absolute top-[5px] right-[5px] h-[6.5px] w-[6.5px] rounded-full animate-pulse"
+                style={{
+                  backgroundColor: "var(--brand-gold)",
+                  boxShadow: "0 0 6px color-mix(in srgb, var(--brand-gold) 65%, transparent)",
+                }}
+              />
+            </button>
+          )}
         </div>
       </div>
 
@@ -280,17 +327,12 @@ export const SideRail: React.FC<SideRailProps> = ({
               />
             </svg>
             <span
-              className="pointer-events-none absolute inset-0 flex items-center pl-[7px] transition-transform duration-150 ease-out"
+              className="pointer-events-none absolute inset-0 flex items-center pl-[7px] transition-colors duration-150 ease-out"
               style={{
                 color:
                   earHovered || feedCollapsed
                     ? "var(--brand-gold)"
                     : "var(--ink-tertiary)",
-                transform: earHovered
-                  ? feedCollapsed
-                    ? "translateX(1px)"
-                    : "translateX(-1px)"
-                  : "translateX(0)",
               }}
             >
               {feedCollapsed ? (

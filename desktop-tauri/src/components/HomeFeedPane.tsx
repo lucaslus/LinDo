@@ -108,6 +108,7 @@ const FeedTopicRow: React.FC<FeedTopicRowProps> = React.memo(
       <>
         <div
           data-topic-id={topic.id}
+          data-selected={selected ? "true" : "false"}
           onClick={() => onSelectTopic(topic)}
           role="button"
           tabIndex={0}
@@ -117,7 +118,7 @@ const FeedTopicRow: React.FC<FeedTopicRowProps> = React.memo(
               onSelectTopic(topic);
             }
           }}
-          className={`cursor-pointer flex text-left ${
+          className={`lindo-feed-card cursor-pointer select-none flex text-left ${
             isCompact
               ? "mx-2 my-[1px] items-center gap-2.5 rounded-lg px-2.5 py-2"
               : "mx-2.5 my-[2px] items-start gap-3 rounded-xl px-3 py-[13px]"
@@ -262,7 +263,7 @@ const FeedTopicRow: React.FC<FeedTopicRowProps> = React.memo(
                   ))}
                   {hiddenLooseTagCount > 0 && (
                     <span
-                      className="shrink-0 text-[11px] font-medium"
+                      className="shrink-0 text-[11px] font-medium tabular-nums"
                       style={{ color: "var(--ink-tertiary)" }}
                     >
                       +{hiddenLooseTagCount}
@@ -511,7 +512,7 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
       style={{ backgroundColor: "var(--feed-surface)" }}
     >
       {/* 1. 精简左栏顶部品牌栏（移除与侧栏重复的铃铛/头像，上移刷新与视图切换；释放下方排序标签栏全宽，仅顶行响应窗口拖拽） */}
-      <div className="lindo-hairline-b shrink-0 px-4 pt-3 pb-2">
+      <div className="lindo-hairline-b shrink-0 select-none px-4 pt-3 pb-2">
         <div
           onMouseDown={handleTitlebarMouseDown}
           className="flex items-center justify-between gap-2"
@@ -616,13 +617,15 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                   key={tab.key}
                   type="button"
                   onClick={() => onSelectSort(tab.key)}
-                  className="relative flex h-[28px] shrink-0 items-center justify-center text-[13.5px] cursor-pointer transition-colors"
+                  className="relative flex h-[28px] shrink-0 items-center justify-center text-[13.5px] cursor-pointer transition-colors select-none"
                   style={{
                     color: selected ? "var(--ink-primary)" : "var(--ink-secondary)",
                     fontWeight: selected ? 600 : 400,
                   }}
                 >
-                  <span className="hover:opacity-90">{tab.label}</span>
+                  <span className="lindo-tab-label hover:opacity-90" data-label={tab.label}>
+                    <span>{tab.label}</span>
+                  </span>
                   {selected && (
                     <span
                       className="absolute bottom-0 h-[2.5px] w-[14px] rounded-full"
@@ -640,13 +643,12 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
               setFocusedParentCatId(activeCategory?.parentId ?? activeCategory?.id ?? null);
               setCatDrawerOpen((v) => !v);
             }}
-            className="lindo-interactive flex h-[28px] shrink-0 items-center gap-1 rounded-md px-1.5 text-[12.8px]"
+            className="lindo-interactive flex h-[28px] shrink-0 items-center gap-1 rounded-md px-1.5 text-[12.8px] font-medium"
             style={{
               color:
                 catDrawerOpen || selectedCategoryId
                   ? "var(--active-chip-text)"
                   : "var(--ink-secondary)",
-              fontWeight: catDrawerOpen || selectedCategoryId ? 600 : 400,
             }}
           >
             <span className="max-w-[96px] truncate">
@@ -760,13 +762,12 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                   onSelectCategory(null);
                   setCatDrawerOpen(false);
                 }}
-                className="rounded-full px-2.5 py-1 text-[12px] transition-colors cursor-pointer"
+                className="rounded-full px-2.5 py-1 text-[12px] font-medium transition-colors cursor-pointer"
                 style={{
                   backgroundColor:
                     selectedCategoryId === null ? "var(--active-chip-bg)" : "var(--card-surface)",
                   color:
                     selectedCategoryId === null ? "var(--active-chip-text)" : "var(--ink-secondary)",
-                  fontWeight: selectedCategoryId === null ? 500 : 400,
                 }}
               >
                 全部分类
@@ -787,15 +788,18 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                     key={cat.id}
                     type="button"
                     onClick={() => {
+                      if (cat.readRestricted && !isAuthorized) {
+                        onSelectCategory(cat.id);
+                        return;
+                      }
                       setFocusedParentCatId(cat.id);
                       onSelectCategory(cat.id);
                       if (!hasSubs) setCatDrawerOpen(false);
                     }}
-                    className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12px] transition-colors cursor-pointer"
+                    className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12px] font-medium transition-colors cursor-pointer"
                     style={{
                       backgroundColor: selected ? "var(--active-chip-bg)" : "var(--card-surface)",
                       color: selected ? "var(--active-chip-text)" : "var(--ink-secondary)",
-                      fontWeight: selected ? 500 : 400,
                     }}
                   >
                     <CatIcon size={11.5} style={{ color: offVis.color }} />
@@ -816,7 +820,7 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                     onSelectCategory(effectiveParentId);
                     setCatDrawerOpen(false);
                   }}
-                  className="shrink-0 rounded-md px-2 py-0.5 text-[11.8px] cursor-pointer"
+                  className="shrink-0 rounded-md px-2 py-0.5 text-[11.8px] font-medium transition-colors cursor-pointer"
                   style={{
                     backgroundColor:
                       selectedCategoryId === effectiveParentId ? "var(--active-chip-bg)" : "transparent",
@@ -824,7 +828,6 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                       selectedCategoryId === effectiveParentId
                         ? "var(--active-chip-text)"
                         : "var(--ink-secondary)",
-                    fontWeight: selectedCategoryId === effectiveParentId ? 500 : 400,
                   }}
                 >
                   主版块
@@ -837,13 +840,14 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                       type="button"
                       onClick={() => {
                         onSelectCategory(sub.id);
-                        setCatDrawerOpen(false);
+                        if (!sub.readRestricted || isAuthorized) {
+                          setCatDrawerOpen(false);
+                        }
                       }}
-                      className="inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-0.5 text-[11.8px] transition-colors cursor-pointer"
+                      className="inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-0.5 text-[11.8px] font-medium transition-colors cursor-pointer"
                       style={{
                         backgroundColor: selected ? "var(--active-chip-bg)" : "transparent",
                         color: selected ? "var(--active-chip-text)" : "var(--ink-secondary)",
-                        fontWeight: selected ? 500 : 400,
                       }}
                     >
                       {sub.readRestricted && <LinDoIcons.FaLock size={9.5} />}
@@ -865,7 +869,7 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
             scrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
             onApplyPendingNew();
           }}
-          className="lindo-interactive flex h-[28px] w-full shrink-0 items-center justify-center gap-1.5 text-[11.5px] font-medium cursor-pointer"
+          className="lindo-interactive flex h-[28px] w-full shrink-0 items-center justify-center gap-1.5 text-[11.5px] font-medium tabular-nums cursor-pointer"
           style={{
             backgroundColor: "color-mix(in srgb, var(--subtle-surface) 58%, var(--feed-surface))",
             borderBottom: "0.5px solid var(--hairline-soft)",
@@ -931,6 +935,8 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                 onClick={() => {
                   if (isVerifyError(errorMessage)) {
                     onTriggerVerify();
+                  } else if (!isAuthorized && errorMessage.includes("登录")) {
+                    onOpenAuth();
                   } else {
                     markManualRetryIntent();
                     onRefresh();
@@ -942,11 +948,58 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                   color: "var(--publish-btn-fg)",
                 }}
               >
-                {isVerifyError(errorMessage) ? "去验证" : "重试"}
+                {isVerifyError(errorMessage)
+                  ? "去验证"
+                  : !isAuthorized && errorMessage.includes("登录")
+                    ? "去登录"
+                    : "重试"}
               </button>
             </div>
           ) : (
             <div className="py-1">
+              {/* 刷新失败但已有缓存帖子时：顶部展示非破坏性内联错误与重试条 (`P1-10`) */}
+              {errorMessage && topics.length > 0 && (
+                <div
+                  role="alert"
+                  className="mx-3 mb-1.5 mt-1 flex items-center justify-between gap-2 rounded-xl px-3 py-2 text-[12px]"
+                  style={{
+                    backgroundColor: "var(--error-bg)",
+                    border: "0.5px solid var(--error-border)",
+                    color: "var(--error-fg)",
+                  }}
+                >
+                  <span className="min-w-0 flex-1 truncate">
+                    {feedRetrySecs > 0
+                      ? `刷新较频繁，${feedRetrySecs} 秒后自动恢复…`
+                      : errorMessage}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (isVerifyError(errorMessage)) {
+                        onTriggerVerify();
+                      } else if (!isAuthorized && errorMessage.includes("登录")) {
+                        onOpenAuth();
+                      } else {
+                        markManualRetryIntent();
+                        onRefresh();
+                      }
+                    }}
+                    className="shrink-0 rounded-full px-2.5 py-0.5 text-[11.5px] font-semibold cursor-pointer"
+                    style={{
+                      backgroundColor: "var(--publish-btn-bg)",
+                      color: "var(--publish-btn-fg)",
+                    }}
+                  >
+                    {isVerifyError(errorMessage)
+                      ? "去验证"
+                      : !isAuthorized && errorMessage.includes("登录")
+                        ? "去登录"
+                        : "重试"}
+                  </button>
+                </div>
+              )}
+
               {/* 置顶单行静默收纳条（无外框无背景底色，自然融入列表顶部的极简分隔流） */}
               {pinnedTopics.length > 0 && (
                 <div>
@@ -962,7 +1015,7 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                             ? setPinnedExpanded(true)
                             : onSelectTopic(pinnedTopics[0])
                         }
-                        className="inline-flex shrink-0 items-center gap-1 rounded-[5px] px-1.5 py-[1.5px] text-[10.8px] font-semibold cursor-pointer"
+                        className="inline-flex shrink-0 items-center gap-1 rounded-[5px] px-1.5 py-[1.5px] text-[10.8px] font-semibold tabular-nums cursor-pointer"
                         style={{
                           backgroundColor: "var(--active-chip-bg)",
                           color: "var(--active-chip-text)",
@@ -977,13 +1030,12 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                       <button
                         type="button"
                         onClick={() => onSelectTopic(pinnedTopics[0])}
-                        className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-[12.5px] transition-opacity hover:opacity-85 cursor-pointer"
+                        className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-[12.5px] font-medium transition-colors hover:opacity-85 cursor-pointer"
                         style={{
                           color:
                             selectedTopicId === pinnedTopics[0].id
                               ? "var(--ink-primary)"
                               : "var(--ink-secondary)",
-                          fontWeight: selectedTopicId === pinnedTopics[0].id ? 600 : 400,
                         }}
                       >
                         <span className="truncate">{pinnedTopics[0].title}</span>
@@ -1057,10 +1109,9 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                                 <span>置顶</span>
                               </span>
                               <span
-                                className="flex min-w-0 flex-1 items-center gap-1.5 text-[13.5px]"
+                                className="flex min-w-0 flex-1 items-center gap-1.5 text-[13.5px] font-medium"
                                 style={{
                                   color: "var(--ink-primary)",
-                                  fontWeight: selected ? 600 : 500,
                                 }}
                               >
                                 <span className="truncate">{pinned.title}</span>
@@ -1172,7 +1223,7 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
             onClick={handleLocateSelectedTopic}
             title="回到正在阅读的话题"
             aria-label="回到正在阅读的话题"
-            className="lindo-interactive absolute right-3.5 bottom-3.5 z-20 flex h-8 w-8 items-center justify-center rounded-full shadow-lg active:scale-95"
+            className="lindo-interactive absolute right-3.5 bottom-3.5 z-20 flex h-8 w-8 items-center justify-center rounded-full shadow-lg"
             style={{
               backgroundColor: "var(--subtle-surface)",
               border: "0.5px solid var(--hairline)",

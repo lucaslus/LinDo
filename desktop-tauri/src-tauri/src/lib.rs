@@ -11,8 +11,8 @@ pub mod win_webview_bridge;
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STD, Engine as _};
 use bridge::{
-    BridgeEngine, ClipboardMediaItem, ClipboardMediaResult, DiagRuntimeSnapshot, ForumMediaPayload,
-    QrLoginGrantDto, SiteHttpResponse,
+    BridgeEngine, ClearLocalCachesResult, ClipboardMediaItem, ClipboardMediaResult,
+    DiagRuntimeSnapshot, ForumMediaPayload, QrLoginGrantDto, SiteHttpResponse,
 };
 use futures_util::StreamExt;
 use legacy::{
@@ -250,9 +250,16 @@ async fn site_verify(
     login: bool,
     is_dark: bool,
     manual: Option<bool>,
+    force_refresh: Option<bool>,
 ) -> Result<bool, String> {
     engine
-        .verify_or_login(&app, login, is_dark, manual.unwrap_or(true))
+        .verify_or_login_with_options(
+            &app,
+            login,
+            is_dark,
+            manual.unwrap_or(true),
+            force_refresh.unwrap_or(false),
+        )
         .await
 }
 
@@ -419,6 +426,13 @@ async fn clear_read_history(engine: State<'_, Arc<BridgeEngine>>) -> Result<(), 
     st.read_floors.clear();
     save_state(&st);
     Ok(())
+}
+
+#[tauri::command]
+async fn clear_local_caches(
+    engine: State<'_, Arc<BridgeEngine>>,
+) -> Result<ClearLocalCachesResult, String> {
+    Ok(engine.clear_local_caches())
 }
 
 #[tauri::command]
@@ -1675,6 +1689,7 @@ pub fn run() {
             save_preferences,
             record_read_floor,
             clear_read_history,
+            clear_local_caches,
             save_local_draft,
             delete_local_draft,
             set_unread_badge,

@@ -10,6 +10,7 @@ import {
   isQrLoginUri,
   parseQrLoginPayload,
 } from "../lib/qrLogin";
+import { redactDiagText } from "../lib/diagnostics";
 
 describe("Cross-device QR login protocol & ISO/IEC 18004 codec", () => {
   it("parses and encodes lindo:// and fluxdo:// v2 payloads with exact mobile parity", () => {
@@ -138,5 +139,16 @@ describe("Cross-device QR login protocol & ISO/IEC 18004 codec", () => {
     expect(qrIdx).toBeLessThan(appearanceIdx);
     expect(src).toContain('title="问题与建议反馈"');
     expect(src).not.toContain("<AuthorFeedbackModal");
+  });
+
+  it("redacts QR login apiKey (k) and otp (o) secrets in desktop diagnostics like Android", () => {
+    const rawQr =
+      "lindo://qr-login?v=2&k=secret_api_key_value&o=secret_otp_value&u=lucas&exp=0";
+    const redacted = redactDiagText(`failed redeeming ${rawQr}`);
+    expect(redacted).not.toContain("secret_api_key_value");
+    expect(redacted).not.toContain("secret_otp_value");
+    expect(redacted).toContain("k=<REDACTED>");
+    expect(redacted).toContain("o=<REDACTED>");
+    expect(redacted).toContain("u=lucas");
   });
 });

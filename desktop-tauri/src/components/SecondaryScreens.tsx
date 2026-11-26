@@ -9,7 +9,14 @@ import {
   resolveOfficialCategoryVisual,
   resolveOfficialTagVisual,
 } from "./LinDoIcons";
-import type { ExternalUrlAssessment } from "../lib/cooked";
+import {
+  classifyExternalUrl,
+  parseInternalForumLink,
+  prepareCookedHtml,
+  rememberTrustedExternalHost,
+  type ExternalUrlAssessment,
+} from "../lib/cooked";
+import { renderDiscourseMarkdownPreview } from "../lib/markdownPreview";
 import {
   fetchForumMediaBlobUrl,
   needsSameOriginMediaBridge,
@@ -34,6 +41,7 @@ import type {
   CommunitySearchUserHit,
   ComposerLaunchRequest,
   ConnectTrustLevelReport,
+  CustomEmojiItem,
   DesktopUpdateInfo,
   DiagRuntimeSnapshot,
   EchDesktopSnapshot,
@@ -44,38 +52,50 @@ import type {
   LocalDraftRecord,
   LocalHistoryItem,
   NotificationItem,
+  PublicUserProfile,
   SavedAccountEntry,
   TopicSummary,
   UpdateProgressPayload,
+  UserAccountPreferencesSnapshot,
+  UserActivityItem,
   UserPreferences,
   UserProfile,
 } from "../lib/types";
 import {
   type CommunitySearchHit,
   archivePrivateMessage,
+  clearLocalCachesInRust,
   clearLocalTopicHistory,
   clearReadHistoryInRust,
   deleteBookmarkById,
   deleteCloudDraft,
   deleteLocalDraftInRust,
+  fetchBadgeDetailById,
   fetchCloudDrafts,
   fetchConnectTrustLevelReport,
   fetchNotifications,
   fetchPrivateMessages,
+  fetchPublicUserProfile,
   markManualRetryIntent,
   useRateLimitAutoRecovery,
   fetchReadHistoryTopics,
+  fetchRecentTopicsForLinkPicker,
   fetchSiteBadges,
+  fetchSiteCustomEmojis,
   fetchTopicFeed,
+  fetchUserAccountPreferences,
   fetchUserActions,
+  fetchUserActivityItems,
   fetchUserBadges,
   fetchUserBookmarks,
-  fetchUserCardDetail,
+  fetchUserBookmarksPage,
   fetchUserFollowList,
+  findCategoryMeta,
   generateQrLoginInRust,
   getLocalTopicHistory,
   handleTitlebarMouseDown,
   importManualCredentialInRust,
+  mapSiteBadgeList,
   markAllNotificationsRead,
   markSingleNotificationRead,
   type QrLoginGrantDto,
@@ -85,6 +105,7 @@ import {
   requestUserArchive,
   resolveAuthoritativeUnreadCount,
   searchCommunity,
+  searchTopicsForLinkPicker,
   sendPrivateMessage,
   SiteError,
   toggleFollowUser,
@@ -150,7 +171,30 @@ function trustLevelLabel(level?: number): string {
   }
 }
 
-function notificationFallbackVerb(type: number): string {
+export type NotificationCategoryBucket = "REPLY" | "REACTION" | "MENTION" | "SYSTEM";
+
+/**
+ * Aligns 1:1 with Android `DiscourseNotificationKind` (`LinDoCopyContract.kt:132-275`):
+ * - `3` (QUOTED) & `38` (FOLLOWING_REPLIED) & `11` (LINKED) belong to REPLY (NOT Boost/Reaction or Mention!)
+ * - `17` (WATCHING_FIRST_POST), `37` (FOLLOWING_CREATED_TOPIC), `801` (PLUGIN_FOLLOW_TOPIC) belong to SYSTEM
+ * - `5/19/25/39/40/43/803/900` belong to REACTION
+ */
+export function classifyNotificationCategory(
+  n: Pick<NotificationItem, "notificationType" | "isConsolidatedReplies">
+): NotificationCategoryBucket {
+  if (n.isConsolidatedReplies || [2, 3, 9, 11, 38, 802].includes(n.notificationType)) {
+    return "REPLY";
+  }
+  if ([5, 19, 25, 39, 40, 43, 803, 900].includes(n.notificationType)) {
+    return "REACTION";
+  }
+  if ([1, 15, 29, 32, 33].includes(n.notificationType)) {
+    return "MENTION";
+  }
+  return "SYSTEM";
+}
+
+export function notificationFallbackVerb(type: number): string {
   switch (type) {
     case 1:
     case 15:
@@ -159,17 +203,17 @@ function notificationFallbackVerb(type: number): string {
       return "提及了你";
     case 2:
     case 9:
-    case 17:
-    case 37:
-    case 801:
-    case 802:
       return "回复了你";
     case 3:
     case 33:
       return "引用了你";
+    case 11:
+      return "关联了你的帖子";
     case 5:
     case 19:
     case 25:
+    case 39:
+    case 900:
       return "赞同了你的帖子";
     case 6:
     case 7:
@@ -177,22 +221,34 @@ function notificationFallbackVerb(type: number): string {
       return "发来站内私信";
     case 12:
       return "获得社区徽章";
+    case 17:
+    case 37:
+    case 801:
+      return "发布了新话题";
+    case 24:
+      return "书签提醒";
+    case 27:
+      return "活动提醒";
+    case 34:
+      return "分配了任务给你";
     case 36:
     case 800:
       return "关注了你";
     case 38:
+    case 802:
+      return "发表了新回复";
     case 40:
     case 43:
     case 803:
-      return "为你的帖子助力";
+      return "给你的帖子发了短评";
     default:
       return "社区通知";
   }
 }
 
-function resolveNotificationCornerIcon(n: NotificationItem): React.ReactNode {
+export function resolveNotificationCornerIcon(n: NotificationItem): React.ReactNode {
   const rx = (n.reactionIcon || "").toLowerCase();
-  if (rx === "rocket" || [38, 40, 43, 803].includes(n.notificationType)) {
+  if (rx === "rocket" || [40, 43, 803].includes(n.notificationType)) {
     return <LinDoIcons.BoostRocket size={10.5} />;
   }
   if (["+1", "thumbsup", "clap", "tieba_087"].includes(rx)) {
@@ -207,10 +263,12 @@ function resolveNotificationCornerIcon(n: NotificationItem): React.ReactNode {
   if (["laughing", "joy", "open_mouth", "hugs", "distorted_face"].includes(rx)) {
     return <LinDoIcons.Smile size={10.5} />;
   }
-  if ([5, 19, 25].includes(n.notificationType)) {
+  if ([5, 19, 25, 39, 900].includes(n.notificationType)) {
+    if (n.isConsolidatedReplies) return <LinDoIcons.Reply size={10.5} />;
+    if (n.badgeId && n.badgeId > 0) return <LinDoIcons.Trophy size={10.5} />;
     return <LinDoIcons.HeartFilled size={10.5} />;
   }
-  if (n.isConsolidatedReplies || [2, 9, 17, 37, 801, 802].includes(n.notificationType)) {
+  if (n.isConsolidatedReplies || [2, 9, 11, 17, 37, 38, 801, 802].includes(n.notificationType)) {
     return <LinDoIcons.Reply size={10.5} />;
   }
   if ([3, 33].includes(n.notificationType)) {
@@ -379,7 +437,7 @@ export const OfficialBadgeIcon: React.FC<{
         type="button"
         title={title ?? badge.name}
         onClick={onClick}
-        className={`inline-flex shrink-0 items-center justify-center rounded-full transition-transform hover:scale-110 cursor-pointer ${className}`}
+        className={`inline-flex shrink-0 items-center justify-center rounded-full transition-opacity hover:opacity-80 cursor-pointer ${className}`}
       >
         {content}
       </button>
@@ -634,10 +692,80 @@ export const AvatarWithFlair: React.FC<{
 
 export const BadgeDetailModal: React.FC<{
   badge: GrantedBadge;
+  isAuthorized?: boolean;
+  currentUser?: UserProfile | null;
+  onProfileUpdated?: () => void;
   onClose: () => void;
-}> = ({ badge, onClose }) => {
-  const tier = badgeTierMeta(badge.badgeTypeId);
-  const descHtml = badge.longDescription || badge.description || "由 LINUX DO 社区颁发的荣誉徽章。";
+}> = ({ badge, isAuthorized = false, currentUser = null, onProfileUpdated, onClose }) => {
+  const [detailBadge, setDetailBadge] = useState<GrantedBadge>(badge);
+  const [equipping, setEquipping] = useState(false);
+  const [equipFeedback, setEquipFeedback] = useState<string | null>(null);
+  const [localEquippedTitle, setLocalEquippedTitle] = useState<string | null | undefined>(
+    currentUser?.userTitle
+  );
+
+  useEffect(() => {
+    setDetailBadge(badge);
+    setEquipFeedback(null);
+    setLocalEquippedTitle(currentUser?.userTitle);
+  }, [badge, currentUser?.userTitle]);
+
+  useEffect(() => {
+    if (!badge.id || badge.id <= 0) return;
+    let alive = true;
+    fetchBadgeDetailById(badge.id)
+      .then((fetched) => {
+        if (!alive || !fetched) return;
+        setDetailBadge((prev) => ({
+          ...prev,
+          ...fetched,
+          longDescription: fetched.longDescription || prev.longDescription,
+          description: fetched.description || prev.description,
+          grantCount: fetched.grantCount || prev.grantCount,
+          allowTitle: fetched.allowTitle ?? prev.allowTitle,
+          imageUrl: fetched.imageUrl || prev.imageUrl,
+          icon: fetched.icon || prev.icon,
+          count: prev.count ?? fetched.count,
+          grantedAt: prev.grantedAt || fetched.grantedAt,
+          isFirstTimeGrant: prev.isFirstTimeGrant,
+          isEarned: prev.isEarned,
+        }));
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [badge.id]);
+
+  const tier = badgeTierMeta(detailBadge.badgeTypeId);
+  const descHtml =
+    detailBadge.longDescription ||
+    detailBadge.description ||
+    "由 LINUX DO 社区颁发的荣誉徽章。";
+  const canToggleTitle = Boolean(
+    isAuthorized && currentUser && detailBadge.allowTitle && detailBadge.isEarned
+  );
+  const isEquipped =
+    Boolean(localEquippedTitle) &&
+    localEquippedTitle!.trim() === detailBadge.name.trim();
+
+  const handleToggleTitle = async () => {
+    if (!currentUser || equipping) return;
+    setEquipping(true);
+    setEquipFeedback(null);
+    const nextTitle = isEquipped ? "" : detailBadge.name;
+    try {
+      await updateUserProfileInfo(currentUser.username, { title: nextTitle });
+      await refreshCurrentUserSession().catch(() => {});
+      setLocalEquippedTitle(nextTitle || null);
+      onProfileUpdated?.();
+      setEquipFeedback(nextTitle ? `已设为个人头衔「${detailBadge.name}」` : "已取消个人头衔");
+    } catch (err: any) {
+      setEquipFeedback(err?.message || "设置头衔失败，请稍后重试");
+    } finally {
+      setEquipping(false);
+    }
+  };
 
   return (
     <div
@@ -681,11 +809,11 @@ export const BadgeDetailModal: React.FC<{
               border: `0.5px solid ${tier.color}40`,
             }}
           >
-            <OfficialBadgeIcon badge={badge} size={34} />
+            <OfficialBadgeIcon badge={detailBadge} size={34} />
           </div>
 
           <h3 className="mt-3 text-[17px] font-bold" style={{ color: "var(--ink-primary)" }}>
-            {badge.name}
+            {detailBadge.name}
           </h3>
 
           <div
@@ -705,15 +833,15 @@ export const BadgeDetailModal: React.FC<{
             className="mt-4 flex flex-wrap items-center justify-center gap-2 text-[11.5px]"
             style={{ color: "var(--ink-tertiary)" }}
           >
-            {Boolean(badge.grantCount && badge.grantCount > 0) && (
+            {Boolean(detailBadge.grantCount && detailBadge.grantCount > 0) && (
               <span
                 className="rounded-full px-2.5 py-0.5 tabular-nums"
                 style={{ backgroundColor: "var(--subtle-surface)" }}
               >
-                共 {formatCompactCount(badge.grantCount)} 人获得
+                共 {formatCompactCount(detailBadge.grantCount)} 人获得
               </span>
             )}
-            {badge.isFirstTimeGrant && (
+            {detailBadge.isFirstTimeGrant && (
               <span
                 className="rounded-full px-2.5 py-0.5 font-medium"
                 style={{
@@ -724,15 +852,45 @@ export const BadgeDetailModal: React.FC<{
                 首次于此楼解锁
               </span>
             )}
-            {badge.count && badge.count > 1 && (
+            {detailBadge.count && detailBadge.count > 1 && (
               <span
                 className="rounded-full px-2.5 py-0.5 font-semibold tabular-nums"
                 style={{ backgroundColor: "var(--subtle-surface)", color: tier.color }}
               >
-                已获 ×{badge.count}
+                已获 ×{detailBadge.count}
               </span>
             )}
           </div>
+
+          {canToggleTitle && (
+            <div className="mt-4 w-full">
+              <button
+                type="button"
+                disabled={equipping}
+                onClick={() => void handleToggleTitle()}
+                className="w-full rounded-xl py-2 text-[13px] font-semibold cursor-pointer disabled:opacity-55"
+                style={
+                  isEquipped
+                    ? {
+                        backgroundColor: "var(--subtle-surface)",
+                        border: "0.5px solid var(--hairline)",
+                        color: "var(--ink-secondary)",
+                      }
+                    : {
+                        backgroundColor: "var(--publish-btn-bg)",
+                        color: "var(--publish-btn-fg)",
+                      }
+                }
+              >
+                {equipping ? "保存中..." : isEquipped ? "取消头衔" : "设为个人头衔"}
+              </button>
+              {equipFeedback && (
+                <p className="mt-1.5 text-[11.8px]" style={{ color: "var(--ink-secondary)" }}>
+                  {equipFeedback}
+                </p>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -749,7 +907,6 @@ export const WelcomeLoginScreen: React.FC<{
   onPrimaryWebLogin: () => void;
   onBrowserOneClickAuth: () => void;
   onOpenQrLogin?: () => void;
-  onImportAuthCallback?: (raw: string) => Promise<boolean>;
   onOpenSavedAccounts?: () => void;
   onGuestBrowse?: () => void;
   onToggleDark?: () => void;
@@ -762,15 +919,10 @@ export const WelcomeLoginScreen: React.FC<{
   onPrimaryWebLogin,
   onBrowserOneClickAuth,
   onOpenQrLogin,
-  onImportAuthCallback,
   onOpenSavedAccounts,
   onGuestBrowse,
   onToggleDark,
 }) => {
-  const [showPasteBox, setShowPasteBox] = useState(false);
-  const [pasteVal, setPasteVal] = useState("");
-  const [pasteBusy, setPasteBusy] = useState(false);
-  const [pasteErr, setPasteErr] = useState<string | null>(null);
   const isWaitingBrowserCallback = Boolean(
     statusMessage && statusMessage.includes("浏览器")
   );
@@ -840,7 +992,7 @@ export const WelcomeLoginScreen: React.FC<{
               color: "var(--publish-btn-fg)",
             }}
           >
-            <span>使用 LINUX DO 登录</span>
+            <span>使用 Linuxdo 登录</span>
             <LinDoIcons.ArrowRight size={18} />
           </button>
 
@@ -856,8 +1008,8 @@ export const WelcomeLoginScreen: React.FC<{
             <LinDoIcons.Globe size={17} style={{ color: "var(--ink-secondary)" }} />
             <span>
               {isWaitingBrowserCallback
-                ? "重新打开默认浏览器授权页"
-                : "使用默认浏览器一键授权（推荐）"}
+                ? "重新打开浏览器授权"
+                : "系统浏览器授权"}
             </span>
           </button>
 
@@ -872,106 +1024,8 @@ export const WelcomeLoginScreen: React.FC<{
               }}
             >
               <LinDoIcons.QrCode size={16} style={{ color: "var(--ink-secondary)" }} />
-              <span>使用登录二维码 / 口令登录</span>
+              <span>二维码 / 口令登录</span>
             </button>
-          )}
-
-          <p
-            className="px-2 text-center text-[11.5px] leading-relaxed"
-            style={{ color: "var(--ink-tertiary)" }}
-          >
-            默认浏览器若已登录社区可直接点「授权」；未登录时可使用浏览器保存的密码或 Passkey
-          </p>
-
-          {onImportAuthCallback && (isWaitingBrowserCallback || showPasteBox) && (
-            <div className="pt-1">
-              {isWaitingBrowserCallback && (
-                <div
-                  className="mb-2 flex items-start gap-2.5 rounded-xl px-3.5 py-2.5 text-left"
-                  style={{
-                    backgroundColor: "var(--subtle-surface)",
-                    border: "0.5px solid var(--hairline)",
-                  }}
-                >
-                  <span
-                    className="mt-1.5 h-2 w-2 shrink-0 animate-pulse rounded-full"
-                    style={{ backgroundColor: "var(--brand-gold)" }}
-                  />
-                  <div className="min-w-0 flex-1 text-[12px] leading-relaxed" style={{ color: "var(--ink-secondary)" }}>
-                    <div className="font-semibold" style={{ color: "var(--ink-primary)" }}>
-                      正在等待浏览器授权返回…
-                    </div>
-                    <div className="mt-0.5">
-                      请在浏览器点击「授权」，并在弹窗确认「打开 Lindo」。若浏览器拦截了外部跳转，可点击下方手动粘贴完成登录。
-                    </div>
-                  </div>
-                </div>
-              )}
-              {!showPasteBox ? (
-                <button
-                  type="button"
-                  onClick={() => setShowPasteBox(true)}
-                  className="mx-auto block py-1 text-[12px] hover:underline cursor-pointer"
-                  style={{ color: "var(--brand-gold)" }}
-                >
-                  浏览器未自动跳回？粘贴回调链接或 _t 完成登录
-                </button>
-              ) : (
-                <div
-                  className="space-y-2 rounded-xl p-3"
-                  style={{
-                    backgroundColor: "var(--subtle-surface)",
-                    border: "0.5px solid var(--hairline)",
-                  }}
-                >
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="text"
-                      value={pasteVal}
-                      onChange={(e) => {
-                        setPasteVal(e.target.value);
-                        if (pasteErr) setPasteErr(null);
-                      }}
-                      placeholder="粘贴 discourse://auth_redirect?... 或 _t Cookie"
-                      className="h-8 flex-1 rounded-lg bg-transparent px-2.5 text-[12px] outline-none"
-                      style={{
-                        border: "0.5px solid var(--hairline)",
-                        color: "var(--ink-primary)",
-                      }}
-                    />
-                    <button
-                      type="button"
-                      disabled={pasteBusy}
-                      onClick={async () => {
-                        if (!pasteVal.trim()) return;
-                        setPasteBusy(true);
-                        setPasteErr(null);
-                        try {
-                          const ok = await onImportAuthCallback(pasteVal.trim());
-                          if (!ok) setPasteErr("未能解析凭证，请使用最新打开的授权页");
-                        } catch (e: any) {
-                          setPasteErr(e?.message || "凭证导入失败");
-                        } finally {
-                          setPasteBusy(false);
-                        }
-                      }}
-                      className="shrink-0 rounded-lg px-3 py-1.5 text-[12px] font-semibold cursor-pointer disabled:opacity-50"
-                      style={{
-                        backgroundColor: "var(--publish-btn-bg)",
-                        color: "var(--publish-btn-fg)",
-                      }}
-                    >
-                      {pasteBusy ? "验证中" : "完成"}
-                    </button>
-                  </div>
-                  {pasteErr && (
-                    <p className="text-[11.5px]" style={{ color: "var(--error-fg)" }}>
-                      {pasteErr}
-                    </p>
-                  )}
-                </div>
-              )}
-            </div>
           )}
 
           {hasSavedAccounts && onOpenSavedAccounts && (
@@ -1485,13 +1539,31 @@ export const MessagesView: React.FC<{
   const [items, setItems] = useState<NotificationItem[]>([]);
   const [hasMoreNotifs, setHasMoreNotifs] = useState(false);
   const [loadingMoreNotifs, setLoadingMoreNotifs] = useState(false);
+  const [notifsLoadMoreErr, setNotifsLoadMoreErr] = useState<string | null>(null);
   const [pmList, setPmList] = useState<TopicSummary[]>([]);
+  const [pmPage, setPmPage] = useState(0);
+  const [pmHasMore, setPmHasMore] = useState(false);
+  const [loadingMorePms, setLoadingMorePms] = useState(false);
+  const [pmLoadMoreErr, setPmLoadMoreErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const [pmRecipient, setPmRecipient] = useState("");
   const [pmTitle, setPmTitle] = useState("");
   const [pmBody, setPmBody] = useState("");
+  const [pmPreviewMode, setPmPreviewMode] = useState(false);
+  const [pmEmojiOpen, setPmEmojiOpen] = useState(false);
+  const [pmLinkOpen, setPmLinkOpen] = useState(false);
+  const [pmLinkMode, setPmLinkMode] = useState<"TOPIC" | "URL">("TOPIC");
+  const [pmTopicQuery, setPmTopicQuery] = useState("");
+  const [pmTopicHits, setPmTopicHits] = useState<CommunitySearchHit[]>([]);
+  const [pmRecentTopics, setPmRecentTopics] = useState<CommunitySearchHit[]>([]);
+  const [pmTopicLoading, setPmTopicLoading] = useState(false);
+  const [pmLinkUrl, setPmLinkUrl] = useState("");
+  const [pmLinkText, setPmLinkText] = useState("");
+  const [pmLinkErr, setPmLinkErr] = useState(false);
+  const [pmCustomEmojis, setPmCustomEmojis] = useState<CustomEmojiItem[]>([]);
+  const [pmPendingExitAction, setPmPendingExitAction] = useState<(() => void) | null>(null);
   const [pmAttempted, setPmAttempted] = useState(false);
   const [pmSending, setPmSending] = useState(false);
   const [pmUploading, setPmUploading] = useState(false);
@@ -1620,6 +1692,7 @@ export const MessagesView: React.FC<{
   const loadMoreNotifications = async () => {
     if (!isAuthorized || loadingMoreNotifs || !hasMoreNotifs) return;
     setLoadingMoreNotifs(true);
+    setNotifsLoadMoreErr(null);
     try {
       const more = await fetchNotifications(items.length);
       setItems((prev) => {
@@ -1627,8 +1700,8 @@ export const MessagesView: React.FC<{
         return [...prev, ...more.filter((x) => !seen.has(x.id))];
       });
       setHasMoreNotifs(more.length >= 55);
-    } catch {
-      setHasMoreNotifs(false);
+    } catch (err: any) {
+      setNotifsLoadMoreErr(err?.message || "加载更早通知失败，请重试");
     } finally {
       setLoadingMoreNotifs(false);
     }
@@ -1638,14 +1711,130 @@ export const MessagesView: React.FC<{
     if (!isAuthorized || !currentUser?.username) return;
     setLoading(true);
     setLoadError(null);
+    setPmLoadMoreErr(null);
     try {
       const list = await fetchPrivateMessages(currentUser.username, box, 0);
       setPmList(list);
+      setPmPage(0);
+      setPmHasMore(list.length >= 25);
     } catch (err: any) {
       setLoadError(err?.message || "私信加载失败，请重试");
     } finally {
       setLoading(false);
     }
+  };
+
+  const loadMorePms = async () => {
+    if (!isAuthorized || !currentUser?.username || loadingMorePms || !pmHasMore) return;
+    const nextPage = pmPage + 1;
+    setLoadingMorePms(true);
+    setPmLoadMoreErr(null);
+    try {
+      const more = await fetchPrivateMessages(currentUser.username, pmBox, nextPage);
+      setPmList((prev) => {
+        const seen = new Set(prev.map((x) => x.id));
+        return [...prev, ...more.filter((x) => !seen.has(x.id))];
+      });
+      setPmPage(nextPage);
+      setPmHasMore(more.length >= 25);
+    } catch (err: any) {
+      setPmLoadMoreErr(err?.message || "加载更多私信失败，请重试");
+    } finally {
+      setLoadingMorePms(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!pmEmojiOpen || pmCustomEmojis.length > 0) return;
+    let alive = true;
+    fetchSiteCustomEmojis()
+      .then((list) => {
+        if (alive) setPmCustomEmojis(list);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [pmEmojiOpen, pmCustomEmojis.length]);
+
+  useEffect(() => {
+    if (!pmLinkOpen || pmLinkMode !== "TOPIC") return;
+    const q = pmTopicQuery.trim();
+    let cancelled = false;
+    if (!q) {
+      setPmTopicHits([]);
+      if (pmRecentTopics.length === 0) {
+        setPmTopicLoading(true);
+        fetchRecentTopicsForLinkPicker(15)
+          .then((list) => {
+            if (!cancelled) setPmRecentTopics(list);
+          })
+          .catch(() => {
+            if (!cancelled) setPmRecentTopics([]);
+          })
+          .finally(() => {
+            if (!cancelled) setPmTopicLoading(false);
+          });
+      }
+      return () => {
+        cancelled = true;
+      };
+    }
+    if (!isValidSearchQuery(q)) {
+      setPmTopicHits([]);
+      return;
+    }
+    const timer = setTimeout(() => {
+      setPmTopicLoading(true);
+      searchTopicsForLinkPicker(q)
+        .then((list) => {
+          if (!cancelled) setPmTopicHits(list);
+        })
+        .catch(() => {
+          if (!cancelled) setPmTopicHits([]);
+        })
+        .finally(() => {
+          if (!cancelled) setPmTopicLoading(false);
+        });
+    }, 240);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [pmLinkOpen, pmLinkMode, pmTopicQuery, pmRecentTopics.length]);
+
+  const hasUnsavedPmContent =
+    subTab === "COMPOSE_PM" &&
+    Boolean(pmRecipient.trim() || pmTitle.trim() || pmBody.trim());
+
+  const guardPmExit = (action: () => void) => {
+    if (hasUnsavedPmContent) {
+      setPmPendingExitAction(() => action);
+    } else {
+      action();
+    }
+  };
+
+  const wrapPmSelection = (before: string, after = "", placeholder = "") => {
+    const el = pmTextareaRef.current;
+    const cur = pmBodyRef.current;
+    if (!el) {
+      const next = `${cur}${before}${placeholder}${after}`;
+      pmBodyRef.current = next;
+      setPmBody(next);
+      return;
+    }
+    const start = el.selectionStart ?? cur.length;
+    const end = el.selectionEnd ?? cur.length;
+    const selected = cur.slice(start, end) || placeholder;
+    const next = `${cur.slice(0, start)}${before}${selected}${after}${cur.slice(end)}`;
+    pmBodyRef.current = next;
+    setPmBody(next);
+    requestAnimationFrame(() => {
+      el.focus();
+      const cursor = start + before.length + selected.length;
+      el.setSelectionRange(cursor, cursor);
+    });
   };
 
   const [pmActionNotice, setPmActionNotice] = useState<string | null>(null);
@@ -1667,19 +1856,9 @@ export const MessagesView: React.FC<{
   }, [isAuthorized, subTab, pmBox, currentUser?.username, pmRefreshNonce]);
 
   const filteredItems = items.filter((n) => {
+    if (catFilter === "ALL") return true;
     if (catFilter === "UNREAD") return !n.read;
-    if (catFilter === "REPLY")
-      return Boolean(n.isConsolidatedReplies) || [2, 9, 17, 37, 801, 802].includes(n.notificationType);
-    if (catFilter === "MENTION") return [1, 3, 15, 29, 32, 33].includes(n.notificationType);
-    if (catFilter === "REACTION") return [5, 19, 25, 38, 40, 43, 803].includes(n.notificationType);
-    if (catFilter === "SYSTEM")
-      return (
-        !n.isConsolidatedReplies &&
-        ![1, 2, 3, 5, 9, 15, 17, 19, 25, 29, 32, 33, 37, 38, 40, 43, 801, 802, 803].includes(
-          n.notificationType
-        )
-      );
-    return true;
+    return classifyNotificationCategory(n) === catFilter;
   });
 
   const msgSelectedInList =
@@ -1776,9 +1955,15 @@ export const MessagesView: React.FC<{
               <button
                 type="button"
                 onClick={() => {
-                  setPmAttempted(false);
-                  setPmFeedback(null);
-                  setSubTab(subTab === "COMPOSE_PM" ? "PM" : "COMPOSE_PM");
+                  const switchSub = () => {
+                    setPmAttempted(false);
+                    setPmFeedback(null);
+                    setPmPreviewMode(false);
+                    setPmEmojiOpen(false);
+                    setSubTab(subTab === "COMPOSE_PM" ? "PM" : "COMPOSE_PM");
+                  };
+                  if (subTab === "COMPOSE_PM") guardPmExit(switchSub);
+                  else switchSub();
                 }}
                 className="lindo-interactive flex items-center gap-1 rounded-lg px-2.5 py-1 text-[12.5px] font-semibold"
                 style={{ color: "var(--active-chip-text)" }}
@@ -1797,7 +1982,7 @@ export const MessagesView: React.FC<{
         </div>
 
         {isAuthorized && (
-          <div className="lindo-no-drag mt-2 flex items-center gap-5 text-[13.5px]">
+          <div className="lindo-no-drag mt-2 flex select-none items-center gap-5 text-[13.5px]">
             {[
               { key: "NOTIFICATIONS", label: "通知" },
               { key: "PM", label: "私信" },
@@ -1810,16 +1995,22 @@ export const MessagesView: React.FC<{
                   key={t.key}
                   type="button"
                   onClick={() => {
-                    if (t.key === "CHAT") onOpenChat();
-                    else setSubTab(t.key as any);
+                    const go = () => {
+                      if (t.key === "CHAT") onOpenChat();
+                      else setSubTab(t.key as any);
+                    };
+                    if (subTab === "COMPOSE_PM" && t.key !== "PM") guardPmExit(go);
+                    else go();
                   }}
-                  className="relative pb-2 cursor-pointer"
+                  className="relative pb-2 transition-colors cursor-pointer"
                   style={{
                     color: active ? "var(--ink-primary)" : "var(--ink-secondary)",
                     fontWeight: active ? 600 : 400,
                   }}
                 >
-                  <span>{t.label}</span>
+                  <span className="lindo-tab-label" data-label={t.label}>
+                    <span>{t.label}</span>
+                  </span>
                   {active && (
                     <span
                       className="absolute inset-x-0.5 bottom-0 h-[2.5px] rounded-full"
@@ -1968,33 +2159,371 @@ export const MessagesView: React.FC<{
                 )}
               </div>
 
-              <div className="relative">
-                <textarea
-                  ref={pmTextareaRef}
-                  value={pmBody}
-                  onChange={(e) => setPmBody(e.target.value)}
-                  onPaste={(e) =>
-                    handleComposerTextareaPaste(e, {
-                      textarea: pmTextareaRef.current,
-                      value: pmBodyRef.current,
-                      onUploadFiles: (files) => {
-                        void uploadPmFiles(files);
-                      },
-                      onInsertText: insertPmTextAtCursor,
-                    })
-                  }
-                  placeholder="写下私信内容（支持 Markdown 与直接粘贴图片）..."
-                  rows={6}
-                  className="w-full rounded-xl bg-transparent p-3 text-[13.5px] outline-none resize-none"
+              {/* PM Markdown 工具栏 + 表情选择 + 编辑/预览切换 (`P1-7`) */}
+              <div className="flex flex-wrap items-center justify-between gap-1.5">
+                <div className="flex flex-wrap items-center gap-0.5">
+                  <button
+                    type="button"
+                    title="粗体"
+                    onClick={() => {
+                      setPmPreviewMode(false);
+                      wrapPmSelection("**", "**", "粗体文字");
+                    }}
+                    className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-md"
+                    style={{ color: "var(--ink-secondary)" }}
+                  >
+                    <LinDoIcons.Bold size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    title="斜体"
+                    onClick={() => {
+                      setPmPreviewMode(false);
+                      wrapPmSelection("*", "*", "斜体文字");
+                    }}
+                    className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-md"
+                    style={{ color: "var(--ink-secondary)" }}
+                  >
+                    <LinDoIcons.Italic size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    title="代码"
+                    onClick={() => {
+                      setPmPreviewMode(false);
+                      wrapPmSelection("`", "`", "代码");
+                    }}
+                    className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-md"
+                    style={{ color: "var(--ink-secondary)" }}
+                  >
+                    <LinDoIcons.Code size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    title="引用社区帖子或插入链接"
+                    onClick={() => {
+                      setPmPreviewMode(false);
+                      setPmEmojiOpen(false);
+                      if (pmLinkOpen) {
+                        setPmLinkOpen(false);
+                      } else {
+                        setPmLinkMode("TOPIC");
+                        setPmLinkOpen(true);
+                      }
+                    }}
+                    className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-md"
+                    style={{ color: pmLinkOpen ? "var(--brand-gold)" : "var(--ink-secondary)" }}
+                  >
+                    <LinDoIcons.Link size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    title="引用"
+                    onClick={() => {
+                      setPmPreviewMode(false);
+                      wrapPmSelection("\n> ", "", "引用内容");
+                    }}
+                    className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-md"
+                    style={{ color: "var(--ink-secondary)" }}
+                  >
+                    <LinDoIcons.Quote size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    title="插入表情"
+                    onClick={() => setPmEmojiOpen((v) => !v)}
+                    className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-md"
+                    style={{
+                      color: pmEmojiOpen ? "var(--brand-gold)" : "var(--ink-secondary)",
+                    }}
+                  >
+                    <LinDoIcons.Smile size={14} />
+                  </button>
+                </div>
+
+                <div
+                  className="flex items-center rounded-md p-0.5 text-[11.5px]"
                   style={{
                     backgroundColor: "var(--subtle-surface)",
-                    border:
-                      pmAttempted && !pmBody.trim()
-                        ? "0.5px solid var(--error-border)"
-                        : "0.5px solid var(--hairline)",
-                    color: "var(--ink-primary)",
+                    border: "0.5px solid var(--hairline)",
                   }}
-                />
+                >
+                  <button
+                    type="button"
+                    onClick={() => setPmPreviewMode(false)}
+                    className="rounded px-2 py-0.5 font-medium cursor-pointer"
+                    style={{
+                      backgroundColor: !pmPreviewMode ? "var(--card-surface)" : "transparent",
+                      color: !pmPreviewMode ? "var(--ink-primary)" : "var(--ink-tertiary)",
+                    }}
+                  >
+                    编辑
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPmPreviewMode(true)}
+                    className="rounded px-2 py-0.5 font-medium cursor-pointer"
+                    style={{
+                      backgroundColor: pmPreviewMode ? "var(--card-surface)" : "transparent",
+                      color: pmPreviewMode ? "var(--ink-primary)" : "var(--ink-tertiary)",
+                    }}
+                  >
+                    预览
+                  </button>
+                </div>
+              </div>
+
+              {pmLinkOpen && (
+                <div
+                  className="space-y-2 rounded-xl p-2.5"
+                  style={{
+                    backgroundColor: "var(--subtle-surface)",
+                    border: "0.5px solid var(--hairline)",
+                  }}
+                >
+                  <div role="tablist" aria-label="私信链接模式" className="flex items-center gap-1.5 text-[11.5px]">
+                    {[
+                      { key: "TOPIC", label: "引用社区帖子" },
+                      { key: "URL", label: "外部链接" },
+                    ].map((m) => (
+                      <button
+                        key={m.key}
+                        type="button"
+                        role="tab"
+                        aria-selected={pmLinkMode === m.key}
+                        onClick={() => setPmLinkMode(m.key as "TOPIC" | "URL")}
+                        className="rounded-full px-2.5 py-0.5 font-medium cursor-pointer"
+                        style={{
+                          backgroundColor:
+                            pmLinkMode === m.key ? "var(--active-chip-bg)" : "var(--card-surface)",
+                          color:
+                            pmLinkMode === m.key ? "var(--active-chip-text)" : "var(--ink-secondary)",
+                        }}
+                      >
+                        {m.label}
+                      </button>
+                    ))}
+                  </div>
+                  {pmLinkMode === "TOPIC" ? (
+                    (() => {
+                      const q = pmTopicQuery.trim();
+                      const list = q ? pmTopicHits : pmRecentTopics;
+                      return (
+                        <div className="space-y-1.5">
+                          <input
+                            type="text"
+                            autoFocus
+                            value={pmTopicQuery}
+                            onChange={(e) => setPmTopicQuery(e.target.value)}
+                            placeholder="搜索要引用的社区帖子（支持单字中文）..."
+                            className="h-7 w-full rounded-lg px-2.5 text-[12px] outline-none"
+                            style={{
+                              backgroundColor: "var(--card-surface)",
+                              border: "0.5px solid var(--hairline)",
+                              color: "var(--ink-primary)",
+                            }}
+                          />
+                          {pmTopicLoading ? (
+                            <div className="text-[11.5px]" style={{ color: "var(--ink-tertiary)" }}>
+                              {q ? "正在检索话题..." : "正在加载近期社区话题..."}
+                            </div>
+                          ) : list.length > 0 ? (
+                            <div
+                              className="max-h-[130px] overflow-y-auto rounded-lg divide-y lindo-scroll"
+                              style={{
+                                backgroundColor: "var(--card-surface)",
+                                border: "0.5px solid var(--hairline)",
+                              }}
+                            >
+                              {list.map((hit) => (
+                                <button
+                                  key={hit.id}
+                                  type="button"
+                                  onClick={() => {
+                                    const url =
+                                      hit.postNumber > 1
+                                        ? `https://linux.do/t/topic/${hit.topicId}/${hit.postNumber}`
+                                        : `https://linux.do/t/topic/${hit.topicId}`;
+                                    insertPmTextAtCursor(`[${hit.title}](${url}) `);
+                                    setPmTopicQuery("");
+                                    setPmLinkOpen(false);
+                                  }}
+                                  className="lindo-interactive flex w-full items-center justify-between gap-2 px-2.5 py-1.5 text-left text-[12px]"
+                                >
+                                  <span className="truncate font-medium" style={{ color: "var(--ink-primary)" }}>
+                                    {hit.title}
+                                  </span>
+                                  <span className="shrink-0 text-[10.8px]" style={{ color: "var(--ink-tertiary)" }}>
+                                    @{hit.username}
+                                  </span>
+                                </button>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+                      );
+                    })()
+                  ) : (
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <input
+                        type="text"
+                        autoFocus
+                        value={pmLinkUrl}
+                        onChange={(e) => {
+                          setPmLinkUrl(e.target.value);
+                          setPmLinkErr(false);
+                        }}
+                        placeholder="https://..."
+                        className="h-7 flex-1 min-w-[140px] rounded-lg px-2 text-[12px] outline-none"
+                        style={{
+                          backgroundColor: "var(--card-surface)",
+                          border: pmLinkErr
+                            ? "0.5px solid var(--error-border)"
+                            : "0.5px solid var(--hairline)",
+                          color: "var(--ink-primary)",
+                        }}
+                      />
+                      <input
+                        type="text"
+                        value={pmLinkText}
+                        onChange={(e) => setPmLinkText(e.target.value)}
+                        placeholder="显示文本（选填）"
+                        className="h-7 w-28 rounded-lg px-2 text-[12px] outline-none"
+                        style={{
+                          backgroundColor: "var(--card-surface)",
+                          border: "0.5px solid var(--hairline)",
+                          color: "var(--ink-primary)",
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const addr = pmLinkUrl.trim();
+                          const normalized =
+                            addr && !/^https?:\/\//i.test(addr) ? `https://${addr}` : addr;
+                          try {
+                            const u = new URL(normalized);
+                            if (!u.hostname) throw new Error("invalid");
+                            const label = pmLinkText.trim() || normalized;
+                            insertPmTextAtCursor(`[${label}](<${normalized}>) `);
+                            setPmLinkUrl("");
+                            setPmLinkText("");
+                            setPmLinkOpen(false);
+                          } catch {
+                            setPmLinkErr(true);
+                          }
+                        }}
+                        className="rounded-lg px-2.5 py-1 text-[11.8px] font-semibold cursor-pointer"
+                        style={{
+                          backgroundColor: "var(--publish-btn-bg)",
+                          color: "var(--publish-btn-fg)",
+                        }}
+                      >
+                        插入链接
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {pmEmojiOpen && (
+                <div
+                  className="space-y-1.5 rounded-xl p-2"
+                  style={{
+                    backgroundColor: "var(--subtle-surface)",
+                    border: "0.5px solid var(--hairline)",
+                  }}
+                >
+                  <div className="flex flex-wrap gap-0.5">
+                    {["😀", "😂", "👍", "🙏", "🎉", "🔥", "❤️", "🚀", "🤔", "🫡", "🤝", "✨"].map(
+                      (em) => (
+                        <button
+                          key={em}
+                          type="button"
+                          onClick={() => {
+                            setPmPreviewMode(false);
+                            insertPmTextAtCursor(em);
+                          }}
+                          className="lindo-interactive rounded p-1 text-[15px] cursor-pointer"
+                        >
+                          {em}
+                        </button>
+                      )
+                    )}
+                  </div>
+                  {pmCustomEmojis.length > 0 && (
+                    <div
+                      className="flex flex-wrap gap-1 pt-1"
+                      style={{ borderTop: "0.5px solid var(--hairline)" }}
+                    >
+                      {pmCustomEmojis.slice(0, 16).map((ce) => (
+                        <button
+                          key={ce.name}
+                          type="button"
+                          title={`:${ce.name}:`}
+                          onClick={() => {
+                            setPmPreviewMode(false);
+                            insertPmTextAtCursor(` :${ce.name}: `);
+                          }}
+                          className="lindo-interactive inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px]"
+                          style={{
+                            backgroundColor: "var(--card-surface)",
+                            border: "0.5px solid var(--hairline)",
+                            color: "var(--ink-secondary)",
+                          }}
+                        >
+                          <img src={ce.url} alt={`:${ce.name}:`} className="h-3.5 w-3.5 object-contain" />
+                          <span>:{ce.name}:</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="relative">
+                {pmPreviewMode ? (
+                  <div
+                    className="lindo-cooked min-h-[144px] rounded-xl p-3 text-[13.5px] leading-relaxed"
+                    style={{
+                      backgroundColor: "var(--subtle-surface)",
+                      border: "0.5px solid var(--hairline)",
+                      color: "var(--ink-primary)",
+                    }}
+                    dangerouslySetInnerHTML={{
+                      __html: pmBody.trim()
+                        ? prepareCookedHtml(renderDiscourseMarkdownPreview(pmBody))
+                        : '<p style="opacity:0.55">暂无私信内容可预览</p>',
+                    }}
+                  />
+                ) : (
+                  <textarea
+                    ref={pmTextareaRef}
+                    value={pmBody}
+                    onChange={(e) => setPmBody(e.target.value)}
+                    onPaste={(e) =>
+                      handleComposerTextareaPaste(e, {
+                        textarea: pmTextareaRef.current,
+                        value: pmBodyRef.current,
+                        onUploadFiles: (files) => {
+                          void uploadPmFiles(files);
+                        },
+                        onInsertText: insertPmTextAtCursor,
+                      })
+                    }
+                    placeholder="写下私信内容（支持 Markdown 与直接粘贴图片）..."
+                    rows={6}
+                    className="w-full rounded-xl bg-transparent p-3 text-[13.5px] outline-none resize-none"
+                    style={{
+                      backgroundColor: "var(--subtle-surface)",
+                      border:
+                        pmAttempted && !pmBody.trim()
+                          ? "0.5px solid var(--error-border)"
+                          : "0.5px solid var(--hairline)",
+                      color: "var(--ink-primary)",
+                    }}
+                  />
+                )}
                 <input
                   ref={pmFileInputRef}
                   type="file"
@@ -2129,7 +2658,8 @@ export const MessagesView: React.FC<{
                     : "收件箱暂无私信"}
               </div>
             ) : (
-              pmList.map((pm) => {
+              <div>
+                {pmList.map((pm) => {
                 const selected = selectedTopicId === pm.id;
                 const canArchiveToggle = pmBox === "inbox" || pmBox === "archive";
                 return (
@@ -2222,11 +2752,58 @@ export const MessagesView: React.FC<{
                     <div className="lindo-divider-inset" />
                   </React.Fragment>
                 );
-              })
+              })}
+                {pmHasMore && (
+                  <div className="py-3 text-center">
+                    {pmLoadMoreErr && (
+                      <div className="mb-1 text-[11.5px]" style={{ color: "var(--error-fg)" }}>
+                        {pmLoadMoreErr}
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      disabled={loadingMorePms}
+                      onClick={() => void loadMorePms()}
+                      className="lindo-interactive rounded-full px-4 py-1 text-[12px] font-medium"
+                      style={{ color: "var(--active-chip-text)" }}
+                    >
+                      {loadingMorePms
+                        ? "正在加载更多..."
+                        : pmLoadMoreErr
+                          ? "重试加载更多私信"
+                          : "加载更多私信"}
+                    </button>
+                  </div>
+                )}
+              </div>
             )
           ) : filteredItems.length === 0 ? (
-            <div className="p-12 text-center text-[13px]" style={{ color: "var(--ink-tertiary)" }}>
-              {catFilter === "UNREAD" ? "太棒了，所有通知均已读" : "暂无该类别通知"}
+            <div className="p-12 text-center">
+              <div className="text-[13px]" style={{ color: "var(--ink-tertiary)" }}>
+                {catFilter === "UNREAD" ? "太棒了，所有通知均已读" : "暂无该类别通知"}
+              </div>
+              {hasMoreNotifs && (
+                <div className="mt-4">
+                  {notifsLoadMoreErr && (
+                    <div className="mb-1 text-[11.5px]" style={{ color: "var(--error-fg)" }}>
+                      {notifsLoadMoreErr}
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    disabled={loadingMoreNotifs}
+                    onClick={loadMoreNotifications}
+                    className="lindo-interactive rounded-full px-4 py-1 text-[12px] font-medium"
+                    style={{ color: "var(--active-chip-text)" }}
+                  >
+                    {loadingMoreNotifs
+                      ? "正在加载更多..."
+                      : notifsLoadMoreErr
+                        ? "重试加载更早通知"
+                        : "加载更早通知"}
+                  </button>
+                </div>
+              )}
             </div>
           ) : (
             <div>
@@ -2270,7 +2847,7 @@ export const MessagesView: React.FC<{
                 const cutoutRingColor = !n.read
                   ? isDark
                     ? "#122B35"
-                    : "#E6F4FE"
+                    : "color-mix(in srgb, #0EA5E9 9%, var(--feed-surface))"
                   : selected
                     ? "var(--subtle-surface)"
                     : "var(--card-surface)";
@@ -2381,8 +2958,13 @@ export const MessagesView: React.FC<{
                 );
               })}
 
-              {hasMoreNotifs && catFilter === "ALL" && (
+              {hasMoreNotifs && (
                 <div className="py-3 text-center">
+                  {notifsLoadMoreErr && (
+                    <div className="mb-1 text-[11.5px]" style={{ color: "var(--error-fg)" }}>
+                      {notifsLoadMoreErr}
+                    </div>
+                  )}
                   <button
                     type="button"
                     disabled={loadingMoreNotifs}
@@ -2390,7 +2972,11 @@ export const MessagesView: React.FC<{
                     className="lindo-interactive rounded-full px-4 py-1 text-[12px] font-medium"
                     style={{ color: "var(--active-chip-text)" }}
                   >
-                    {loadingMoreNotifs ? "正在加载更多..." : "加载更早通知"}
+                    {loadingMoreNotifs
+                      ? "正在加载更多..."
+                      : notifsLoadMoreErr
+                        ? "重试加载更早通知"
+                        : "加载更早通知"}
                   </button>
                 </div>
               )}
@@ -2410,7 +2996,7 @@ export const MessagesView: React.FC<{
           }}
           title="回到正在阅读的消息"
           aria-label="回到正在阅读的消息"
-          className="lindo-interactive absolute right-3.5 bottom-3.5 z-20 flex h-8 w-8 items-center justify-center rounded-full shadow-lg active:scale-95"
+          className="lindo-interactive absolute right-3.5 bottom-3.5 z-20 flex h-8 w-8 items-center justify-center rounded-full shadow-lg"
           style={{
             backgroundColor: "var(--subtle-surface)",
             border: "0.5px solid var(--hairline)",
@@ -2450,6 +3036,26 @@ export const MessagesView: React.FC<{
         >
           {pmActionNotice}
         </div>
+      )}
+
+      {pmPendingExitAction && (
+        <ConfirmDialog
+          title="放弃未发送的私信？"
+          detail="当前编写的私信内容尚未发送，离开后将不会保留。"
+          confirmLabel="确认离开"
+          destructive
+          onCancel={() => setPmPendingExitAction(null)}
+          onConfirm={() => {
+            const act = pmPendingExitAction;
+            setPmPendingExitAction(null);
+            setPmRecipient("");
+            setPmTitle("");
+            setPmBody("");
+            setPmPreviewMode(false);
+            setPmEmojiOpen(false);
+            act();
+          }}
+        />
       )}
     </div>
   );
@@ -2919,6 +3525,25 @@ const AuthorFeedbackModal: React.FC<{
   );
 };
 
+export function formatSiteVerifyStatusLabel(params: {
+  cfAttentionNeeded?: boolean;
+  verifyActive?: boolean;
+  lastVerifiedAtMs?: number | null;
+  nowMs?: number;
+}): string {
+  if (params.verifyActive) return "验证中…";
+  if (params.cfAttentionNeeded) return "待验证";
+  if (params.lastVerifiedAtMs != null) {
+    const now = params.nowMs ?? Date.now();
+    const elapsedMs = Math.max(0, now - params.lastVerifiedAtMs);
+    if (elapsedMs < 60_000) return "刚刚已验证";
+    if (elapsedMs < 3_600_000) {
+      return `${Math.floor(elapsedMs / 60_000)} 分钟前已验证`;
+    }
+  }
+  return "刷新验证票据";
+}
+
 /* ==================== 3. 个人中心与设置 (CommunityProfileScreen 1:1 对齐) ==================== */
 export const ProfileSettingsView: React.FC<{
   isAuthorized: boolean;
@@ -2931,7 +3556,7 @@ export const ProfileSettingsView: React.FC<{
   knownTopics: TopicSummary[];
   onUpdatePreferences: (next: UserPreferences) => void;
   onToggleDark: () => void;
-  onPrimaryWebLogin: () => void;
+  onRequestLogin: () => void;
   onOpenAuthSheet: () => void;
   onOpenQrLoginSheet: () => void;
   onRequestGuestLogin: (title: string, subtitle: string) => void;
@@ -2951,6 +3576,10 @@ export const ProfileSettingsView: React.FC<{
   onOpenMessages?: () => void;
   echStatus?: EchDesktopSnapshot | null;
   onRefreshEchStatus?: () => void;
+  cfAttentionNeeded?: boolean;
+  verifyActive?: boolean;
+  lastVerifiedAtMs?: number | null;
+  onTriggerVerify?: () => void;
 }> = ({
   isAuthorized,
   isDark,
@@ -2962,7 +3591,7 @@ export const ProfileSettingsView: React.FC<{
   knownTopics,
   onUpdatePreferences,
   onToggleDark,
-  onPrimaryWebLogin,
+  onRequestLogin,
   onOpenAuthSheet,
   onOpenQrLoginSheet,
   onRequestGuestLogin,
@@ -2982,7 +3611,20 @@ export const ProfileSettingsView: React.FC<{
   onOpenMessages,
   echStatus,
   onRefreshEchStatus,
+  cfAttentionNeeded = false,
+  verifyActive = false,
+  lastVerifiedAtMs = null,
+  onTriggerVerify,
 }) => {
+  const [verifyStatusNowMs, setVerifyStatusNowMs] = useState<number>(() => Date.now());
+  useEffect(() => {
+    if (lastVerifiedAtMs == null) return;
+    setVerifyStatusNowMs(Date.now());
+    const id = window.setInterval(() => {
+      setVerifyStatusNowMs(Date.now());
+    }, 30_000);
+    return () => window.clearInterval(id);
+  }, [lastVerifiedAtMs]);
   const [expandedRow, setExpandedRow] = useState<
     "appearance" | "theme" | "density" | "font" | "ech" | null
   >(null);
@@ -2993,10 +3635,16 @@ export const ProfileSettingsView: React.FC<{
     | "activity"
     | "follows"
     | "badges"
+    | "account_preferences"
     | "diagnostics"
     | "about"
     | null
   >(null);
+  const [accountPrefs, setAccountPrefs] = useState<UserAccountPreferencesSnapshot | null>(null);
+  const [accountPrefsError, setAccountPrefsError] = useState<string | null>(null);
+  const [accountPrefsSaving, setAccountPrefsSaving] = useState(false);
+  const [accountPrefsToggleError, setAccountPrefsToggleError] = useState<string | null>(null);
+  const [accountPrefsNonce, setAccountPrefsNonce] = useState(0);
   const [showAuthorFeedback, setShowAuthorFeedback] = useState(false);
   const [diagFilter, setDiagFilter] = useState<DiagCategory | "ALL">("ALL");
   const [diagQuery, setDiagQuery] = useState("");
@@ -3073,6 +3721,10 @@ export const ProfileSettingsView: React.FC<{
   }, [currentUser?.username, isAuthorized]);
 
   const [bookmarks, setBookmarks] = useState<any[]>([]);
+  const [bookmarksPage, setBookmarksPage] = useState(0);
+  const [bookmarksHasMore, setBookmarksHasMore] = useState(false);
+  const [loadingMoreBookmarks, setLoadingMoreBookmarks] = useState(false);
+  const [bookmarksError, setBookmarksError] = useState<string | null>(null);
   const [historyTopics, setHistoryTopics] = useState<TopicSummary[]>([]);
   const [localHistory, setLocalHistory] = useState<LocalHistoryItem[]>([]);
   const [historyPage, setHistoryPage] = useState(0);
@@ -3086,12 +3738,20 @@ export const ProfileSettingsView: React.FC<{
   const [historyCloudHits, setHistoryCloudHits] = useState<SearchableHistoryItem[]>([]);
   const [historyCloudSearching, setHistoryCloudSearching] = useState(false);
   const [cloudDrafts, setCloudDrafts] = useState<CloudDraftItem[]>([]);
+  const [showClearAllDraftsConfirm, setShowClearAllDraftsConfirm] = useState(false);
   const [activityFilter, setActivityFilter] = useState<"1,4,5" | "4" | "5" | "1">("1,4,5");
   const [activities, setActivities] = useState<any[]>([]);
+  const [activityHasMore, setActivityHasMore] = useState(false);
+  const [loadingMoreActivity, setLoadingMoreActivity] = useState(false);
+  const [activityError, setActivityError] = useState<string | null>(null);
   const [followTab, setFollowTab] = useState<"following" | "followers">("following");
   const [followUsers, setFollowUsers] = useState<FollowUserEntry[]>([]);
   const [badgeTab, setBadgeTab] = useState<"mine" | "site">("mine");
   const [badges, setBadges] = useState<any[]>([]);
+  const [earnedBadgeIds, setEarnedBadgeIds] = useState<Set<number>>(new Set());
+  const [badgeSearchQuery, setBadgeSearchQuery] = useState("");
+  const [badgeTierFilter, setBadgeTierFilter] = useState<"ALL" | "GOLD" | "SILVER" | "BRONZE" | "EARNED">("ALL");
+  const [subRetryNonce, setSubRetryNonce] = useState(0);
   const [subLoading, setSubLoading] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
@@ -3111,9 +3771,16 @@ export const ProfileSettingsView: React.FC<{
     if (!subSheet) return;
     if (subSheet === "bookmarks" && isAuthorized && currentUser?.username) {
       setSubLoading(true);
-      fetchUserBookmarks(currentUser.username)
-        .then(setBookmarks)
-        .catch(() => {})
+      setBookmarksError(null);
+      setBookmarksPage(0);
+      fetchUserBookmarksPage(currentUser.username, 0)
+        .then((res) => {
+          setBookmarks(res.bookmarks);
+          setBookmarksHasMore(res.hasMore);
+        })
+        .catch((err: any) => {
+          setBookmarksError(err?.message || "书签加载失败，请重试");
+        })
         .finally(() => setSubLoading(false));
     } else if (subSheet === "history") {
       const localSnap = getLocalTopicHistory();
@@ -3147,27 +3814,57 @@ export const ProfileSettingsView: React.FC<{
         .finally(() => setSubLoading(false));
     } else if (subSheet === "activity" && isAuthorized && currentUser?.username) {
       setSubLoading(true);
-      fetchUserActions(currentUser.username, activityFilter)
-        .then(setActivities)
-        .catch(() => {})
+      setActivityError(null);
+      fetchUserActions(currentUser.username, activityFilter, 0)
+        .then((list) => {
+          setActivities(list);
+          setActivityHasMore(list.length >= 25);
+        })
+        .catch((err: any) => {
+          setActivityError(err?.message || "动态加载失败，请重试");
+        })
         .finally(() => setSubLoading(false));
     } else if (subSheet === "follows" && isAuthorized && currentUser?.username) {
       setSubLoading(true);
-      fetchUserFollowList(currentUser.username, followTab === "followers")
+      fetchUserFollowList(currentUser.username, followTab === "followers", currentUser.username)
         .then(setFollowUsers)
         .catch(() => setFollowUsers([]))
         .finally(() => setSubLoading(false));
     } else if (subSheet === "badges") {
       setSubLoading(true);
-      const p =
-        badgeTab === "mine" && isAuthorized && currentUser?.username
-          ? fetchUserBadges(currentUser.username)
-          : fetchSiteBadges();
-      p.then(setBadges)
+      const isMine = badgeTab === "mine" && isAuthorized && Boolean(currentUser?.username);
+      const p = isMine
+        ? fetchUserBadges(currentUser!.username)
+        : Promise.all([
+            fetchSiteBadges(),
+            isAuthorized && currentUser?.username
+              ? fetchUserBadges(currentUser.username).catch(() => [])
+              : Promise.resolve([]),
+          ]).then(([siteList, mineList]) => {
+            setEarnedBadgeIds(new Set(mineList.map((m: any) => Number(m.id ?? m.badge_id ?? 0)).filter(Boolean)));
+            return siteList;
+          });
+      p.then((list) => {
+        setBadges(list);
+        if (isMine) {
+          setEarnedBadgeIds(new Set(list.map((m: any) => Number(m.id ?? m.badge_id ?? 0)).filter(Boolean)));
+        }
+      })
         .catch(() => {})
         .finally(() => setSubLoading(false));
+    } else if (subSheet === "account_preferences" && isAuthorized && currentUser?.username) {
+      setSubLoading(true);
+      setAccountPrefsError(null);
+      setAccountPrefsToggleError(null);
+      fetchUserAccountPreferences(currentUser.username)
+        .then(setAccountPrefs)
+        .catch((err: any) => {
+          setAccountPrefs(null);
+          setAccountPrefsError(err?.message || "加载账号与偏好失败，请重试");
+        })
+        .finally(() => setSubLoading(false));
     }
-  }, [subSheet, isAuthorized, currentUser?.username, activityFilter, followTab, badgeTab]);
+  }, [subSheet, isAuthorized, currentUser?.username, activityFilter, followTab, badgeTab, accountPrefsNonce, subRetryNonce]);
 
   // 阅读历史云端深度补查（已登录时防抖请求 Discourse `in:seen`，仅响应已上屏词 + 60s 缓存 + 竞态保护）
   useEffect(() => {
@@ -3291,8 +3988,8 @@ export const ProfileSettingsView: React.FC<{
                     type="button"
                     onClick={() =>
                       onRequestGuestLogin(
-                        "欢迎登录 LINUX DO",
-                        "登录后自动同步个人资料、Connect 保级、收藏与通知"
+                        "登录 LINUX DO",
+                        "同步个人资料、收藏与通知"
                       )
                     }
                     className="flex h-[52px] w-[52px] shrink-0 items-center justify-center rounded-full cursor-pointer"
@@ -3375,7 +4072,7 @@ export const ProfileSettingsView: React.FC<{
                   )}
                   <button
                     type="button"
-                    onClick={onPrimaryWebLogin}
+                    onClick={onRequestLogin}
                     className="lindo-interactive rounded-lg px-2.5 py-1.5 text-[14px] font-semibold"
                     style={{ color: "var(--active-chip-text)" }}
                   >
@@ -3476,6 +4173,20 @@ export const ProfileSettingsView: React.FC<{
               }}
             />
             <SettingRow
+              icon={<LinDoIcons.ShieldCheck size={19} />}
+              title="账号与偏好"
+              onClick={() => {
+                if (isAuthorized && currentUser) {
+                  setSubSheet("account_preferences");
+                } else {
+                  onRequestGuestLogin(
+                    "登录后管理账号与偏好",
+                    "查看隐私开关、私信权限与账号安全状态"
+                  );
+                }
+              }}
+            />
+            <SettingRow
               icon={<LinDoIcons.Globe size={19} />}
               title="账号管理"
               value={
@@ -3490,7 +4201,7 @@ export const ProfileSettingsView: React.FC<{
             <SettingRow
               icon={<LinDoIcons.QrCode size={19} />}
               title="登录二维码"
-              value={isAuthorized && currentUser ? "手机扫码登录" : "口令 / 二维码登录"}
+              value={isAuthorized && currentUser ? "生成二维码与口令" : "二维码 / 口令登录"}
               hideDivider
               onClick={onOpenQrLoginSheet}
             />
@@ -3692,6 +4403,23 @@ export const ProfileSettingsView: React.FC<{
                   </ExpandableSetting>
                 );
               })()}
+            <SettingRow
+              icon={<LinDoIcons.ShieldCheck size={19} />}
+              title="站点安全验证"
+              dot={Boolean(cfAttentionNeeded) && !verifyActive}
+              highlightValue={Boolean(cfAttentionNeeded) && !verifyActive}
+              valueColor={cfAttentionNeeded && !verifyActive ? "var(--brand-gold)" : undefined}
+              value={formatSiteVerifyStatusLabel({
+                cfAttentionNeeded,
+                verifyActive,
+                lastVerifiedAtMs,
+                nowMs: verifyStatusNowMs,
+              })}
+              onClick={() => {
+                if (verifyActive) return;
+                onTriggerVerify?.();
+              }}
+            />
             <ToggleSettingRow
               icon={<LinDoIcons.Sparkles size={19} />}
               title="界面与头像动效"
@@ -3819,12 +4547,43 @@ export const ProfileSettingsView: React.FC<{
       {showClearCacheConfirm && (
         <ConfirmDialog
           title="清理缓存？"
-          detail="将清理本地图片与解析缓存，不会退出已登录账号。"
+          detail="将清理本地图片、接口与解析缓存，不会退出已登录账号，也不会删除草稿与偏好设置。"
           confirmLabel="清理"
           onCancel={() => setShowClearCacheConfirm(false)}
-          onConfirm={() => {
+          onConfirm={async () => {
             setShowClearCacheConfirm(false);
-            setCacheClearedNotice("已清理");
+            const res = await clearLocalCachesInRust();
+            const label =
+              res.freedBytes >= 1024 * 1024
+                ? `已清理 ${(res.freedBytes / (1024 * 1024)).toFixed(1)} MB`
+                : res.freedBytes >= 1024
+                  ? `已清理 ${Math.round(res.freedBytes / 1024)} KB`
+                  : res.clearedEntries > 0
+                    ? `已清理 ${res.clearedEntries} 项缓存`
+                    : "已清理";
+            setCacheClearedNotice(label);
+            setToast(label);
+          }}
+        />
+      )}
+
+      {/* 清空全部草稿确认框 (`P1-4`) */}
+      {showClearAllDraftsConfirm && (
+        <ConfirmDialog
+          title="清空全部草稿？"
+          detail="将永久删除所有本地与云端未发送草稿，此操作不可撤销。"
+          confirmLabel="全部清空"
+          destructive
+          onCancel={() => setShowClearAllDraftsConfirm(false)}
+          onConfirm={async () => {
+            setShowClearAllDraftsConfirm(false);
+            await Promise.all([
+              ...localDraftList.map((d) => deleteLocalDraftInRust(d.key).catch(() => {})),
+              ...cloudDrafts.map((cd) => deleteCloudDraft(cd.draftKey, cd.sequence).catch(() => {})),
+            ]);
+            setCloudDrafts([]);
+            onDraftsChanged();
+            setToast("已清空全部草稿");
           }}
         />
       )}
@@ -3858,7 +4617,7 @@ export const ProfileSettingsView: React.FC<{
         />
       )}
 
-      {/* 快捷子抽屉：收藏 / 历史 / 草稿 / 活动 / 关注与粉丝 / 徽章 / 编辑资料 / 关于（恒定尺寸零压缩抖动） */}
+      {/* 快捷子抽屉：收藏 / 历史 / 草稿 / 活动 / 关注与粉丝 / 徽章 / 账号与偏好 / 诊断 / 关于 */}
       {subSheet && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/62 p-4"
@@ -3868,9 +4627,11 @@ export const ProfileSettingsView: React.FC<{
             className={`flex flex-col rounded-2xl shadow-2xl overflow-hidden ${
               subSheet === "about"
                 ? "w-[420px]"
-                : subSheet === "diagnostics"
-                  ? "h-[min(660px,84vh)] w-[680px] max-w-full"
-                  : "h-[min(640px,82vh)] w-[640px] max-w-full"
+                : subSheet === "account_preferences"
+                  ? "max-h-[84vh] w-[520px] max-w-full"
+                  : subSheet === "diagnostics"
+                    ? "h-[min(660px,84vh)] w-[680px] max-w-full"
+                    : "h-[min(640px,82vh)] w-[640px] max-w-full"
             }`}
             style={{
               backgroundColor: "var(--card-surface)",
@@ -3880,7 +4641,9 @@ export const ProfileSettingsView: React.FC<{
           >
             <div
               className={`flex shrink-0 items-center justify-between px-5 ${
-                subSheet === "diagnostics" ? "lindo-hairline-b h-[48px]" : "h-[52px]"
+                subSheet === "diagnostics" || subSheet === "account_preferences"
+                  ? "lindo-hairline-b h-[48px]"
+                  : "h-[52px]"
               }`}
             >
               <div className="flex items-baseline gap-2.5">
@@ -3897,9 +4660,11 @@ export const ProfileSettingsView: React.FC<{
                             ? "关注与粉丝"
                             : subSheet === "badges"
                               ? "社区徽章墙"
-                              : subSheet === "diagnostics"
-                                ? "运行日志"
-                                : "关于 Lindo"}
+                              : subSheet === "account_preferences"
+                                ? "账号与偏好"
+                                : subSheet === "diagnostics"
+                                  ? "运行日志"
+                                  : "关于 Lindo"}
                 </span>
                 {subSheet === "diagnostics" && (
                   <span
@@ -3969,6 +4734,16 @@ export const ProfileSettingsView: React.FC<{
                       </button>
                     )}
                   </>
+                )}
+                {subSheet === "drafts" && (localDraftList.length > 0 || cloudDrafts.length > 0) && (
+                  <button
+                    type="button"
+                    onClick={() => setShowClearAllDraftsConfirm(true)}
+                    className="lindo-interactive rounded-lg px-2.5 py-1 text-[12px]"
+                    style={{ color: "#EF4444" }}
+                  >
+                    清空全部草稿
+                  </button>
                 )}
                 {subSheet === "history" && localHistory.length > 0 && (
                   <button
@@ -4099,29 +4874,81 @@ export const ProfileSettingsView: React.FC<{
               </div>
             )}
 
-            {subSheet === "badges" && isAuthorized && (
-              <div className="lindo-hairline-b flex shrink-0 items-center gap-2 px-4 py-2">
-                {[
-                  { key: "mine", label: "已获徽章" },
-                  { key: "site", label: "全站徽章" },
-                ].map((tab) => (
-                  <button
-                    key={tab.key}
-                    type="button"
-                    onClick={() => setBadgeTab(tab.key as any)}
-                    className="rounded-full px-3.5 py-1 text-[12px] font-medium cursor-pointer"
+            {subSheet === "badges" && (
+              <div className="lindo-hairline-b shrink-0 space-y-2 px-4 py-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  {isAuthorized && (
+                    <div className="flex items-center gap-1.5">
+                      {[
+                        { key: "mine", label: "已获徽章" },
+                        { key: "site", label: "全站徽章" },
+                      ].map((tab) => (
+                        <button
+                          key={tab.key}
+                          type="button"
+                          onClick={() => setBadgeTab(tab.key as any)}
+                          className="rounded-full px-3 py-1 text-[12px] font-medium cursor-pointer"
+                          style={{
+                            backgroundColor:
+                              badgeTab === tab.key ? "var(--active-chip-bg)" : "var(--subtle-surface)",
+                            color:
+                              badgeTab === tab.key
+                                ? "var(--active-chip-text)"
+                                : "var(--ink-secondary)",
+                          }}
+                        >
+                          {tab.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <div
+                    className="flex h-7 min-w-[160px] flex-1 max-w-[240px] items-center gap-1.5 rounded-lg px-2.5"
                     style={{
-                      backgroundColor:
-                        badgeTab === tab.key ? "var(--active-chip-bg)" : "var(--subtle-surface)",
-                      color:
-                        badgeTab === tab.key
-                          ? "var(--active-chip-text)"
-                          : "var(--ink-secondary)",
+                      backgroundColor: "var(--subtle-surface)",
+                      border: "0.5px solid var(--hairline)",
                     }}
                   >
-                    {tab.label}
-                  </button>
-                ))}
+                    <LinDoIcons.Search size={12.5} style={{ color: "var(--ink-tertiary)" }} />
+                    <input
+                      type="text"
+                      value={badgeSearchQuery}
+                      onChange={(e) => setBadgeSearchQuery(e.target.value)}
+                      placeholder="搜索徽章..."
+                      className="min-w-0 flex-1 bg-transparent text-[12px] outline-none"
+                      style={{ color: "var(--ink-primary)" }}
+                    />
+                  </div>
+                </div>
+                <div className="no-scrollbar flex items-center gap-1.5 overflow-x-auto">
+                  {(
+                    [
+                      { key: "ALL", label: "全部" },
+                      { key: "GOLD", label: "金" },
+                      { key: "SILVER", label: "银" },
+                      { key: "BRONZE", label: "铜" },
+                      { key: "EARNED", label: "已获得" },
+                    ] as const
+                  ).map((tierPill) => {
+                    const active = badgeTierFilter === tierPill.key;
+                    return (
+                      <button
+                        key={tierPill.key}
+                        type="button"
+                        onClick={() => setBadgeTierFilter(tierPill.key)}
+                        className="shrink-0 rounded-full px-2.5 py-0.5 text-[11.5px] font-medium cursor-pointer"
+                        style={{
+                          backgroundColor: active
+                            ? "var(--active-chip-bg)"
+                            : "var(--subtle-surface)",
+                          color: active ? "var(--active-chip-text)" : "var(--ink-secondary)",
+                        }}
+                      >
+                        {tierPill.label}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             )}
 
@@ -4172,57 +4999,180 @@ export const ProfileSettingsView: React.FC<{
                   </div>
                 )
               ) : subSheet === "bookmarks" ? (
-                bookmarks.length === 0 ? (
+                bookmarksError && bookmarks.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center px-6 py-12 text-center">
+                    <p className="text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+                      {bookmarksError}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setSubRetryNonce((n) => n + 1)}
+                      className="mt-3 rounded-full px-4 py-1 text-[12px] font-semibold cursor-pointer"
+                      style={{
+                        backgroundColor: "var(--publish-btn-bg)",
+                        color: "var(--publish-btn-fg)",
+                      }}
+                    >
+                      重试
+                    </button>
+                  </div>
+                ) : bookmarks.length === 0 ? (
                   <div className="p-10 text-center text-[13px]" style={{ color: "var(--ink-tertiary)" }}>
                     暂无收藏的书签
                   </div>
                 ) : (
-                  bookmarks.map((bm: any) => (
-                    <div
-                      key={bm.id}
-                      className="flex items-center justify-between gap-2 px-4 py-3"
-                    >
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSubSheet(null);
-                          onOpenTopicById(
-                            Number(bm.topic_id),
-                            String(bm.title || bm.fancy_title || "收藏话题"),
-                            Number(bm.linked_post_number || bm.post_number || 1)
-                          );
-                        }}
-                        className="min-w-0 flex-1 text-left cursor-pointer"
-                      >
+                  <>
+                    {bookmarks.map((bm: any) => {
+                      const catId = bm.category_id ? Number(bm.category_id) : undefined;
+                      const catMeta = catId ? findCategoryMeta(catId) : undefined;
+                      const cv = catMeta ? resolveCategoryVisual(catMeta.name, catMeta.colorHex) : null;
+                      const floorNum = Number(bm.linked_post_number || bm.post_number || 1);
+                      const bmNote = String(bm.name || "").trim();
+                      const reminderIso = String(bm.reminder_at || "").trim();
+                      const bmTime = String(bm.updated_at || bm.created_at || "").trim();
+                      const excerptText = bm.excerpt
+                        ? String(bm.excerpt).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()
+                        : "";
+                      return (
                         <div
-                          className="truncate text-[13.6px] font-medium"
-                          style={{ color: "var(--ink-primary)" }}
+                          key={bm.id}
+                          className="flex items-start justify-between gap-2 px-4 py-3"
                         >
-                          {bm.title || "收藏话题"}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSubSheet(null);
+                              onOpenTopicById(
+                                Number(bm.topic_id || bm.bookmarkable_id),
+                                String(bm.title || bm.fancy_title || "收藏话题"),
+                                floorNum
+                              );
+                            }}
+                            className="min-w-0 flex-1 text-left cursor-pointer"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span
+                                className="truncate text-[13.6px] font-semibold"
+                                style={{ color: "var(--ink-primary)" }}
+                              >
+                                {bm.title || bm.fancy_title || "收藏话题"}
+                              </span>
+                              {bmTime && (
+                                <span
+                                  className="shrink-0 text-[11px] tabular-nums"
+                                  style={{ color: "var(--ink-tertiary)" }}
+                                >
+                                  {formatRelativeTime(bmTime)}
+                                </span>
+                              )}
+                            </div>
+                            <div
+                              className="mt-1 flex flex-wrap items-center gap-1.5 text-[11.5px]"
+                              style={{ color: "var(--ink-tertiary)" }}
+                            >
+                              {catMeta && cv && (
+                                <LinDoCategoryBadge
+                                  name={catMeta.displayName || catMeta.name}
+                                  fallbackColor={cv.dotColor}
+                                  iconSize={10.5}
+                                  className="text-[11px]"
+                                />
+                              )}
+                              <span>#{floorNum} 楼</span>
+                              {bmNote && (
+                                <span
+                                  className="rounded px-1.5 py-[0.5px] text-[10.8px] font-medium"
+                                  style={{
+                                    backgroundColor: "var(--active-chip-bg)",
+                                    color: "var(--active-chip-text)",
+                                  }}
+                                >
+                                  备注：{bmNote}
+                                </span>
+                              )}
+                              {reminderIso && (
+                                <span
+                                  className="rounded px-1.5 py-[0.5px] text-[10.8px] font-medium tabular-nums"
+                                  style={{
+                                    backgroundColor: "var(--subtle-surface)",
+                                    color: "var(--brand-gold)",
+                                    border: "0.5px solid var(--hairline)",
+                                  }}
+                                >
+                                  提醒：{reminderIso.slice(0, 16).replace("T", " ")}
+                                </span>
+                              )}
+                            </div>
+                            {excerptText && (
+                              <p
+                                className="mt-1 line-clamp-2 text-[12px] leading-relaxed"
+                                style={{ color: "var(--ink-secondary)" }}
+                              >
+                                {excerptText}
+                              </p>
+                            )}
+                          </button>
+                          <button
+                            type="button"
+                            title="移除书签"
+                            onClick={async () => {
+                              try {
+                                await deleteBookmarkById(Number(bm.id));
+                                setBookmarks((prev) => prev.filter((x) => x.id !== bm.id));
+                                setToast("已移除书签");
+                              } catch {
+                                setToast("移除失败");
+                              }
+                            }}
+                            className="lindo-interactive mt-0.5 rounded-full p-1.5"
+                            style={{ color: "var(--ink-tertiary)" }}
+                          >
+                            <LinDoIcons.Trash size={14} />
+                          </button>
                         </div>
-                        <div className="mt-0.5 text-[11.5px]" style={{ color: "var(--ink-tertiary)" }}>
-                          #{bm.linked_post_number || bm.post_number || 1} 楼
-                        </div>
-                      </button>
-                      <button
-                        type="button"
-                        title="移除书签"
-                        onClick={async () => {
-                          try {
-                            await deleteBookmarkById(Number(bm.id));
-                            setBookmarks((prev) => prev.filter((x) => x.id !== bm.id));
-                            setToast("已移除书签");
-                          } catch {
-                            setToast("移除失败");
-                          }
-                        }}
-                        className="lindo-interactive rounded-full p-1.5"
-                        style={{ color: "var(--ink-tertiary)" }}
-                      >
-                        <LinDoIcons.Trash size={14} />
-                      </button>
-                    </div>
-                  ))
+                      );
+                    })}
+                    {bookmarksHasMore && (
+                      <div className="py-3 text-center">
+                        {bookmarksError && (
+                          <div className="mb-1 text-[11.5px]" style={{ color: "var(--error-fg)" }}>
+                            {bookmarksError}
+                          </div>
+                        )}
+                        <button
+                          type="button"
+                          disabled={loadingMoreBookmarks}
+                          onClick={async () => {
+                            if (!currentUser?.username || loadingMoreBookmarks) return;
+                            const nextPage = bookmarksPage + 1;
+                            setLoadingMoreBookmarks(true);
+                            setBookmarksError(null);
+                            try {
+                              const res = await fetchUserBookmarksPage(currentUser.username, nextPage);
+                              setBookmarks((prev) => {
+                                const seen = new Set(prev.map((x) => x.id));
+                                return [...prev, ...res.bookmarks.filter((x) => !seen.has(x.id))];
+                              });
+                              setBookmarksPage(nextPage);
+                              setBookmarksHasMore(res.hasMore);
+                            } catch (err: any) {
+                              setBookmarksError(err?.message || "加载更多书签失败，请重试");
+                            } finally {
+                              setLoadingMoreBookmarks(false);
+                            }
+                          }}
+                          className="lindo-interactive rounded-full px-4 py-1 text-[12px] font-medium"
+                          style={{ color: "var(--active-chip-text)" }}
+                        >
+                          {loadingMoreBookmarks
+                            ? "正在加载..."
+                            : bookmarksError
+                              ? "重试加载更多书签"
+                              : "加载更多书签"}
+                        </button>
+                      </div>
+                    )}
+                  </>
                 )
               ) : subSheet === "history" ? (
                 (() => {
@@ -4436,186 +5386,298 @@ export const ProfileSettingsView: React.FC<{
                   );
                 })()
               ) : subSheet === "drafts" ? (
-                localDraftList.length === 0 && cloudDrafts.length === 0 ? (
-                  <div className="p-10 text-center text-[13px]" style={{ color: "var(--ink-tertiary)" }}>
-                    暂无草稿记录
-                  </div>
-                ) : (
-                  <>
-                    {localDraftList.map((d) => (
-                      <div
-                        key={`local_${d.key}`}
-                        className="flex items-center justify-between gap-3 px-4 py-3"
-                      >
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSubSheet(null);
-                            onResumeComposerDraft({
-                              action: d.action,
-                              topicId: d.topicId ?? undefined,
-                              postId: d.postId ?? undefined,
-                              replyToPostNumber: d.replyToPostNumber ?? undefined,
-                              initialCategoryId: d.categoryId ?? undefined,
-                              initialTitle: d.title,
-                              initialRaw: d.raw,
-                              initialTags: d.tags,
-                              draftKeyOverride: d.key,
-                            });
-                          }}
-                          className="min-w-0 flex-1 text-left cursor-pointer"
-                        >
-                          <div className="flex items-center gap-2">
-                            <span
-                              className="rounded px-1.5 py-[1px] text-[10px] font-semibold"
-                              style={{
-                                backgroundColor: "var(--tonal-pill)",
-                                color: "var(--ink-secondary)",
-                              }}
-                            >
-                              本地
-                            </span>
-                            <span
-                              className="truncate text-[13.5px] font-semibold"
-                              style={{ color: "var(--ink-primary)" }}
-                            >
-                              {d.title || (d.topicId ? `回复话题 #${d.topicId}` : "未命名新话题")}
-                            </span>
-                          </div>
-                          <p
-                            className="mt-1 line-clamp-2 text-[12px]"
-                            style={{ color: "var(--ink-secondary)" }}
-                          >
-                            {d.raw}
-                          </p>
-                        </button>
-                        <button
-                          type="button"
-                          title="删除本地草稿"
-                          onClick={async () => {
-                            await deleteLocalDraftInRust(d.key).catch(() => {});
-                            onDraftsChanged();
-                          }}
-                          className="lindo-interactive rounded-full p-1.5"
-                          style={{ color: "var(--ink-tertiary)" }}
-                        >
-                          <LinDoIcons.Trash size={14} />
-                        </button>
-                      </div>
-                    ))}
+                (() => {
+                  const normalizeDraftMatchKey = (k: string, topicId?: number | null): string => {
+                    if (k === "new_topic") return "new_topic";
+                    if (topicId && topicId > 0) return `topic_${topicId}`;
+                    if (k.startsWith("reply_")) return `topic_${k.slice(6)}`;
+                    return k;
+                  };
 
-                    {cloudDrafts.map((cd) => (
-                      <div
-                        key={`cloud_${cd.draftKey}`}
-                        className="flex items-center justify-between gap-3 px-4 py-3"
-                      >
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSubSheet(null);
-                            onResumeComposerDraft({
-                              action: cd.action,
-                              topicId: cd.topicId ?? undefined,
-                              postId: cd.postId ?? undefined,
-                              replyToPostNumber: cd.replyToPostNumber ?? undefined,
-                              initialCategoryId: cd.categoryId ?? undefined,
-                              initialTitle: cd.title,
-                              initialRaw: cd.raw,
-                              initialTags: cd.tags,
-                            });
-                          }}
-                          className="min-w-0 flex-1 text-left cursor-pointer"
-                        >
-                          <div className="flex items-center gap-2">
-                            <span
-                              className="rounded px-1.5 py-[1px] text-[10px] font-semibold"
-                              style={{
-                                backgroundColor: "var(--active-chip-bg)",
-                                color: "var(--brand-gold)",
-                              }}
-                            >
-                              云端
-                            </span>
-                            <span
-                              className="truncate text-[13.5px] font-semibold"
-                              style={{ color: "var(--ink-primary)" }}
-                            >
-                              {cd.title ||
-                                (cd.topicId ? `回复话题 #${cd.topicId}` : "云端新话题草稿")}
-                            </span>
-                          </div>
-                          <p
-                            className="mt-1 line-clamp-2 text-[12px]"
-                            style={{ color: "var(--ink-secondary)" }}
-                          >
-                            {cd.raw}
-                          </p>
-                        </button>
-                        <button
-                          type="button"
-                          title="删除云端草稿"
-                          onClick={async () => {
-                            try {
-                              await deleteCloudDraft(cd.draftKey, cd.sequence);
-                              setCloudDrafts((prev) =>
-                                prev.filter((x) => x.draftKey !== cd.draftKey)
-                              );
-                            } catch {
-                              setToast("删除云端草稿失败");
-                            }
-                          }}
-                          className="lindo-interactive rounded-full p-1.5"
-                          style={{ color: "var(--ink-tertiary)" }}
-                        >
-                          <LinDoIcons.Trash size={14} />
-                        </button>
+                  type MergedDraftRow = {
+                    canonicalKey: string;
+                    local?: LocalDraftRecord;
+                    cloud?: CloudDraftItem;
+                  };
+                  const mergedMap = new Map<string, MergedDraftRow>();
+                  for (const ld of localDraftList) {
+                    const ck = normalizeDraftMatchKey(ld.key, ld.topicId);
+                    mergedMap.set(ck, { canonicalKey: ck, local: ld });
+                  }
+                  for (const cd of cloudDrafts) {
+                    const ck = normalizeDraftMatchKey(cd.draftKey, cd.topicId);
+                    const prev = mergedMap.get(ck);
+                    if (prev) {
+                      prev.cloud = cd;
+                    } else {
+                      mergedMap.set(ck, { canonicalKey: ck, cloud: cd });
+                    }
+                  }
+                  const mergedRows = Array.from(mergedMap.values());
+
+                  if (mergedRows.length === 0) {
+                    return (
+                      <div className="p-10 text-center text-[13px]" style={{ color: "var(--ink-tertiary)" }}>
+                        暂无草稿记录
                       </div>
-                    ))}
-                  </>
-                )
+                    );
+                  }
+
+                  return (
+                    <>
+                      {mergedRows.map((row) => {
+                        const isPm = row.cloud?.action === "PRIVATE_MESSAGE";
+                        const primaryTitle =
+                          row.local?.title ||
+                          row.cloud?.title ||
+                          (isPm
+                            ? row.cloud?.recipients
+                              ? `私信给 ${row.cloud.recipients}`
+                              : "站内私信草稿"
+                            : row.local?.topicId || row.cloud?.topicId
+                              ? `回复话题 #${row.local?.topicId || row.cloud?.topicId}`
+                              : "未命名新话题");
+                        const primaryRaw = row.local?.raw || row.cloud?.raw || "";
+                        const badgeText =
+                          row.local && row.cloud
+                            ? "本地 + 云端"
+                            : row.local
+                              ? "本地"
+                              : "云端";
+                        return (
+                          <div
+                            key={row.canonicalKey}
+                            className="flex items-center justify-between gap-3 px-4 py-3"
+                          >
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSubSheet(null);
+                                if (isPm && onOpenMessages) {
+                                  onOpenMessages();
+                                  return;
+                                }
+                                const src = row.local;
+                                const csrc = row.cloud;
+                                const action: "NEW_TOPIC" | "REPLY" | "EDIT" =
+                                  src?.action ??
+                                  (csrc?.action === "EDIT"
+                                    ? "EDIT"
+                                    : csrc?.action === "REPLY"
+                                      ? "REPLY"
+                                      : "NEW_TOPIC");
+                                onResumeComposerDraft({
+                                  action,
+                                  topicId: src?.topicId ?? csrc?.topicId ?? undefined,
+                                  postId: src?.postId ?? csrc?.postId ?? undefined,
+                                  replyToPostNumber:
+                                    src?.replyToPostNumber ?? csrc?.replyToPostNumber ?? undefined,
+                                  initialCategoryId:
+                                    src?.categoryId ?? csrc?.categoryId ?? undefined,
+                                  initialTitle: src?.title ?? csrc?.title ?? "",
+                                  initialRaw: src?.raw ?? csrc?.raw ?? "",
+                                  initialTags: src?.tags ?? csrc?.tags ?? [],
+                                  draftKeyOverride: src?.key,
+                                });
+                              }}
+                              className="min-w-0 flex-1 text-left cursor-pointer"
+                            >
+                              <div className="flex items-center gap-1.5">
+                                <span
+                                  className="shrink-0 rounded px-1.5 py-[1px] text-[10px] font-semibold"
+                                  style={
+                                    row.cloud
+                                      ? {
+                                          backgroundColor: "var(--active-chip-bg)",
+                                          color: "var(--brand-gold)",
+                                        }
+                                      : {
+                                          backgroundColor: "var(--tonal-pill)",
+                                          color: "var(--ink-secondary)",
+                                        }
+                                  }
+                                >
+                                  {badgeText}
+                                </span>
+                                {isPm && (
+                                  <span
+                                    className="shrink-0 rounded px-1.5 py-[1px] text-[10px] font-semibold"
+                                    style={{
+                                      backgroundColor: "var(--subtle-surface)",
+                                      color: "var(--ink-secondary)",
+                                      border: "0.5px solid var(--hairline)",
+                                    }}
+                                  >
+                                    私信
+                                  </span>
+                                )}
+                                <span
+                                  className="truncate text-[13.5px] font-semibold"
+                                  style={{ color: "var(--ink-primary)" }}
+                                >
+                                  {primaryTitle}
+                                </span>
+                              </div>
+                              {primaryRaw && (
+                                <p
+                                  className="mt-1 line-clamp-2 text-[12px]"
+                                  style={{ color: "var(--ink-secondary)" }}
+                                >
+                                  {primaryRaw}
+                                </p>
+                              )}
+                            </button>
+                            <button
+                              type="button"
+                              title="删除草稿"
+                              onClick={async () => {
+                                try {
+                                  if (row.local) {
+                                    await deleteLocalDraftInRust(row.local.key).catch(() => {});
+                                    onDraftsChanged();
+                                  }
+                                  if (row.cloud) {
+                                    await deleteCloudDraft(row.cloud.draftKey, row.cloud.sequence);
+                                    setCloudDrafts((prev) =>
+                                      prev.filter((x) => x.draftKey !== row.cloud!.draftKey)
+                                    );
+                                  }
+                                } catch {
+                                  setToast("删除云端草稿失败");
+                                }
+                              }}
+                              className="lindo-interactive rounded-full p-1.5"
+                              style={{ color: "var(--ink-tertiary)" }}
+                            >
+                              <LinDoIcons.Trash size={14} />
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </>
+                  );
+                })()
               ) : subSheet === "activity" ? (
-                activities.length === 0 ? (
+                activityError && activities.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center px-6 py-12 text-center">
+                    <p className="text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+                      {activityError}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setSubRetryNonce((n) => n + 1)}
+                      className="mt-3 rounded-full px-4 py-1 text-[12px] font-semibold cursor-pointer"
+                      style={{
+                        backgroundColor: "var(--publish-btn-bg)",
+                        color: "var(--publish-btn-fg)",
+                      }}
+                    >
+                      重试
+                    </button>
+                  </div>
+                ) : activities.length === 0 ? (
                   <div className="p-10 text-center text-[13px]" style={{ color: "var(--ink-tertiary)" }}>
                     暂无相关社区动态
                   </div>
                 ) : (
-                  activities.map((act: any, idx: number) => (
-                    <button
-                      key={`${act.topic_id}_${act.post_number}_${idx}`}
-                      type="button"
-                      onClick={() => {
-                        setSubSheet(null);
-                        onOpenTopicById(
-                          Number(act.topic_id),
-                          String(act.title || "社区动态"),
-                          Number(act.post_number || 1)
-                        );
-                      }}
-                      className="cursor-pointer flex w-full flex-col px-4 py-3 text-left"
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <span
-                          className="truncate text-[13.6px] font-semibold"
-                          style={{ color: "var(--ink-primary)" }}
+                  <>
+                    {activities.map((act: any, idx: number) => {
+                      const catId = act.category_id ? Number(act.category_id) : undefined;
+                      const catMeta = catId ? findCategoryMeta(catId) : undefined;
+                      const cv = catMeta ? resolveCategoryVisual(catMeta.name, catMeta.colorHex) : null;
+                      const postNum = Number(act.post_number || 1);
+                      return (
+                        <button
+                          key={`${act.topic_id}_${act.post_number}_${idx}`}
+                          type="button"
+                          onClick={() => {
+                            setSubSheet(null);
+                            onOpenTopicById(
+                              Number(act.topic_id),
+                              String(act.title || "社区动态"),
+                              postNum
+                            );
+                          }}
+                          className="cursor-pointer flex w-full flex-col px-4 py-3 text-left"
                         >
-                          {act.title}
-                        </span>
-                        <span
-                          className="shrink-0 text-[11px] tabular-nums"
-                          style={{ color: "var(--ink-tertiary)" }}
+                          <div className="flex items-center justify-between gap-2">
+                            <span
+                              className="truncate text-[13.6px] font-semibold"
+                              style={{ color: "var(--ink-primary)" }}
+                            >
+                              {act.title}
+                            </span>
+                            <span
+                              className="shrink-0 text-[11px] tabular-nums"
+                              style={{ color: "var(--ink-tertiary)" }}
+                            >
+                              {formatRelativeTime(act.created_at)}
+                            </span>
+                          </div>
+                          <div
+                            className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px]"
+                            style={{ color: "var(--ink-tertiary)" }}
+                          >
+                            {catMeta && cv && (
+                              <LinDoCategoryBadge
+                                name={catMeta.displayName || catMeta.name}
+                                fallbackColor={cv.dotColor}
+                                iconSize={10.5}
+                                className="text-[11px]"
+                              />
+                            )}
+                            <span>#{postNum} 楼</span>
+                          </div>
+                          {act.excerpt && (
+                            <span
+                              className="mt-1 line-clamp-2 text-[12px]"
+                              style={{ color: "var(--ink-secondary)" }}
+                              dangerouslySetInnerHTML={{ __html: act.excerpt }}
+                            />
+                          )}
+                        </button>
+                      );
+                    })}
+                    {activityHasMore && (
+                      <div className="py-3 text-center">
+                        {activityError && (
+                          <div className="mb-1 text-[11.5px]" style={{ color: "var(--error-fg)" }}>
+                            {activityError}
+                          </div>
+                        )}
+                        <button
+                          type="button"
+                          disabled={loadingMoreActivity}
+                          onClick={async () => {
+                            if (!currentUser?.username || loadingMoreActivity) return;
+                            setLoadingMoreActivity(true);
+                            setActivityError(null);
+                            try {
+                              const more = await fetchUserActions(
+                                currentUser.username,
+                                activityFilter,
+                                activities.length
+                              );
+                              setActivities((prev) => [...prev, ...more]);
+                              setActivityHasMore(more.length >= 25);
+                            } catch (err: any) {
+                              setActivityError(err?.message || "加载更多动态失败，请重试");
+                            } finally {
+                              setLoadingMoreActivity(false);
+                            }
+                          }}
+                          className="lindo-interactive rounded-full px-4 py-1 text-[12px] font-medium"
+                          style={{ color: "var(--active-chip-text)" }}
                         >
-                          {formatRelativeTime(act.created_at)}
-                        </span>
+                          {loadingMoreActivity
+                            ? "正在加载..."
+                            : activityError
+                              ? "重试加载更多动态"
+                              : "加载更多动态"}
+                        </button>
                       </div>
-                      {act.excerpt && (
-                        <span
-                          className="mt-1 line-clamp-2 text-[12px]"
-                          style={{ color: "var(--ink-secondary)" }}
-                          dangerouslySetInnerHTML={{ __html: act.excerpt }}
-                        />
-                      )}
-                    </button>
-                  ))
+                    )}
+                  </>
                 )
               ) : subSheet === "follows" ? (
                 followUsers.length === 0 ? (
@@ -4644,16 +5706,39 @@ export const ProfileSettingsView: React.FC<{
                         />
                         <div className="min-w-0 flex-1">
                           <div
-                            className="truncate text-[13.5px] font-semibold"
+                            className="flex flex-wrap items-center gap-1.5 text-[13.5px] font-semibold"
                             style={{ color: "var(--ink-primary)" }}
                           >
-                            {fu.displayName}
+                            <span className="truncate">{fu.displayName}</span>
                             <span
-                              className="ml-1.5 text-[11.5px] font-normal"
+                              className="text-[11.5px] font-normal"
                               style={{ color: "var(--ink-tertiary)" }}
                             >
                               @{fu.username}
                             </span>
+                            {fu.trustLevel != null && (
+                              <span
+                                className="rounded px-1.5 py-[0.5px] text-[10.2px] font-medium tabular-nums"
+                                style={{
+                                  backgroundColor: "var(--subtle-surface)",
+                                  color: "var(--ink-secondary)",
+                                  border: "0.5px solid var(--hairline)",
+                                }}
+                              >
+                                Lv.{fu.trustLevel}
+                              </span>
+                            )}
+                            {fu.title && (
+                              <span
+                                className="truncate rounded px-1.5 py-[0.5px] text-[10.2px] font-medium"
+                                style={{
+                                  backgroundColor: "var(--active-chip-bg)",
+                                  color: "var(--brand-gold)",
+                                }}
+                              >
+                                {fu.title}
+                              </span>
+                            )}
                           </div>
                           {fu.bio && (
                             <div
@@ -4700,104 +5785,392 @@ export const ProfileSettingsView: React.FC<{
                   ))
                 )
               ) : subSheet === "badges" ? (
-                badges.length === 0 ? (
-                  <div className="p-10 text-center text-[13px]" style={{ color: "var(--ink-tertiary)" }}>
-                    暂无徽章数据
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-2 gap-2.5 p-4 border-b-0">
-                    {badges.map((b: any) => {
-                      const isCurrentTitle =
-                        Boolean(currentUser?.userTitle) && currentUser?.userTitle === b.name;
-                      const canWearTitle = Boolean(badgeTab === "mine" && b.allow_title && currentUser);
-                      const mappedBadge: GrantedBadge = {
-                        id: Number(b.id ?? 0),
-                        name: String(b.name || ""),
-                        description: String(b.description || ""),
-                        longDescription: b.long_description ? String(b.long_description) : undefined,
-                        badgeTypeId: Number(b.badge_type_id ?? 3),
-                        icon: b.icon ?? null,
-                        imageUrl: b.image_url ?? b.image ?? null,
-                        grantCount: Number(b.grant_count ?? 0),
-                        allowTitle: Boolean(b.allow_title),
-                        count: Number(b.count ?? 1),
-                        isEarned: badgeTab === "mine",
-                      };
-                      return (
-                        <div
-                          key={`${b.id}_${b.user_badge_id || 0}`}
-                          onClick={() => onInspectBadge?.(mappedBadge)}
-                          className="lindo-interactive group flex flex-col justify-between rounded-xl p-3 cursor-pointer"
+                (() => {
+                  const bq = badgeSearchQuery.trim().toLowerCase();
+                  const filteredBadges = badges.filter((b: any) => {
+                    const bId = Number(b.id ?? 0);
+                    const bType = Number(b.badge_type_id ?? 3);
+                    const isEarned = badgeTab === "mine" || earnedBadgeIds.has(bId);
+                    if (badgeTierFilter === "GOLD" && bType !== 1) return false;
+                    if (badgeTierFilter === "SILVER" && bType !== 2) return false;
+                    if (badgeTierFilter === "BRONZE" && bType !== 3) return false;
+                    if (badgeTierFilter === "EARNED" && !isEarned) return false;
+                    if (bq) {
+                      const hay = `${String(b.name || "")} ${String(b.description || "")}`.toLowerCase();
+                      if (!hay.includes(bq)) return false;
+                    }
+                    return true;
+                  });
+                  if (filteredBadges.length === 0) {
+                    return (
+                      <div className="p-10 text-center text-[13px]" style={{ color: "var(--ink-tertiary)" }}>
+                        暂无匹配的徽章数据
+                      </div>
+                    );
+                  }
+                  return (
+                    <div className="grid grid-cols-2 gap-2.5 p-4 border-b-0">
+                      {filteredBadges.map((b: any) => {
+                        const isCurrentTitle =
+                          Boolean(currentUser?.userTitle) && currentUser?.userTitle === b.name;
+                        const isEarned = badgeTab === "mine" || earnedBadgeIds.has(Number(b.id ?? 0));
+                        const canWearTitle = Boolean(isEarned && b.allow_title && currentUser);
+                        const mappedBadge: GrantedBadge = {
+                          id: Number(b.id ?? 0),
+                          name: String(b.name || ""),
+                          description: String(b.description || ""),
+                          longDescription: b.long_description ? String(b.long_description) : undefined,
+                          badgeTypeId: Number(b.badge_type_id ?? 3),
+                          icon: b.icon ?? null,
+                          imageUrl: b.image_url ?? b.image ?? null,
+                          grantCount: Number(b.grant_count ?? 0),
+                          allowTitle: Boolean(b.allow_title),
+                          count: Number(b.count ?? 1),
+                          isEarned,
+                        };
+                        return (
+                          <div
+                            key={`${b.id}_${b.user_badge_id || 0}`}
+                            onClick={() => onInspectBadge?.(mappedBadge)}
+                            className="lindo-interactive group flex flex-col justify-between rounded-xl p-3 cursor-pointer"
+                            style={{
+                              backgroundColor: "var(--subtle-surface)",
+                              border: "0.5px solid var(--hairline)",
+                            }}
+                          >
+                            {/* 顶栏：左侧徽章图标+名称，右侧紧凑「佩戴中 / 设为头衔」胶囊 + 获取人数（绝不撑高底栏！） */}
+                            <div className="flex items-center justify-between gap-2">
+                              <span
+                                className="flex min-w-0 items-center gap-1.5 text-[13.5px] font-bold"
+                                style={{ color: "var(--ink-primary)" }}
+                              >
+                                <OfficialBadgeIcon badge={mappedBadge} size={16} />
+                                <span className="truncate">{b.name}</span>
+                              </span>
+
+                              <div className="flex shrink-0 items-center gap-1.5">
+                                {canWearTitle && (
+                                  <button
+                                    type="button"
+                                    onClick={async (e) => {
+                                      e.stopPropagation();
+                                      if (!currentUser) return;
+                                      try {
+                                        await updateUserProfileInfo(currentUser.username, {
+                                          title: isCurrentTitle ? "" : String(b.name),
+                                        });
+                                        await refreshCurrentUserSession().catch(() => {});
+                                        onProfileUpdated();
+                                        setToast(
+                                          isCurrentTitle ? "已取消佩戴头衔" : `已佩戴头衔「${b.name}」`
+                                        );
+                                      } catch {
+                                        setToast("设置头衔失败");
+                                      }
+                                    }}
+                                    className="rounded-full px-2 py-[1px] text-[10.5px] font-semibold transition-opacity cursor-pointer"
+                                    style={{
+                                      backgroundColor: isCurrentTitle
+                                        ? "var(--active-chip-bg)"
+                                        : "var(--card-surface)",
+                                      color: isCurrentTitle
+                                        ? "var(--active-chip-text)"
+                                        : "var(--ink-secondary)",
+                                      border: "0.5px solid var(--hairline)",
+                                    }}
+                                  >
+                                    {isCurrentTitle ? "佩戴中" : "佩戴头衔"}
+                                  </button>
+                                )}
+                                {b.grant_count > 0 && (
+                                  <span
+                                    className="text-[10.5px] tabular-nums"
+                                    style={{ color: "var(--ink-tertiary)" }}
+                                  >
+                                    {formatCompactCount(b.grant_count)} 人
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+
+                            <div
+                              className="mt-1.5 line-clamp-2 min-h-[34px] text-[11.5px] leading-[1.45]"
+                              style={{ color: "var(--ink-secondary)" }}
+                              dangerouslySetInnerHTML={{ __html: b.description || "社区荣誉徽章" }}
+                            />
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()
+              ) : subSheet === "account_preferences" ? (
+                (() => {
+                  const formatAssociatedAccount = (raw: string): { title: string; detail?: string } => {
+                    const idx = raw.indexOf(" (");
+                    const provider = (idx >= 0 ? raw.slice(0, idx) : raw).trim().toLowerCase();
+                    const detail =
+                      idx >= 0 ? raw.slice(idx + 2).replace(/\)$/, "").trim() || undefined : undefined;
+                    const labels: Record<string, string> = {
+                      google_oauth2: "Google 账号",
+                      google_one_tap: "Google 快捷登录",
+                      github: "GitHub",
+                      apple: "Apple",
+                      facebook: "Facebook",
+                      twitter: "X",
+                      twitter2: "X",
+                      discord: "Discord",
+                    };
+                    return { title: labels[provider] || "其他关联账号", detail };
+                  };
+
+                  const handlePrivacyToggle = async (
+                    nextHidePresence: boolean,
+                    nextAllowPm: boolean
+                  ) => {
+                    if (!accountPrefs || accountPrefsSaving) return;
+                    const prev = accountPrefs;
+                    setAccountPrefsSaving(true);
+                    setAccountPrefsToggleError(null);
+                    setAccountPrefs({
+                      ...prev,
+                      hideProfileAndPresence: nextHidePresence,
+                      allowPrivateMessages: nextAllowPm,
+                    });
+                    try {
+                      await updateUserProfileInfo(prev.username, {
+                        hidePresence: nextHidePresence,
+                        allowPrivateMessages: nextAllowPm,
+                      });
+                      onProfileUpdated();
+                    } catch (err: any) {
+                      setAccountPrefs(prev);
+                      setAccountPrefsToggleError(err?.message || "偏好保存失败，已恢复原设置");
+                    } finally {
+                      setAccountPrefsSaving(false);
+                    }
+                  };
+
+                  if (accountPrefsError && !accountPrefs) {
+                    return (
+                      <div className="flex flex-col items-center justify-center px-6 py-12 text-center">
+                        <p className="text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+                          {accountPrefsError}
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => setAccountPrefsNonce((n) => n + 1)}
+                          className="mt-3 rounded-full px-4 py-1.5 text-[12.5px] font-semibold cursor-pointer"
                           style={{
-                            backgroundColor: "var(--subtle-surface)",
-                            border: "0.5px solid var(--hairline)",
+                            backgroundColor: "var(--publish-btn-bg)",
+                            color: "var(--publish-btn-fg)",
                           }}
                         >
-                          {/* 顶栏：左侧徽章图标+名称，右侧紧凑「佩戴中 / 设为头衔」胶囊 + 获取人数（绝不撑高底栏！） */}
-                          <div className="flex items-center justify-between gap-2">
-                            <span
-                              className="flex min-w-0 items-center gap-1.5 text-[13.5px] font-bold"
-                              style={{ color: "var(--ink-primary)" }}
-                            >
-                              <OfficialBadgeIcon badge={mappedBadge} size={16} />
-                              <span className="truncate">{b.name}</span>
-                            </span>
+                          重试
+                        </button>
+                      </div>
+                    );
+                  }
 
-                            <div className="flex shrink-0 items-center gap-1.5">
-                              {canWearTitle && (
-                                <button
-                                  type="button"
-                                  onClick={async (e) => {
-                                    e.stopPropagation();
-                                    if (!currentUser) return;
-                                    try {
-                                      await updateUserProfileInfo(currentUser.username, {
-                                        title: isCurrentTitle ? "" : String(b.name),
-                                      });
-                                      await refreshCurrentUserSession().catch(() => {});
-                                      onProfileUpdated();
-                                      setToast(
-                                        isCurrentTitle ? "已取消佩戴头衔" : `已佩戴头衔「${b.name}」`
-                                      );
-                                    } catch {
-                                      setToast("设置头衔失败");
-                                    }
-                                  }}
-                                  className="rounded-full px-2 py-[1px] text-[10.5px] font-semibold transition-opacity cursor-pointer"
-                                  style={{
-                                    backgroundColor: isCurrentTitle
-                                      ? "var(--active-chip-bg)"
-                                      : "var(--card-surface)",
-                                    color: isCurrentTitle
-                                      ? "var(--active-chip-text)"
-                                      : "var(--ink-secondary)",
-                                    border: "0.5px solid var(--hairline)",
-                                  }}
-                                >
-                                  {isCurrentTitle ? "佩戴中" : "佩戴头衔"}
-                                </button>
-                              )}
-                              {b.grant_count > 0 && (
-                                <span
-                                  className="text-[10.5px] tabular-nums"
-                                  style={{ color: "var(--ink-tertiary)" }}
-                                >
-                                  {formatCompactCount(b.grant_count)} 人
-                                </span>
-                              )}
+                  if (!accountPrefs) {
+                    return (
+                      <div className="p-10 text-center text-[13px]" style={{ color: "var(--ink-tertiary)" }}>
+                        暂无账号偏好信息
+                      </div>
+                    );
+                  }
+
+                  const renderWebPrefRow = (title: string, detail: string, url: string) => (
+                    <button
+                      key={`${title}_${url}`}
+                      type="button"
+                      onClick={() => onOpenInAppUrl(url)}
+                      className="lindo-interactive flex w-full items-center justify-between gap-3 px-5 py-3 text-left"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="text-[13.5px] font-medium" style={{ color: "var(--ink-primary)" }}>
+                          {title}
+                        </div>
+                        {detail && (
+                          <div className="mt-0.5 truncate text-[12px]" style={{ color: "var(--ink-secondary)" }}>
+                            {detail}
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex shrink-0 items-center gap-1 text-[11.5px]" style={{ color: "var(--ink-tertiary)" }}>
+                        <span>网页</span>
+                        <LinDoIcons.ChevronRight size={13.5} />
+                      </div>
+                    </button>
+                  );
+
+                  const renderPrivacySwitchRow = (
+                    title: string,
+                    detail: string,
+                    checked: boolean,
+                    onToggle: (next: boolean) => void
+                  ) => (
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={checked}
+                      disabled={accountPrefsSaving}
+                      onClick={() => onToggle(!checked)}
+                      className="lindo-interactive flex w-full items-center justify-between gap-4 px-5 py-3 text-left disabled:opacity-60"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="text-[13.5px] font-medium" style={{ color: "var(--ink-primary)" }}>
+                          {title}
+                        </div>
+                        <div className="mt-0.5 text-[12px]" style={{ color: "var(--ink-secondary)" }}>
+                          {detail}
+                        </div>
+                      </div>
+                      <span
+                        className="relative inline-flex h-[22px] w-[38px] shrink-0 items-center rounded-full transition-colors"
+                        style={{
+                          backgroundColor: checked ? "var(--brand-gold)" : "var(--subtle-surface)",
+                          border: "0.5px solid var(--hairline)",
+                        }}
+                      >
+                        <span
+                          className="inline-block h-[16px] w-[16px] rounded-full transition-transform"
+                          style={{
+                            backgroundColor: checked ? "#FFFFFF" : "var(--ink-tertiary)",
+                            transform: checked ? "translateX(18px)" : "translateX(3px)",
+                          }}
+                        />
+                      </span>
+                    </button>
+                  );
+
+                  return (
+                    <div className="pb-4 border-b-0">
+                      {accountPrefsToggleError && (
+                        <div
+                          className="mx-5 mt-3 rounded-lg px-3 py-2 text-[12px]"
+                          style={{
+                            backgroundColor: "rgba(239, 68, 68, 0.10)",
+                            color: "#EF4444",
+                            border: "0.5px solid rgba(239, 68, 68, 0.25)",
+                          }}
+                        >
+                          {accountPrefsToggleError}
+                        </div>
+                      )}
+
+                      <div className="px-5 pt-4 pb-1.5 text-[11.5px] font-medium" style={{ color: "var(--ink-tertiary)" }}>
+                        账号信息
+                      </div>
+                      <div className="divide-y divide-[var(--hairline)]">
+                        <div className="flex items-center justify-between gap-3 px-5 py-3">
+                          <div className="min-w-0">
+                            <div className="text-[13.5px] font-medium" style={{ color: "var(--ink-primary)" }}>
+                              {accountPrefs.displayName || accountPrefs.username}
+                            </div>
+                            <div className="mt-0.5 text-[12px]" style={{ color: "var(--ink-secondary)" }}>
+                              @{accountPrefs.username} · {trustLevelLabel(accountPrefs.trustLevel)}
+                              {accountPrefs.title ? ` · ${accountPrefs.title}` : ""}
                             </div>
                           </div>
-
-                          <div
-                            className="mt-1.5 line-clamp-2 min-h-[34px] text-[11.5px] leading-[1.45]"
-                            style={{ color: "var(--ink-secondary)" }}
-                            dangerouslySetInnerHTML={{ __html: b.description || "社区荣誉徽章" }}
-                          />
+                          {accountPrefs.createdAtText && (
+                            <span className="shrink-0 text-[11.5px] tabular-nums" style={{ color: "var(--ink-tertiary)" }}>
+                              加入于 {accountPrefs.createdAtText}
+                            </span>
+                          )}
                         </div>
-                      );
-                    })}
-                  </div>
-                )
+                        {renderWebPrefRow(
+                          "绑定邮箱",
+                          accountPrefs.email || "在网页查看与管理",
+                          "https://linux.do/my/preferences/account"
+                        )}
+                      </div>
+
+                      <div className="px-5 pt-4 pb-1.5 text-[11.5px] font-medium" style={{ color: "var(--ink-tertiary)" }}>
+                        隐私与互动
+                      </div>
+                      <div className="divide-y divide-[var(--hairline)]">
+                        {renderPrivacySwitchRow(
+                          "隐藏公开资料与在线状态",
+                          "其他成员无法查看你的公开资料与在线状态",
+                          accountPrefs.hideProfileAndPresence,
+                          (next) => void handlePrivacyToggle(next, accountPrefs.allowPrivateMessages)
+                        )}
+                        {renderPrivacySwitchRow(
+                          "允许站内私信",
+                          "关闭后仅管理员可向你发送私信",
+                          accountPrefs.allowPrivateMessages,
+                          (next) => void handlePrivacyToggle(accountPrefs.hideProfileAndPresence, next)
+                        )}
+                      </div>
+
+                      <div className="px-5 pt-4 pb-1.5 text-[11.5px] font-medium" style={{ color: "var(--ink-tertiary)" }}>
+                        账号安全
+                      </div>
+                      <div className="divide-y divide-[var(--hairline)]">
+                        {renderWebPrefRow(
+                          "两步验证",
+                          accountPrefs.twoFactorEnabled === true
+                            ? "已开启"
+                            : accountPrefs.twoFactorEnabled === false
+                              ? "未开启"
+                              : "在网页查看与管理",
+                          "https://linux.do/my/preferences/security"
+                        )}
+                        {renderWebPrefRow(
+                          "登录设备",
+                          accountPrefs.activeDeviceCount != null
+                            ? `${accountPrefs.activeDeviceCount} 个登录会话`
+                            : "查看设备与登录记录",
+                          "https://linux.do/my/preferences/security"
+                        )}
+                      </div>
+
+                      {accountPrefs.associatedAccounts && accountPrefs.associatedAccounts.length > 0 && (
+                        <>
+                          <div className="px-5 pt-4 pb-1.5 text-[11.5px] font-medium" style={{ color: "var(--ink-tertiary)" }}>
+                            关联账号
+                          </div>
+                          <div className="divide-y divide-[var(--hairline)]">
+                            {accountPrefs.associatedAccounts.map((raw, idx) => {
+                              const { title, detail } = formatAssociatedAccount(raw);
+                              return (
+                                <React.Fragment key={`${raw}_${idx}`}>
+                                  {renderWebPrefRow(
+                                    title,
+                                    detail || "已关联",
+                                    "https://linux.do/my/preferences/account"
+                                  )}
+                                </React.Fragment>
+                              );
+                            })}
+                          </div>
+                        </>
+                      )}
+
+                      <div className="px-5 pt-4 pb-1.5 text-[11.5px] font-medium" style={{ color: "var(--ink-tertiary)" }}>
+                        更多网站偏好
+                      </div>
+                      <div className="divide-y divide-[var(--hairline)]">
+                        {renderWebPrefRow(
+                          "通知",
+                          "回复、提及与互动提醒",
+                          "https://linux.do/my/preferences/notifications"
+                        )}
+                        {renderWebPrefRow(
+                          "邮件",
+                          "邮件通知与社区摘要",
+                          "https://linux.do/my/preferences/emails"
+                        )}
+                        {renderWebPrefRow(
+                          "全部网站设置",
+                          "分类、标签、用户屏蔽等偏好",
+                          "https://linux.do/my/preferences"
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()
               ) : subSheet === "diagnostics" ? (
                 (() => {
                   const warnOrErrCount = allDiagEntries.filter(
@@ -4916,13 +6289,15 @@ export const ProfileSettingsView: React.FC<{
                                 key={k}
                                 type="button"
                                 onClick={() => setDiagFilter(k)}
-                                className="relative flex h-full shrink-0 items-center gap-1 text-[12.5px] transition-colors cursor-pointer"
+                                className="relative flex h-full shrink-0 select-none items-center gap-1 text-[12.5px] transition-colors cursor-pointer"
                                 style={{
                                   color: active ? "var(--ink-primary)" : "var(--ink-tertiary)",
-                                  fontWeight: active ? 500 : 400,
+                                  fontWeight: active ? 600 : 400,
                                 }}
                               >
-                                <span>{label}</span>
+                                <span className="lindo-tab-label" data-label={label}>
+                                  <span>{label}</span>
+                                </span>
                                 {cnt > 0 && (
                                   <span className="text-[11px] tabular-nums opacity-65">{cnt}</span>
                                 )}
@@ -5410,13 +6785,12 @@ function SettingsSegmentedChoices<K extends string>({
             role="radio"
             aria-checked={active}
             onClick={() => onSelect(opt.key)}
-            className="lindo-interactive flex h-[36px] items-center justify-center gap-1.5 rounded-[7px] px-2.5 text-[13px] whitespace-nowrap transition-colors cursor-pointer"
+            className="lindo-interactive flex h-[36px] select-none items-center justify-center gap-1.5 rounded-[7px] px-2.5 text-[13px] font-medium whitespace-nowrap cursor-pointer"
             style={{
               backgroundColor: active
                 ? "var(--active-chip-bg)"
                 : "color-mix(in srgb, var(--subtle-surface) 68%, transparent)",
               color: active ? "var(--active-chip-text)" : "var(--ink-secondary)",
-              fontWeight: active ? 500 : 400,
             }}
           >
             {opt.visual ? <span className="inline-flex items-center">{opt.visual}</span> : null}
@@ -5446,7 +6820,7 @@ const SettingsThemeSwatches: React.FC<{
           aria-label={theme.label}
           title={theme.label}
           onClick={() => onSelect(theme.key)}
-          className="group flex h-11 w-11 items-center justify-center rounded-full cursor-pointer transition-transform hover:scale-105"
+          className="lindo-interactive group flex h-11 w-11 items-center justify-center rounded-full cursor-pointer"
         >
           <span
             className="flex h-[30px] w-[30px] items-center justify-center rounded-full transition-colors"
@@ -5618,9 +6992,20 @@ const SettingRow: React.FC<{
   badgeText?: string;
   dot?: boolean;
   highlightValue?: boolean;
+  valueColor?: string;
   hideDivider?: boolean;
   onClick: () => void;
-}> = ({ icon, title, value, badgeText, dot, highlightValue, hideDivider, onClick }) => (
+}> = ({
+  icon,
+  title,
+  value,
+  badgeText,
+  dot,
+  highlightValue,
+  valueColor,
+  hideDivider,
+  onClick,
+}) => (
   <div>
     <button
       type="button"
@@ -5660,7 +7045,13 @@ const SettingRow: React.FC<{
         {value && (
           <span
             className={highlightValue ? "font-medium" : undefined}
-            style={highlightValue ? { color: "var(--ink-primary)" } : undefined}
+            style={
+              valueColor
+                ? { color: valueColor }
+                : highlightValue
+                  ? { color: "var(--ink-primary)" }
+                  : undefined
+            }
           >
             {value}
           </span>
@@ -5727,9 +7118,10 @@ export const AuthModal: React.FC<{
   onAddAccountWebLogin: () => void;
   onBrowserOneClick: () => void;
   onOpenQrLogin?: () => void;
+  onOpenQrGenerate?: () => void;
+  onRequestGuestLogin?: (title?: string, subtitle?: string) => void;
   onSwitchAccount: (username: string) => void;
   onRemoveAccount: (username: string) => void;
-  onManualImported: () => void;
   onLogout: () => void;
   onClose: () => void;
 }> = ({
@@ -5743,19 +7135,16 @@ export const AuthModal: React.FC<{
   onAddAccountWebLogin,
   onBrowserOneClick,
   onOpenQrLogin,
+  onOpenQrGenerate,
+  onRequestGuestLogin,
   onSwitchAccount,
   onRemoveAccount,
-  onManualImported,
   onLogout,
   onClose,
 }) => {
   const [managing, setManaging] = useState(false);
   const [adding, setAdding] = useState(Boolean(initialAdding));
   const [removingUsername, setRemovingUsername] = useState<string | null>(null);
-  const [manualExpanded, setManualExpanded] = useState(false);
-  const [manualInput, setManualInput] = useState("");
-  const [manualBusy, setManualBusy] = useState(false);
-  const [manualError, setManualError] = useState<string | null>(null);
 
   useEffect(() => {
     if (initialAdding) {
@@ -5782,11 +7171,11 @@ export const AuthModal: React.FC<{
   }, [savedAccounts, isAuthorized, currentUser]);
 
   const showWelcomeBody = adding || (effectiveAccounts.length === 0 && !isAuthorized);
+  const canReturnToAccountList = adding && (effectiveAccounts.length > 0 || isAuthorized);
 
   const handleBack = () => {
-    if (adding) {
+    if (canReturnToAccountList) {
       setAdding(false);
-      setManualError(null);
     } else if (managing) {
       setManaging(false);
     } else {
@@ -5815,10 +7204,18 @@ export const AuthModal: React.FC<{
               className="lindo-interactive flex h-8 w-8 items-center justify-center rounded-full"
               style={{ color: "var(--ink-primary)" }}
             >
-              {adding || managing ? <LinDoIcons.ArrowLeft size={17} /> : <LinDoIcons.Close size={17} />}
+              {canReturnToAccountList || managing ? (
+                <LinDoIcons.ArrowLeft size={17} />
+              ) : (
+                <LinDoIcons.Close size={17} />
+              )}
             </button>
             <span className="text-[16px] font-bold" style={{ color: "var(--ink-primary)" }}>
-              {adding ? "添加账号" : "账号管理"}
+              {canReturnToAccountList
+                ? "添加账号"
+                : adding
+                  ? "登录 LINUX DO"
+                  : "账号管理"}
             </span>
           </div>
 
@@ -5857,106 +7254,7 @@ export const AuthModal: React.FC<{
                       }
                     : undefined
                 }
-                onImportAuthCallback={async (raw) => {
-                  const ok = await importManualCredentialInRust(raw, isDark);
-                  if (ok) {
-                    onManualImported();
-                    onClose();
-                  }
-                  return ok;
-                }}
               />
-
-              {(!statusHint?.includes("浏览器") || manualExpanded) && (
-              <div className="px-6 pt-1">
-                <button
-                  type="button"
-                  onClick={() => setManualExpanded((v) => !v)}
-                  className="flex w-full items-center justify-center gap-1 py-1.5 text-[12.5px] cursor-pointer"
-                  style={{ color: "var(--ink-tertiary)" }}
-                >
-                  <span>手动登录</span>
-                  {manualExpanded ? (
-                    <LinDoIcons.ChevronUp size={12} />
-                  ) : (
-                    <LinDoIcons.ChevronDown size={12} />
-                  )}
-                </button>
-
-                {manualExpanded && (
-                  <div
-                    className="mt-2 space-y-2.5 rounded-xl p-3.5"
-                    style={{
-                      backgroundColor: "var(--subtle-surface)",
-                      border: "0.5px solid var(--hairline)",
-                    }}
-                  >
-                    <p
-                      className="text-[11.5px] leading-relaxed"
-                      style={{ color: "var(--ink-secondary)" }}
-                    >
-                      若系统拦截协议回调，可在浏览器按 F12 从 Application 复制 _t，或粘贴
-                      discourse:// 授权回调链接与 Copy as cURL。
-                    </p>
-                    <textarea
-                      value={manualInput}
-                      onChange={(e) => {
-                        setManualInput(e.target.value);
-                        if (manualError) setManualError(null);
-                      }}
-                      rows={3}
-                      placeholder="粘贴 discourse:// 授权回调链接、_t Cookie 值，或浏览器 DevTools Copy as cURL..."
-                      className="w-full rounded-lg bg-transparent p-2.5 text-[12.5px] outline-none resize-none"
-                      style={{
-                        border: manualError
-                          ? "0.5px solid var(--error-border)"
-                          : "0.5px solid var(--hairline)",
-                        color: "var(--ink-primary)",
-                      }}
-                    />
-                    {manualError && (
-                      <p className="text-[12px]" style={{ color: "var(--error-fg)" }}>
-                        {manualError}
-                      </p>
-                    )}
-                    <button
-                      type="button"
-                      disabled={manualBusy}
-                      onClick={async () => {
-                        if (!manualInput.trim()) {
-                          setManualError("请输入授权回调链接、_t Cookie 或 cURL 命令");
-                          return;
-                        }
-                        setManualBusy(true);
-                        setManualError(null);
-                        try {
-                          const ok = await importManualCredentialInRust(manualInput, isDark);
-                          if (ok) {
-                            onManualImported();
-                            onClose();
-                          } else {
-                            setManualError(
-                              "凭证校验失败，请确认粘贴了有效的回调链接、_t Cookie 或 cURL"
-                            );
-                          }
-                        } catch (err: any) {
-                          setManualError(String(err?.message || err || "凭证校验失败"));
-                        } finally {
-                          setManualBusy(false);
-                        }
-                      }}
-                      className="w-full rounded-xl py-2 text-[13px] font-bold cursor-pointer disabled:opacity-50"
-                      style={{
-                        backgroundColor: "var(--publish-btn-bg)",
-                        color: "var(--publish-btn-fg)",
-                      }}
-                    >
-                      {manualBusy ? "验证登录中" : "验证并登录"}
-                    </button>
-                  </div>
-                )}
-              </div>
-              )}
             </div>
           ) : (
             <div className="py-2">
@@ -5971,8 +7269,16 @@ export const AuthModal: React.FC<{
                         type="button"
                         onClick={() => {
                           if (acc.needsLogin) {
-                            setManaging(false);
-                            setAdding(true);
+                            if (isAuthorized || !onRequestGuestLogin) {
+                              setManaging(false);
+                              setAdding(true);
+                            } else {
+                              onClose();
+                              onRequestGuestLogin(
+                                "重新登录 LINUX DO",
+                                `@${acc.profile.username} 需要重新登录，请选择登录方式`
+                              );
+                            }
                           } else if (!current) {
                             onSwitchAccount(acc.profile.username);
                             onClose();
@@ -6035,8 +7341,13 @@ export const AuthModal: React.FC<{
               <button
                 type="button"
                 onClick={() => {
-                  setManaging(false);
-                  setAdding(true);
+                  if (isAuthorized || !onRequestGuestLogin) {
+                    setManaging(false);
+                    setAdding(true);
+                  } else {
+                    onClose();
+                    onRequestGuestLogin();
+                  }
                 }}
                 className="lindo-interactive flex h-[48px] w-full items-center justify-between px-5 text-left text-[14px]"
                 style={{ color: "var(--ink-primary)" }}
@@ -6047,6 +7358,30 @@ export const AuthModal: React.FC<{
                 </span>
                 <LinDoIcons.ChevronRight size={14} style={{ color: "var(--ink-tertiary)" }} />
               </button>
+
+              {isAuthorized && currentUser && onOpenQrGenerate && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClose();
+                    onOpenQrGenerate();
+                  }}
+                  className="lindo-interactive flex h-[48px] w-full items-center justify-between px-5 text-left text-[14px]"
+                  style={{ color: "var(--ink-primary)" }}
+                >
+                  <span className="flex items-center gap-2.5">
+                    <LinDoIcons.QrCode size={16} style={{ color: "var(--ink-secondary)" }} />
+                    <span>登录二维码</span>
+                  </span>
+                  <span
+                    className="flex items-center gap-1.5 text-[12px]"
+                    style={{ color: "var(--ink-tertiary)" }}
+                  >
+                    <span>扫码或复制口令登录其他设备</span>
+                    <LinDoIcons.ChevronRight size={14} />
+                  </span>
+                </button>
+              )}
 
               {isAuthorized && (
                 <>
@@ -6109,6 +7444,7 @@ export const QrLoginModal: React.FC<{
   const genSeqRef = useRef(0);
 
   // Redeem state (手机已登录 -> 识别二维码图片或口令登录 PC)
+  const [redeemTab, setRedeemTab] = useState<"token" | "image">("token");
   const [manualToken, setManualToken] = useState("");
   const [redeeming, setRedeeming] = useState(false);
   const [decodingImage, setDecodingImage] = useState(false);
@@ -6172,10 +7508,10 @@ export const QrLoginModal: React.FC<{
         onImported();
         onClose();
       } else {
-        setRedeemError("一次性登录码已失效或已被使用，请在已登录设备重新生成");
+        setRedeemError("登录码已失效或已使用，请重新生成");
       }
     } catch (err: any) {
-      setRedeemError(String(err?.message || err || "登录码兑换失败，请重新生成后再试"));
+      setRedeemError(String(err?.message || err || "登录失败，请重新生成后再试"));
     } finally {
       redeemingRef.current = false;
       setRedeeming(false);
@@ -6184,6 +7520,7 @@ export const QrLoginModal: React.FC<{
 
   const handleImageFile = async (file: File) => {
     if (redeemingRef.current) return;
+    setRedeemTab("image");
     setDecodingImage(true);
     setRedeemError(null);
     try {
@@ -6198,7 +7535,7 @@ export const QrLoginModal: React.FC<{
     }
   };
 
-  // Native OS file drag-and-drop in redeem mode
+  // Native OS file drag-and-drop in redeem mode (works from either tab)
   useEffect(() => {
     if (mode !== "redeem") return;
     let active = true;
@@ -6210,6 +7547,7 @@ export const QrLoginModal: React.FC<{
           if (!active) return;
           const payload = event.payload;
           if (payload.type === "enter" || payload.type === "over") {
+            setRedeemTab("image");
             setDragActive(true);
           } else if (payload.type === "leave") {
             setDragActive(false);
@@ -6217,6 +7555,7 @@ export const QrLoginModal: React.FC<{
             setDragActive(false);
             const droppedPaths = payload.paths;
             if (droppedPaths && droppedPaths.length > 0) {
+              setRedeemTab("image");
               void (async () => {
                 setDecodingImage(true);
                 setRedeemError(null);
@@ -6253,7 +7592,7 @@ export const QrLoginModal: React.FC<{
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, isDark]);
 
-  // Global paste support (Ctrl+V / Cmd+V screenshot or QR URI) in redeem mode
+  // Global paste support (Ctrl+V / Cmd+V screenshot or QR URI) in redeem mode (works from either tab)
   useEffect(() => {
     if (mode !== "redeem") return;
     const onPaste = (e: ClipboardEvent) => {
@@ -6269,8 +7608,9 @@ export const QrLoginModal: React.FC<{
       const plain = (dt.getData("text/plain") || "").trim();
       if (plain && isQrLoginUri(plain)) {
         const target = e.target as HTMLElement | null;
-        if (!target || target.tagName !== "INPUT") {
+        if (!target || (target.tagName !== "INPUT" && target.tagName !== "TEXTAREA")) {
           e.preventDefault();
+          setRedeemTab("token");
           setManualToken(plain);
           void submitQrPayload(plain);
         }
@@ -6280,6 +7620,7 @@ export const QrLoginModal: React.FC<{
         void readClipboardMediaInRust(false).then(async (res) => {
           const imgItem = res.items?.find((it) => isImageMimeOrName(it.mime, it.filename));
           if (!imgItem) return;
+          setRedeemTab("image");
           setDecodingImage(true);
           setRedeemError(null);
           try {
@@ -6300,7 +7641,7 @@ export const QrLoginModal: React.FC<{
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, isDark]);
 
-  const handlePasteFromClipboardButton = async () => {
+  const handlePasteTokenButton = async () => {
     if (redeemingRef.current) return;
     setRedeemError(null);
     try {
@@ -6310,6 +7651,38 @@ export const QrLoginModal: React.FC<{
         await submitQrPayload(clipText);
         return;
       }
+      const media = await readClipboardMediaInRust(false);
+      const imgItem = media.items?.find((it) => isImageMimeOrName(it.mime, it.filename));
+      if (imgItem) {
+        setRedeemTab("image");
+        setDecodingImage(true);
+        try {
+          const decoded = await decodeQrFromBase64Image(imgItem.dataBase64, imgItem.mime);
+          if (decoded) {
+            await submitQrPayload(decoded);
+            return;
+          }
+          setRedeemError("未能从剪贴板图片中识别到有效登录二维码");
+          return;
+        } finally {
+          setDecodingImage(false);
+        }
+      }
+      if (clipText) {
+        setManualToken(clipText);
+        setRedeemError("剪贴板内容不是有效登录口令");
+      } else {
+        setRedeemError("剪贴板暂无登录口令");
+      }
+    } catch {
+      setRedeemError("无法读取剪贴板，请在输入框按 Ctrl+V / ⌘V 粘贴");
+    }
+  };
+
+  const handlePasteImageFromClipboardButton = async () => {
+    if (redeemingRef.current) return;
+    setRedeemError(null);
+    try {
       const media = await readClipboardMediaInRust(false);
       const imgItem = media.items?.find((it) => isImageMimeOrName(it.mime, it.filename));
       if (imgItem) {
@@ -6326,14 +7699,16 @@ export const QrLoginModal: React.FC<{
           setDecodingImage(false);
         }
       }
-      if (clipText) {
+      const clipText = (await navigator.clipboard.readText().catch(() => "")).trim();
+      if (clipText && isQrLoginUri(clipText)) {
+        setRedeemTab("token");
         setManualToken(clipText);
-        setRedeemError("剪贴板内容不是有效的 Lindo 登录口令，请确认后重试");
-      } else {
-        setRedeemError("剪贴板暂无登录口令或二维码截图，请先在已登录手机复制");
+        await submitQrPayload(clipText);
+        return;
       }
+      setRedeemError("剪贴板暂无二维码截图");
     } catch {
-      setRedeemError("无法读取剪贴板，请在下方输入框按 Ctrl+V / ⌘V 手动粘贴");
+      setRedeemError("无法读取剪贴板，请拖入截图或点击上方选图");
     }
   };
 
@@ -6393,6 +7768,7 @@ export const QrLoginModal: React.FC<{
                 type="button"
                 onClick={() => {
                   setRedeemError(null);
+                  setRedeemTab("token");
                   setMode("redeem");
                 }}
                 className="rounded-md px-2.5 py-1 font-medium transition-colors cursor-pointer"
@@ -6427,7 +7803,7 @@ export const QrLoginModal: React.FC<{
                 className="mt-2 max-w-[360px] text-[12.5px] leading-relaxed"
                 style={{ color: "var(--ink-secondary)" }}
               >
-                同时生成一次性登录二维码与跨设备登录口令：另一台设备可直接扫码或粘贴口令登录。使用后凭据自动销毁，请勿泄露给他人。
+                用另一台设备扫码，或复制口令登录。使用后自动失效，请勿分享给他人。
               </p>
 
               <div
@@ -6450,30 +7826,31 @@ export const QrLoginModal: React.FC<{
                 ) : generating ? (
                   <div className="flex flex-col items-center gap-2.5 text-[#4B5563]">
                     <SmoothRefreshIcon spinning size={24} />
-                    <span className="text-[12.5px] font-medium">正在生成二维码与口令…</span>
+                    <span className="text-[12.5px] font-medium">正在生成…</span>
                   </div>
                 ) : (
                   <div className="flex flex-col items-center gap-2 px-4 text-[#6B7280]">
                     <LinDoIcons.QrCode size={42} />
-                    <span className="text-[12px]">点击下方按钮生成二维码与口令</span>
+                    <span className="text-[12px]">点击下方生成登录码</span>
                   </div>
                 )}
               </div>
 
-              {qrSvg && !genError && (
-                <p className="mt-3 text-[12px]" style={{ color: "var(--ink-tertiary)" }}>
-                  二维码与登录口令均已就绪（约 10 分钟内有效）
-                </p>
-              )}
-
-              {genError && (
-                <p
-                  className="mt-3 max-w-[360px] text-[12.5px] leading-relaxed"
-                  style={{ color: "#EF4444" }}
-                >
-                  {genError}
-                </p>
-              )}
+              <div className="mt-3 flex h-[20px] max-w-[360px] items-center justify-center">
+                {genError ? (
+                  <p
+                    className="truncate text-[12px] leading-5"
+                    style={{ color: "#EF4444" }}
+                    title={genError}
+                  >
+                    {genError}
+                  </p>
+                ) : qrSvg ? (
+                  <p className="text-[12px] leading-5" style={{ color: "var(--ink-tertiary)" }}>
+                    约 10 分钟内有效
+                  </p>
+                ) : null}
+              </div>
 
               <div className="mt-5 flex w-full max-w-[340px] flex-col gap-2.5">
                 {grant?.uri && (
@@ -6511,20 +7888,93 @@ export const QrLoginModal: React.FC<{
                     {generating
                       ? "正在生成…"
                       : qrSvg
-                        ? "重新生成二维码与口令"
-                        : "生成登录二维码与口令"}
+                        ? "重新生成"
+                        : "生成登录码"}
                   </span>
                 </button>
               </div>
             </div>
           ) : (
-            <div className="flex flex-col">
+            <div
+              className="flex flex-col"
+              onDragOver={(e) => {
+                e.preventDefault();
+                setRedeemTab("image");
+                setDragActive(true);
+              }}
+              onDragLeave={(e) => {
+                if (e.currentTarget === e.target) setDragActive(false);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                setDragActive(false);
+                const files = extractSyncClipboardFiles(e.dataTransfer).filter((f) =>
+                  isImageMimeOrName(f.type, f.name)
+                );
+                if (files.length > 0) {
+                  void handleImageFile(files[0]);
+                } else {
+                  setRedeemTab("image");
+                  setRedeemError("请拖入包含登录二维码的图片文件");
+                }
+              }}
+            >
               <p
                 className="text-center text-[12.5px] leading-relaxed"
                 style={{ color: "var(--ink-secondary)" }}
               >
-                在已登录 Lindo / FluxDO 的手机打开「我的 → 扫码 / 口令登录」，复制登录口令或将二维码截图发至电脑即可登录。
+                在已登录设备的「我的 → 登录二维码」复制口令，或识别二维码图片登录。
               </p>
+
+              {/* 精简 2-Tab 切换（默认「口令登录」，与「识图登录」共用同一主内容区，零冗余堆叠） */}
+              <div
+                role="tablist"
+                aria-label="跨设备登录方式"
+                className="mt-4 grid grid-cols-2 rounded-xl p-1 text-[13px]"
+                style={{
+                  backgroundColor: "var(--subtle-surface)",
+                  border: "0.5px solid var(--hairline)",
+                }}
+              >
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={redeemTab === "token"}
+                  onClick={() => {
+                    setRedeemTab("token");
+                    setRedeemError(null);
+                  }}
+                  className="flex h-[34px] select-none items-center justify-center gap-1.5 rounded-lg font-medium transition-colors cursor-pointer"
+                  style={{
+                    backgroundColor: redeemTab === "token" ? "var(--card-surface)" : "transparent",
+                    color: redeemTab === "token" ? "var(--ink-primary)" : "var(--ink-secondary)",
+                    boxShadow:
+                      redeemTab === "token" ? "0 1px 2px rgba(15, 23, 42, 0.08)" : "none",
+                  }}
+                >
+                  <LinDoIcons.Copy size={14} />
+                  <span>口令登录</span>
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={redeemTab === "image"}
+                  onClick={() => {
+                    setRedeemTab("image");
+                    setRedeemError(null);
+                  }}
+                  className="flex h-[34px] select-none items-center justify-center gap-1.5 rounded-lg font-medium transition-colors cursor-pointer"
+                  style={{
+                    backgroundColor: redeemTab === "image" ? "var(--card-surface)" : "transparent",
+                    color: redeemTab === "image" ? "var(--ink-primary)" : "var(--ink-secondary)",
+                    boxShadow:
+                      redeemTab === "image" ? "0 1px 2px rgba(15, 23, 42, 0.08)" : "none",
+                  }}
+                >
+                  <LinDoIcons.QrCode size={14} />
+                  <span>识图登录</span>
+                </button>
+              </div>
 
               <input
                 ref={fileInputRef}
@@ -6538,119 +7988,163 @@ export const QrLoginModal: React.FC<{
                 }}
               />
 
-              {/* 二维码图片拖入 / 选择识别区 */}
-              <button
-                type="button"
-                disabled={redeeming || decodingImage}
-                onClick={() => fileInputRef.current?.click()}
-                onDragOver={(e) => {
-                  e.preventDefault();
-                  setDragActive(true);
-                }}
-                onDragLeave={() => setDragActive(false)}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  setDragActive(false);
-                  const files = extractSyncClipboardFiles(e.dataTransfer).filter((f) =>
-                    isImageMimeOrName(f.type, f.name)
-                  );
-                  if (files.length > 0) {
-                    void handleImageFile(files[0]);
-                  } else {
-                    setRedeemError("请拖入包含登录二维码的图片文件");
-                  }
-                }}
-                className="lindo-interactive mt-4 flex flex-col items-center justify-center rounded-2xl px-4 py-6 text-center transition-colors disabled:opacity-60"
-                style={{
-                  backgroundColor: "var(--subtle-surface)",
-                  border: dragActive
-                    ? "1.5px dashed var(--brand-gold)"
-                    : "1px dashed var(--hairline)",
-                }}
+              {/* 共用锁定高度主内容区（切换 Tab 与错误提示均保持 0px 高度抖动） */}
+              <div
+                role="tabpanel"
+                aria-label={redeemTab === "token" ? "口令登录" : "识图登录"}
+                className="mt-4 flex h-[264px] min-h-[264px] flex-col"
               >
-                {decodingImage || redeeming ? (
-                  <>
-                    <SmoothRefreshIcon spinning size={26} />
-                    <span
-                      className="mt-2.5 text-[13.5px] font-semibold"
-                      style={{ color: "var(--ink-primary)" }}
+                {redeemTab === "token" ? (
+                  <div className="flex h-full flex-col justify-between">
+                    <textarea
+                      rows={4}
+                      value={manualToken}
+                      onChange={(e) => {
+                        setManualToken(e.target.value);
+                        if (redeemError) setRedeemError(null);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          if (manualToken.trim() && !redeeming) {
+                            void submitQrPayload(manualToken);
+                          }
+                        }
+                      }}
+                      spellCheck={false}
+                      autoComplete="off"
+                      placeholder="粘贴 lindo://qr-login?... 登录口令"
+                      className="w-full flex-1 min-h-0 resize-none rounded-xl px-3.5 py-3 text-[13px] leading-relaxed break-all outline-none"
+                      style={{
+                        backgroundColor: "var(--subtle-surface)",
+                        border: redeemError
+                          ? "0.5px solid var(--error-border)"
+                          : "0.5px solid var(--hairline)",
+                        color: "var(--ink-primary)",
+                      }}
+                    />
+
+                    <div
+                      role="alert"
+                      aria-live="polite"
+                      className="flex h-[24px] shrink-0 items-center justify-center px-1"
                     >
-                      {decodingImage ? "正在识别图片二维码…" : "正在验证并兑换登录会话…"}
-                    </span>
-                  </>
+                      {redeemError && (
+                        <p
+                          className="truncate text-[12px] leading-5"
+                          style={{ color: "#EF4444" }}
+                          title={redeemError}
+                        >
+                          {redeemError}
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="flex shrink-0 flex-col gap-2.5">
+                      <button
+                        type="button"
+                        disabled={redeeming || decodingImage}
+                        onClick={() => void handlePasteTokenButton()}
+                        className="lindo-interactive flex h-[42px] w-full items-center justify-center gap-2 rounded-xl text-[13.5px] font-medium disabled:opacity-55"
+                        style={{
+                          border: "0.5px solid var(--hairline)",
+                          color: "var(--ink-primary)",
+                        }}
+                      >
+                        <LinDoIcons.Copy size={15} style={{ color: "var(--ink-secondary)" }} />
+                        <span>粘贴口令</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={!manualToken.trim() || redeeming || decodingImage}
+                        onClick={() => void submitQrPayload(manualToken)}
+                        className="flex h-[44px] w-full items-center justify-center rounded-xl text-[13.5px] font-bold transition-opacity hover:opacity-92 cursor-pointer disabled:opacity-50"
+                        style={{
+                          backgroundColor: "var(--publish-btn-bg)",
+                          color: "var(--publish-btn-fg)",
+                        }}
+                      >
+                        {redeeming ? "正在登录…" : "确认登录"}
+                      </button>
+                    </div>
+                  </div>
                 ) : (
-                  <>
-                    <span style={{ color: "var(--brand-gold)" }}>
-                      <LinDoIcons.QrCode size={34} />
-                    </span>
-                    <span
-                      className="mt-2 text-[14px] font-semibold"
-                      style={{ color: "var(--ink-primary)" }}
+                  <div className="flex h-full flex-col justify-between">
+                    <button
+                      type="button"
+                      disabled={redeeming || decodingImage}
+                      onClick={() => fileInputRef.current?.click()}
+                      className="lindo-interactive flex w-full flex-1 min-h-0 flex-col items-center justify-center rounded-2xl px-4 py-5 text-center transition-colors disabled:opacity-60"
+                      style={{
+                        backgroundColor: "var(--subtle-surface)",
+                        border: dragActive
+                          ? "1.5px dashed var(--brand-gold)"
+                          : "1px dashed var(--hairline)",
+                      }}
                     >
-                      从图片识别二维码
-                    </span>
-                    <span className="mt-1 text-[12px]" style={{ color: "var(--ink-tertiary)" }}>
-                      点击选择截图、直接拖入图片，或按 Ctrl+V / ⌘V 粘贴截图
-                    </span>
-                  </>
+                      {decodingImage || redeeming ? (
+                        <>
+                          <SmoothRefreshIcon spinning size={26} />
+                          <span
+                            className="mt-2.5 text-[13.5px] font-semibold"
+                            style={{ color: "var(--ink-primary)" }}
+                          >
+                            {decodingImage ? "识别二维码中…" : "正在登录…"}
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <span style={{ color: "var(--brand-gold)" }}>
+                            <LinDoIcons.QrCode size={32} />
+                          </span>
+                          <span
+                            className="mt-2.5 text-[14px] font-semibold"
+                            style={{ color: "var(--ink-primary)" }}
+                          >
+                            选择或拖入二维码截图
+                          </span>
+                          <span
+                            className="mt-1 text-[12px]"
+                            style={{ color: "var(--ink-tertiary)" }}
+                          >
+                            支持点击选图、拖入文件或按 Ctrl+V / ⌘V 粘贴
+                          </span>
+                        </>
+                      )}
+                    </button>
+
+                    <div
+                      role="alert"
+                      aria-live="polite"
+                      className="flex h-[24px] shrink-0 items-center justify-center px-1"
+                    >
+                      {redeemError && (
+                        <p
+                          className="truncate text-[12px] leading-5"
+                          style={{ color: "#EF4444" }}
+                          title={redeemError}
+                        >
+                          {redeemError}
+                        </p>
+                      )}
+                    </div>
+
+                    <button
+                      type="button"
+                      disabled={redeeming || decodingImage}
+                      onClick={() => void handlePasteImageFromClipboardButton()}
+                      className="lindo-interactive flex h-[44px] w-full shrink-0 items-center justify-center gap-2 rounded-xl text-[13.5px] font-medium disabled:opacity-55"
+                      style={{
+                        border: "0.5px solid var(--hairline)",
+                        color: "var(--ink-primary)",
+                      }}
+                    >
+                      <LinDoIcons.Image size={15} style={{ color: "var(--ink-secondary)" }} />
+                      <span>从剪贴板识图</span>
+                    </button>
+                  </div>
                 )}
-              </button>
-
-              <button
-                type="button"
-                disabled={redeeming || decodingImage}
-                onClick={() => void handlePasteFromClipboardButton()}
-                className="lindo-interactive mt-3 flex h-[44px] w-full items-center justify-center gap-2 rounded-xl text-[13.5px] font-medium disabled:opacity-55"
-                style={{
-                  border: "0.5px solid var(--hairline)",
-                  color: "var(--ink-primary)",
-                }}
-              >
-                <LinDoIcons.Copy size={15} style={{ color: "var(--ink-secondary)" }} />
-                <span>粘贴剪贴板口令或截图</span>
-              </button>
-
-              <div className="mt-3.5 space-y-2.5">
-                <input
-                  type="text"
-                  value={manualToken}
-                  onChange={(e) => {
-                    setManualToken(e.target.value);
-                    if (redeemError) setRedeemError(null);
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && manualToken.trim() && !redeeming) {
-                      void submitQrPayload(manualToken);
-                    }
-                  }}
-                  placeholder="粘贴 lindo://qr-login?... 或 fluxdo://qr-login?..."
-                  className="h-10 w-full rounded-xl bg-transparent px-3 text-[12.5px] outline-none"
-                  style={{
-                    border: redeemError
-                      ? "0.5px solid var(--error-border)"
-                      : "0.5px solid var(--hairline)",
-                    color: "var(--ink-primary)",
-                  }}
-                />
-
-                {redeemError && (
-                  <p className="text-[12px] leading-relaxed" style={{ color: "#EF4444" }}>
-                    {redeemError}
-                  </p>
-                )}
-
-                <button
-                  type="button"
-                  disabled={!manualToken.trim() || redeeming || decodingImage}
-                  onClick={() => void submitQrPayload(manualToken)}
-                  className="flex h-[44px] w-full items-center justify-center rounded-xl text-[13.5px] font-bold transition-opacity hover:opacity-92 cursor-pointer disabled:opacity-50"
-                  style={{
-                    backgroundColor: "var(--publish-btn-bg)",
-                    color: "var(--publish-btn-fg)",
-                  }}
-                >
-                  {redeeming ? "正在登录…" : "确认登录"}
-                </button>
               </div>
             </div>
           )}
@@ -6664,16 +8158,28 @@ export const QrLoginModal: React.FC<{
 export const GuestLoginGuideModal: React.FC<{
   title: string;
   subtitle: string;
+  hasSavedAccounts?: boolean;
   onPrimaryWebLogin: () => void;
   onBrowserOneClickAuth: () => void;
+  onOpenQrLogin: () => void;
+  onOpenSavedAccounts?: () => void;
   onDismiss: () => void;
-}> = ({ title, subtitle, onPrimaryWebLogin, onBrowserOneClickAuth, onDismiss }) => (
+}> = ({
+  title,
+  subtitle,
+  hasSavedAccounts = false,
+  onPrimaryWebLogin,
+  onBrowserOneClickAuth,
+  onOpenQrLogin,
+  onOpenSavedAccounts,
+  onDismiss,
+}) => (
   <div
-    className="fixed inset-0 z-50 flex items-center justify-center bg-black/62"
+    className="fixed inset-0 z-50 flex items-center justify-center bg-black/62 p-4"
     onClick={onDismiss}
   >
     <div
-      className="w-[380px] rounded-2xl p-6 text-center shadow-2xl"
+      className="w-[380px] max-w-full rounded-2xl p-6 text-center shadow-2xl"
       style={{
         backgroundColor: "var(--card-surface)",
         border: "0.5px solid var(--hairline)",
@@ -6698,13 +8204,13 @@ export const GuestLoginGuideModal: React.FC<{
         <button
           type="button"
           onClick={onPrimaryWebLogin}
-          className="flex h-[46px] w-full items-center justify-center rounded-xl text-[14.5px] font-bold cursor-pointer"
+          className="flex h-[46px] w-full items-center justify-center rounded-xl text-[14.5px] font-bold transition-opacity hover:opacity-92 cursor-pointer"
           style={{
             backgroundColor: "var(--publish-btn-bg)",
             color: "var(--publish-btn-fg)",
           }}
         >
-          使用 LINUX DO 登录
+          使用 Linuxdo 登录
         </button>
 
         <button
@@ -6713,12 +8219,40 @@ export const GuestLoginGuideModal: React.FC<{
           className="lindo-interactive flex h-[46px] w-full items-center justify-center gap-2 rounded-xl text-[14px] font-semibold"
           style={{
             backgroundColor: "var(--subtle-surface)",
+            border: "0.5px solid var(--hairline)",
             color: "var(--ink-primary)",
           }}
         >
           <LinDoIcons.Globe size={16} />
-          <span>使用默认浏览器一键授权</span>
+          <span>系统浏览器授权</span>
         </button>
+
+        <button
+          type="button"
+          onClick={onOpenQrLogin}
+          className="lindo-interactive flex h-[46px] w-full items-center justify-center gap-2 rounded-xl text-[14px] font-semibold"
+          style={{
+            backgroundColor: "var(--subtle-surface)",
+            border: "0.5px solid var(--hairline)",
+            color: "var(--ink-primary)",
+          }}
+        >
+          <LinDoIcons.QrCode size={16} />
+          <span>二维码 / 口令登录</span>
+        </button>
+
+        {hasSavedAccounts && onOpenSavedAccounts && (
+          <div className="pt-0.5">
+            <button
+              type="button"
+              onClick={onOpenSavedAccounts}
+              className="lindo-interactive rounded-lg px-3 py-1 text-[13px] font-medium"
+              style={{ color: "var(--active-chip-text)" }}
+            >
+              切换已保存账号
+            </button>
+          </div>
+        )}
 
         <button
           type="button"
@@ -6821,6 +8355,26 @@ const globalSearchCache = new SearchResultLruCache<{
 
 const historyCloudSearchCache = new SearchResultLruCache<SearchableHistoryItem[]>(24, 60_000);
 
+const CJK_CHAR_RE = /[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u30ff\uac00-\ud7af]/;
+
+export function isValidSearchQuery(raw: string): boolean {
+  const q = raw.trim();
+  if (!q) return false;
+  if (CJK_CHAR_RE.test(q)) return q.length >= 1;
+  return q.length >= 2;
+}
+
+export const HOT_SEARCH_KEYWORDS = [
+  "Claude",
+  "Cursor",
+  "公益站",
+  "Linux",
+  "Docker",
+  "API",
+  "保级",
+  "教程",
+] as const;
+
 export const GlobalSearchModal: React.FC<{
   categories?: CategoryMeta[];
   onSelectHit: (topicId: number, title: string, postNumber?: number) => void;
@@ -6850,6 +8404,7 @@ export const GlobalSearchModal: React.FC<{
   const [hasMore, setHasMore] = useState(false);
   const [searching, setSearching] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const searchSeqRef = useRef(0);
   const lastImmediateNonceRef = useRef(0);
@@ -6881,12 +8436,13 @@ export const GlobalSearchModal: React.FC<{
 
   useEffect(() => {
     const q = committedQuery.trim();
-    if (q.length < 2 && activeFilterCount === 0) {
+    if (!isValidSearchQuery(q) && activeFilterCount === 0) {
       searchSeqRef.current += 1;
       setHits([]);
       setUserHits([]);
       setTagHits([]);
       setHasMore(false);
+      setLoadMoreError(null);
       setError(null);
       setSearching(false);
       return;
@@ -6901,6 +8457,7 @@ export const GlobalSearchModal: React.FC<{
       setTagHits(cached.tags);
       setHasMore(cached.hasMore);
       setPage(1);
+      setLoadMoreError(null);
       setError(null);
       setSearching(false);
       return;
@@ -6915,6 +8472,7 @@ export const GlobalSearchModal: React.FC<{
         if (cancelled || seq !== searchSeqRef.current) return;
         setSearching(true);
         setError(null);
+        setLoadMoreError(null);
         setPage(1);
         searchCommunity(q, 1, order || null, activeFilters)
           .then((res) => {
@@ -6948,14 +8506,17 @@ export const GlobalSearchModal: React.FC<{
     const nextPage = page + 1;
     const seq = searchSeqRef.current;
     setLoadingMore(true);
+    setLoadMoreError(null);
     try {
       const res = await searchCommunity(committedQuery.trim(), nextPage, order || null, activeFilters);
       if (seq !== searchSeqRef.current) return;
       setHits((prev) => [...prev, ...res.posts]);
       setPage(nextPage);
       setHasMore(res.hasMore);
-    } catch {
-      if (seq === searchSeqRef.current) setHasMore(false);
+    } catch (err: any) {
+      if (seq === searchSeqRef.current) {
+        setLoadMoreError(err?.message || "加载更多结果失败，请重试");
+      }
     } finally {
       if (seq === searchSeqRef.current) setLoadingMore(false);
     }
@@ -7195,11 +8756,42 @@ export const GlobalSearchModal: React.FC<{
               {error}
             </div>
           ) : hits.length === 0 && userHits.length === 0 && tagHits.length === 0 ? (
-            <div className="p-8 text-center text-[12.5px]" style={{ color: "var(--ink-tertiary)" }}>
-              {query.trim().length < 2 && activeFilterCount === 0
-                ? "输入至少 2 个字符，或选择高级筛选条件开始检索"
-                : "未找到匹配结果，试试其他关键词或放宽筛选"}
-            </div>
+            !isValidSearchQuery(query) && activeFilterCount === 0 ? (
+              <div className="space-y-4 p-6">
+                <div className="text-center text-[12.5px]" style={{ color: "var(--ink-tertiary)" }}>
+                  输入关键词（支持单字中文或 2+ 英文字符）或选择高级筛选条件开始检索
+                </div>
+                <div className="space-y-2">
+                  <div className="text-[11.5px] font-medium" style={{ color: "var(--ink-tertiary)" }}>
+                    热门搜索
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {HOT_SEARCH_KEYWORDS.map((kw) => (
+                      <button
+                        key={kw}
+                        type="button"
+                        onClick={() => {
+                          queryInput.setDirect(kw);
+                          setImmediateNonce((n) => n + 1);
+                        }}
+                        className="lindo-interactive rounded-full px-3 py-1 text-[12px] font-medium"
+                        style={{
+                          backgroundColor: "var(--subtle-surface)",
+                          border: "0.5px solid var(--hairline)",
+                          color: "var(--ink-primary)",
+                        }}
+                      >
+                        {kw}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="p-8 text-center text-[12.5px]" style={{ color: "var(--ink-tertiary)" }}>
+                未找到匹配结果，试试其他关键词或放宽筛选
+              </div>
+            )
           ) : (
             <>
               {(userHits.length > 0 || tagHits.length > 0) && (
@@ -7325,6 +8917,7 @@ export const GlobalSearchModal: React.FC<{
                         <span>@{h.username}</span>
                         <span>·</span>
                         <span>{formatRelativeTime(h.createdAt)}</span>
+                        {h.postsCount > 0 && <span>· {h.postsCount} 帖</span>}
                         {h.likeCount > 0 && <span>· {h.likeCount} 赞</span>}
                       </div>
                     </div>
@@ -7334,6 +8927,11 @@ export const GlobalSearchModal: React.FC<{
 
               {hasMore && (
                 <div className="py-3 text-center">
+                  {loadMoreError && (
+                    <div className="mb-1 text-[11.5px]" style={{ color: "var(--error-fg)" }}>
+                      {loadMoreError}
+                    </div>
+                  )}
                   <button
                     type="button"
                     disabled={loadingMore}
@@ -7341,7 +8939,11 @@ export const GlobalSearchModal: React.FC<{
                     className="lindo-interactive rounded-full px-4 py-1 text-[12px] font-medium"
                     style={{ color: "var(--active-chip-text)" }}
                   >
-                    {loadingMore ? "加载中..." : "加载更多搜索结果"}
+                    {loadingMore
+                      ? "加载中..."
+                      : loadMoreError
+                        ? "重试加载更多"
+                        : "加载更多搜索结果"}
                   </button>
                 </div>
               )}
@@ -7353,14 +8955,40 @@ export const GlobalSearchModal: React.FC<{
   );
 };
 
-/* ==================== 8. 公开用户名片（支持 关注/取消关注、发私信 与 近期发言） ==================== */
+/* ==================== 8. 公开用户名片（完整资料、统计、4 分栏动态/徽章、关注与私信） ==================== */
+function formatProfileReadTime(seconds: number): string {
+  if (!seconds || seconds <= 0) return "0 分钟";
+  const hours = Math.floor(seconds / 3600);
+  if (hours > 0) return `${hours} 小时`;
+  return `${Math.max(1, Math.floor(seconds / 60))} 分钟`;
+}
+
+function userActionTypeLabel(actionType: number): string {
+  switch (actionType) {
+    case 1:
+      return "送出赞";
+    case 2:
+      return "获得赞";
+    case 4:
+      return "发表主题";
+    case 5:
+      return "发表回复";
+    default:
+      return "社区动态";
+  }
+}
+
 export const PublicUserCardModal: React.FC<{
   username: string;
   isAuthorized: boolean;
   currentUsername?: string | null;
   onStartPm: (recipientUsername: string) => void;
   onOpenTopic: (topicId: number, title: string, postNumber?: number) => void;
+  onInspectUser?: (username: string) => void;
   onInspectBadge?: (badge: GrantedBadge) => void;
+  onOpenSiteBadges?: () => void;
+  onOpenInAppUrl?: (url: string) => void;
+  onRequestGuestLogin?: (title: string, subtitle: string) => void;
   onClose: () => void;
 }> = ({
   username,
@@ -7368,46 +8996,302 @@ export const PublicUserCardModal: React.FC<{
   currentUsername,
   onStartPm,
   onOpenTopic,
+  onInspectUser,
   onInspectBadge,
+  onOpenSiteBadges,
+  onOpenInAppUrl,
+  onRequestGuestLogin,
   onClose,
 }) => {
-  const [userObj, setUserObj] = useState<any | null>(null);
-  const [cardBadges, setCardBadges] = useState<GrantedBadge[]>([]);
-  const [following, setFollowing] = useState(false);
-  const [recentActions, setRecentActions] = useState<any[]>([]);
-  const [showRecent, setShowRecent] = useState(false);
-  const [loadingRecent, setLoadingRecent] = useState(false);
+  const [profile, setProfile] = useState<PublicUserProfile | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [reloadToken, setReloadToken] = useState(0);
 
-  useEffect(() => {
-    fetchUserCardDetail(username)
-      .then((d) => {
-        const u = d?.user ?? null;
-        setUserObj(u);
-        setFollowing(Boolean(u?.is_followed ?? u?.following));
-        if (Array.isArray(d?.badges)) {
-          setCardBadges(
-            d.badges
-              .filter((b: any) => Number(b?.id ?? 0) > 0)
-              .slice(0, 8)
-              .map((b: any) => ({
-                id: Number(b.id),
-                name: String(b.name || ""),
-                description: String(b.description || ""),
-                longDescription: b.long_description ? String(b.long_description) : undefined,
-                badgeTypeId: Number(b.badge_type_id ?? 3),
-                icon: b.icon ?? null,
-                imageUrl: b.image_url ?? b.image ?? null,
-                grantCount: Number(b.grant_count ?? 0),
-                isEarned: true,
-              }))
-          );
-        }
-      })
-      .catch(() => {});
-  }, [username]);
+  const [following, setFollowing] = useState(false);
+  const [togglingFollow, setTogglingFollow] = useState(false);
+  const [followError, setFollowError] = useState<string | null>(null);
+
+  const [showMoreStats, setShowMoreStats] = useState(false);
+  const [activeTab, setActiveTab] = useState<"all" | "topics" | "replies" | "badges">("all");
+
+  const [allActions, setAllActions] = useState<UserActivityItem[]>([]);
+  const [topicActions, setTopicActions] = useState<UserActivityItem[] | null>(null);
+  const [replyActions, setReplyActions] = useState<UserActivityItem[] | null>(null);
+  const [hasMoreAll, setHasMoreAll] = useState(false);
+  const [hasMoreTopics, setHasMoreTopics] = useState(false);
+  const [hasMoreReplies, setHasMoreReplies] = useState(false);
+  const [tabLoading, setTabLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
+
+  const [allBadges, setAllBadges] = useState<GrantedBadge[] | null>(null);
+  const [badgesLoading, setBadgesLoading] = useState(false);
+  const [badgesError, setBadgesError] = useState<string | null>(null);
+  const [badgesRetryNonce, setBadgesRetryNonce] = useState(0);
+
+  const [pendingExternalLink, setPendingExternalLink] = useState<ExternalUrlAssessment | null>(
+    null
+  );
+  const [blockedLinkNotice, setBlockedLinkNotice] = useState<string | null>(null);
 
   const isSelf =
     Boolean(currentUsername) && currentUsername!.toLowerCase() === username.toLowerCase();
+
+  useEffect(() => {
+    let alive = true;
+    setProfile(null);
+    setLoading(true);
+    setLoadError(null);
+    setFollowError(null);
+    setShowMoreStats(false);
+    setActiveTab("all");
+    setAllActions([]);
+    setTopicActions(null);
+    setReplyActions(null);
+    setAllBadges(null);
+    setBadgesError(null);
+    setLoadMoreError(null);
+
+    void (async () => {
+      try {
+        const [loadedProfile, initialActions] = await Promise.all([
+          fetchPublicUserProfile(username),
+          fetchUserActivityItems(username, null, 0).catch(() => []),
+        ]);
+        if (!alive) return;
+        setProfile(loadedProfile);
+        setAllActions(initialActions);
+        setHasMoreAll(initialActions.length >= 20);
+        if (typeof loadedProfile.isFollowedHint === "boolean") {
+          setFollowing(loadedProfile.isFollowedHint);
+        }
+      } catch (err: any) {
+        if (!alive) return;
+        setLoadError(err?.message || "加载用户资料失败，请重试");
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+
+    return () => {
+      alive = false;
+    };
+  }, [username, reloadToken]);
+
+  // Authoritative follow state via current user's following list (never rely solely on unreliable card flags)
+  useEffect(() => {
+    if (!isAuthorized || isSelf || !currentUsername) {
+      setFollowing(false);
+      return;
+    }
+    let alive = true;
+    fetchUserFollowList(currentUsername, false)
+      .then((list) => {
+        if (!alive) return;
+        setFollowing(list.some((u) => u.username.toLowerCase() === username.toLowerCase()));
+      })
+      .catch(() => {
+        // retain profile.isFollowedHint fallback if following list call fails
+      });
+    return () => {
+      alive = false;
+    };
+  }, [username, isAuthorized, isSelf, currentUsername]);
+
+  // Lazy-load secondary tabs on selection
+  useEffect(() => {
+    if (!profile) return;
+    let alive = true;
+    setLoadMoreError(null);
+
+    if (activeTab === "topics" && topicActions === null) {
+      setTabLoading(true);
+      fetchUserActivityItems(username, "4", 0)
+        .then((items) => {
+          if (!alive) return;
+          setTopicActions(items);
+          setHasMoreTopics(items.length >= 20);
+        })
+        .catch(() => {
+          if (!alive) return;
+          setTopicActions(allActions.filter((a) => a.actionType === 4));
+          setHasMoreTopics(false);
+        })
+        .finally(() => {
+          if (alive) setTabLoading(false);
+        });
+    } else if (activeTab === "replies" && replyActions === null) {
+      setTabLoading(true);
+      fetchUserActivityItems(username, "5", 0)
+        .then((items) => {
+          if (!alive) return;
+          setReplyActions(items);
+          setHasMoreReplies(items.length >= 20);
+        })
+        .catch(() => {
+          if (!alive) return;
+          setReplyActions(allActions.filter((a) => a.actionType === 5));
+          setHasMoreReplies(false);
+        })
+        .finally(() => {
+          if (alive) setTabLoading(false);
+        });
+    } else if (activeTab === "badges" && allBadges === null) {
+      setBadgesLoading(true);
+      setBadgesError(null);
+      fetchUserBadges(username)
+        .then((raw) => {
+          if (!alive) return;
+          setAllBadges(mapSiteBadgeList(raw, true));
+        })
+        .catch((err: any) => {
+          if (!alive) return;
+          setBadgesError(err?.message || "加载徽章失败，请重试");
+        })
+        .finally(() => {
+          if (alive) setBadgesLoading(false);
+        });
+    }
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, profile?.username, badgesRetryNonce]);
+
+  useEffect(() => {
+    if (!followError) return;
+    const t = setTimeout(() => setFollowError(null), 3200);
+    return () => clearTimeout(t);
+  }, [followError]);
+
+  useEffect(() => {
+    if (!blockedLinkNotice) return;
+    const t = setTimeout(() => setBlockedLinkNotice(null), 2800);
+    return () => clearTimeout(t);
+  }, [blockedLinkNotice]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (isImeComposingEvent(e)) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        if (pendingExternalLink) setPendingExternalLink(null);
+        else onClose();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose, pendingExternalLink]);
+
+  const handleSmartUrlClick = (rawHref: string, anchorEl?: HTMLAnchorElement | null) => {
+    const href = (rawHref || "").trim();
+    if (!href) return;
+    const internal = parseInternalForumLink(href, anchorEl);
+    if (internal) {
+      if (internal.kind === "topic") {
+        onClose();
+        onOpenTopic(internal.topicId, "社区话题", internal.postNumber);
+        return;
+      }
+      if (internal.kind === "user" && onInspectUser) {
+        onInspectUser(internal.username);
+        return;
+      }
+    }
+    const assessment = classifyExternalUrl(href, anchorEl?.textContent);
+    if (assessment.tier === "BLOCKED") {
+      setBlockedLinkNotice(assessment.riskReason || "已拦截不安全链接");
+      return;
+    }
+    if (assessment.tier === "INTERNAL") {
+      if (onOpenInAppUrl) onOpenInAppUrl(assessment.normalizedUrl);
+      else openUrl(assessment.normalizedUrl);
+      return;
+    }
+    if (assessment.tier === "TRUSTED") {
+      openUrl(assessment.normalizedUrl);
+      return;
+    }
+    setPendingExternalLink(assessment);
+  };
+
+  const handleFollowClick = async () => {
+    if (!isAuthorized) {
+      onRequestGuestLogin?.("登录后关注用户", `登录后即可关注 @${username}，订阅对方动态`);
+      return;
+    }
+    if (togglingFollow || !profile) return;
+    const prev = following;
+    const next = !prev;
+    setFollowing(next);
+    setTogglingFollow(true);
+    setFollowError(null);
+    try {
+      await toggleFollowUser(profile.username, next);
+    } catch (err: any) {
+      setFollowing(prev);
+      setFollowError(err?.message || (next ? "关注失败，请稍后重试" : "取消关注失败，请稍后重试"));
+    } finally {
+      setTogglingFollow(false);
+    }
+  };
+
+  const handlePmClick = () => {
+    if (!isAuthorized) {
+      onRequestGuestLogin?.("登录后发送私信", `登录后即可向 @${username} 发送站内私信`);
+      return;
+    }
+    onClose();
+    onStartPm(profile?.username || username);
+  };
+
+  const handleLoadMoreActions = async () => {
+    if (loadingMore || activeTab === "badges") return;
+    const curList =
+      activeTab === "topics"
+        ? topicActions ?? []
+        : activeTab === "replies"
+          ? replyActions ?? []
+          : allActions;
+    const filter = activeTab === "topics" ? "4" : activeTab === "replies" ? "5" : null;
+    setLoadingMore(true);
+    setLoadMoreError(null);
+    try {
+      const next = await fetchUserActivityItems(username, filter, curList.length);
+      if (activeTab === "topics") {
+        setTopicActions([...curList, ...next]);
+        setHasMoreTopics(next.length >= 20);
+      } else if (activeTab === "replies") {
+        setReplyActions([...curList, ...next]);
+        setHasMoreReplies(next.length >= 20);
+      } else {
+        setAllActions([...curList, ...next]);
+        setHasMoreAll(next.length >= 20);
+      }
+    } catch (err: any) {
+      setLoadMoreError(err?.message || "加载更多失败，请重试");
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
+  const distinctBadgeCount =
+    allBadges?.length ?? Math.max(profile?.badgeCount ?? 0, profile?.badges.length ?? 0);
+
+  const activeActivityList =
+    activeTab === "topics"
+      ? topicActions ?? []
+      : activeTab === "replies"
+        ? replyActions ?? []
+        : allActions;
+
+  const activeHasMore =
+    activeTab === "topics"
+      ? hasMoreTopics
+      : activeTab === "replies"
+        ? hasMoreReplies
+        : hasMoreAll;
 
   return (
     <div
@@ -7415,261 +9299,587 @@ export const PublicUserCardModal: React.FC<{
       onClick={onClose}
     >
       <div
-        className="w-[410px] max-w-full max-h-[82vh] flex flex-col rounded-2xl p-5 shadow-2xl overflow-hidden"
+        className="flex max-h-[84vh] w-[540px] max-w-full flex-col overflow-hidden rounded-2xl shadow-2xl"
         style={{
           backgroundColor: "var(--card-surface)",
           border: "0.5px solid var(--hairline)",
         }}
         onClick={(e) => e.stopPropagation()}
       >
-        {!userObj ? (
-          <div className="space-y-4">
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-3">
-                <div className="lindo-shimmer h-14 w-14 shrink-0 rounded-full" />
-                <div className="space-y-2">
-                  <div className="lindo-shimmer h-4 w-28 rounded" />
-                  <div className="lindo-shimmer h-3 w-36 rounded" />
-                </div>
-              </div>
+        {/* 顶栏：标题 + 关注 / 发私信 + 关闭 */}
+        <div className="lindo-hairline-b flex h-[48px] shrink-0 items-center justify-between gap-2 px-4">
+          <span className="truncate text-[15px] font-semibold" style={{ color: "var(--ink-primary)" }}>
+            用户主页
+          </span>
+          <div className="flex items-center gap-1.5">
+            {!isSelf && (profile?.canFollow !== false) && (
               <button
                 type="button"
-                onClick={onClose}
-                className="lindo-interactive rounded-full p-1"
+                disabled={togglingFollow}
+                onClick={() => void handleFollowClick()}
+                className="rounded-full px-3 py-1 text-[12px] font-semibold cursor-pointer disabled:opacity-55"
+                style={{
+                  backgroundColor: following ? "var(--subtle-surface)" : "var(--publish-btn-bg)",
+                  border: "0.5px solid var(--hairline)",
+                  color: following ? "var(--ink-secondary)" : "var(--publish-btn-fg)",
+                }}
               >
-                <LinDoIcons.Close size={16} />
+                {following ? "已关注" : "+ 关注"}
               </button>
+            )}
+            {!isSelf && (
+              <button
+                type="button"
+                onClick={handlePmClick}
+                className="lindo-interactive inline-flex items-center gap-1 rounded-full px-3 py-1 text-[12px] font-medium"
+                style={{
+                  backgroundColor: "var(--subtle-surface)",
+                  border: "0.5px solid var(--hairline)",
+                  color: "var(--ink-primary)",
+                }}
+              >
+                <LinDoIcons.Mail size={13.5} />
+                <span>发私信</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="关闭用户主页"
+              className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-full"
+              style={{ color: "var(--ink-secondary)" }}
+            >
+              <LinDoIcons.Close size={15.5} />
+            </button>
+          </div>
+        </div>
+
+        {(followError || blockedLinkNotice) && (
+          <div
+            role="alert"
+            className="shrink-0 px-4 py-1.5 text-[12px]"
+            style={{
+              backgroundColor: "rgba(239, 68, 68, 0.10)",
+              color: "#EF4444",
+              borderBottom: "0.5px solid rgba(239, 68, 68, 0.25)",
+            }}
+          >
+            {followError || blockedLinkNotice}
+          </div>
+        )}
+
+        {loading && !profile ? (
+          <div className="space-y-4 p-5">
+            <div className="flex items-center gap-3.5">
+              <div className="lindo-shimmer h-[58px] w-[58px] shrink-0 rounded-full" />
+              <div className="flex-1 space-y-2">
+                <div className="lindo-shimmer h-5 w-36 rounded" />
+                <div className="lindo-shimmer h-3.5 w-48 rounded" />
+              </div>
             </div>
             <div className="space-y-2">
               <div className="lindo-shimmer h-3.5 w-full rounded" />
               <div className="lindo-shimmer h-3.5 w-4/5 rounded" />
             </div>
-            <div className="grid grid-cols-3 gap-2 pt-1">
-              <div className="lindo-shimmer h-8 rounded-xl" />
-              <div className="lindo-shimmer h-8 rounded-xl" />
-              <div className="lindo-shimmer h-8 rounded-xl" />
+            <div className="grid grid-cols-3 gap-3 pt-1">
+              <div className="lindo-shimmer h-12 rounded-xl" />
+              <div className="lindo-shimmer h-12 rounded-xl" />
+              <div className="lindo-shimmer h-12 rounded-xl" />
+            </div>
+            <div className="space-y-2.5 pt-2">
+              <div className="lindo-shimmer h-14 w-full rounded-xl" />
+              <div className="lindo-shimmer h-14 w-full rounded-xl" />
             </div>
           </div>
-        ) : (
-          <div className="flex flex-col min-h-0">
-            <div className="flex items-start justify-between gap-2">
-              <div className="flex items-center gap-3 min-w-0">
+        ) : loadError && !profile ? (
+          <div className="flex flex-col items-center justify-center px-6 py-14 text-center">
+            <MascotExpression expression="surprised" sizePx={48} className="mb-3" />
+            <p className="text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+              {loadError}
+            </p>
+            <button
+              type="button"
+              onClick={() => setReloadToken((n) => n + 1)}
+              className="mt-3.5 rounded-full px-5 py-1.5 text-[12.5px] font-semibold cursor-pointer"
+              style={{
+                backgroundColor: "var(--publish-btn-bg)",
+                color: "var(--publish-btn-fg)",
+              }}
+            >
+              重试
+            </button>
+          </div>
+        ) : profile ? (
+          <div className="lindo-scroll flex-1 min-h-0">
+            {/* 1. 身份头部 */}
+            <div className="px-5 pt-4 pb-3">
+              <div className="flex items-start gap-3.5">
                 <AvatarWithFlair
-                  username={userObj.username}
-                  avatarTemplate={userObj.avatar_template}
-                  animatedAvatar={userObj.animated_avatar}
-                  primaryGroupName={userObj.primary_group_name}
-                  flair={
-                    userObj.flair_url
-                      ? {
-                          url: userObj.flair_url,
-                          name: userObj.flair_name,
-                          bgColorHex: userObj.flair_bg_color,
-                          fgColorHex: userObj.flair_color,
-                        }
-                      : null
-                  }
-                  sizePx={56}
+                  username={profile.username}
+                  avatarTemplate={profile.avatarTemplate}
+                  animatedAvatar={profile.animatedAvatar}
+                  primaryGroupName={profile.primaryGroupName}
+                  flair={profile.flair}
+                  sizePx={58}
                 />
-                <div className="min-w-0">
-                  <div className="flex items-center gap-1.5 min-w-0">
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-1.5">
                     <span
-                      className="truncate text-[16px] font-bold"
+                      className="truncate text-[18px] font-bold leading-tight"
                       style={{ color: "var(--ink-primary)" }}
                     >
-                      {userObj.name || userObj.username}
+                      {profile.displayName}
                     </span>
-                    {userObj.status?.emoji && (
+                    {(profile.moderator || profile.admin) && (
                       <span
-                        title={userObj.status?.description || ""}
+                        title={profile.admin ? "社区管理员" : "社区版主"}
+                        aria-label={profile.admin ? "管理员" : "版主"}
                         className="inline-flex shrink-0 items-center"
+                        style={{ color: "var(--brand-gold)" }}
                       >
-                        <StatusEmojiIcon emoji={userObj.status.emoji} size={14} />
+                        <LinDoIcons.ShieldCheck size={14.5} />
                       </span>
                     )}
-                  </div>
-                  <div className="text-[12px]" style={{ color: "var(--ink-secondary)" }}>
-                    @{userObj.username} · {trustLevelLabel(userObj.trust_level ?? 1)}
-                  </div>
-                  {userObj.title && (
-                    <span
-                      className={
-                        isHolographicTitle(userObj.title)
-                          ? "lindo-title-holo mt-1 inline-block text-[12px]"
-                          : "mt-1 inline-block rounded-full px-2 py-0.5 text-[11px] font-medium"
-                      }
-                      style={
-                        isHolographicTitle(userObj.title)
-                          ? undefined
-                          : {
-                              backgroundColor: "var(--tonal-pill)",
-                              color: "var(--brand-gold)",
-                            }
-                      }
-                    >
-                      {userObj.title}
+                    <span className="text-[12.5px]" style={{ color: "var(--ink-secondary)" }}>
+                      @{profile.username} · {trustLevelLabel(profile.trustLevel)}
                     </span>
+                  </div>
+
+                  {profile.title && (
+                    <div className="mt-1">
+                      <span
+                        className={
+                          isHolographicTitle(profile.title)
+                            ? "lindo-title-holo inline-block text-[12px]"
+                            : "inline-block rounded-full px-2 py-0.5 text-[11px] font-medium"
+                        }
+                        style={
+                          isHolographicTitle(profile.title)
+                            ? undefined
+                            : {
+                                backgroundColor: "var(--tonal-pill)",
+                                color: "var(--brand-gold)",
+                              }
+                        }
+                      >
+                        {profile.title}
+                      </span>
+                    </div>
+                  )}
+
+                  {profile.status && (profile.status.emoji || profile.status.description) && (
+                    <div
+                      className="mt-1.5 inline-flex max-w-full items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11.8px]"
+                      style={{
+                        backgroundColor: "var(--subtle-surface)",
+                        border: "0.5px solid var(--hairline)",
+                        color: "var(--ink-secondary)",
+                      }}
+                    >
+                      {profile.status.emoji && (
+                        <span className="inline-flex shrink-0 items-center">
+                          <StatusEmojiIcon emoji={profile.status.emoji} size={13.5} />
+                        </span>
+                      )}
+                      {profile.status.description && (
+                        <span className="truncate">{profile.status.description}</span>
+                      )}
+                    </div>
                   )}
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={onClose}
-                className="lindo-interactive rounded-full p-1"
+
+              {/* 2. 个人简介（安全拦截 <a> 点击） */}
+              {profile.bioExcerptHtml && (
+                <div
+                  className="lindo-cooked mt-3 line-clamp-4 text-[13px] leading-relaxed"
+                  style={{ color: "var(--ink-secondary)" }}
+                  onClick={(e) => {
+                    const anchor = (e.target as HTMLElement).closest("a") as HTMLAnchorElement | null;
+                    if (anchor?.getAttribute("href")) {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      handleSmartUrlClick(anchor.getAttribute("href") || anchor.href, anchor);
+                    }
+                  }}
+                  dangerouslySetInnerHTML={{ __html: profile.bioExcerptHtml }}
+                />
+              )}
+
+              {/* 3. 六项元数据条：加入于 / 最近活跃 / 主用户组 / 所在地 / 个人网站（可点击）/ 已解答数 */}
+              {(profile.createdAtText ||
+                profile.lastSeenText ||
+                profile.primaryGroupName ||
+                profile.location ||
+                profile.websiteName ||
+                profile.solvedCount > 0) && (
+                <div
+                  className="mt-3 flex flex-wrap items-center gap-x-3.5 gap-y-1.5 text-[11.8px]"
+                  style={{ color: "var(--ink-tertiary)" }}
+                >
+                  {profile.createdAtText && <span>加入于 {profile.createdAtText}</span>}
+                  {profile.lastSeenText && (
+                    <span>最近活跃 {formatRelativeTime(profile.lastSeenText)}</span>
+                  )}
+                  {profile.primaryGroupName && <span>主用户组 {profile.primaryGroupName}</span>}
+                  {profile.location && <span>所在地 {profile.location}</span>}
+                  {profile.websiteName && (
+                    <button
+                      type="button"
+                      onClick={() => handleSmartUrlClick(profile.websiteUrl || profile.websiteName)}
+                      className="inline-flex max-w-[220px] items-center gap-1 truncate hover:underline cursor-pointer"
+                      style={{ color: "var(--active-chip-text)" }}
+                    >
+                      <LinDoIcons.Globe size={11.5} />
+                      <span className="truncate">{profile.websiteName}</span>
+                    </button>
+                  )}
+                  {profile.solvedCount > 0 && (
+                    <span className="font-semibold" style={{ color: "var(--brand-gold)" }}>
+                      已解答 {formatCompactCount(profile.solvedCount)}
+                    </span>
+                  )}
+                </div>
+              )}
+
+              {/* 4. 精选可点击徽章条 */}
+              {profile.badges.length > 0 && (
+                <div className="no-scrollbar mt-3 flex items-center gap-1.5 overflow-x-auto pb-0.5">
+                  {profile.badges.slice(0, 8).map((cb) => (
+                    <button
+                      key={cb.id}
+                      type="button"
+                      onClick={() => onInspectBadge?.(cb)}
+                      className="inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium cursor-pointer transition-opacity hover:opacity-85"
+                      style={{
+                        backgroundColor: "var(--subtle-surface)",
+                        border: "0.5px solid var(--hairline)",
+                        color: "var(--ink-primary)",
+                      }}
+                    >
+                      <OfficialBadgeIcon badge={cb} size={13} />
+                      <span>{cb.name}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* 5. 社区数据统计（顶部 3 项 + 展开 5 项，对齐安卓端 3+5 指标） */}
+              <div
+                className="mt-3.5 rounded-xl px-3.5 py-2.5"
+                style={{
+                  backgroundColor: "var(--subtle-surface)",
+                  border: "0.5px solid var(--hairline)",
+                }}
               >
-                <LinDoIcons.Close size={16} />
-              </button>
+                <div className="grid grid-cols-3 gap-2">
+                  {[
+                    { value: formatCompactCount(profile.likesReceived), label: "获赞" },
+                    { value: String(profile.daysVisited), label: "访问天数" },
+                    { value: formatProfileReadTime(profile.timeReadSeconds), label: "阅读时长" },
+                  ].map((m) => (
+                    <div key={m.label}>
+                      <div
+                        className="text-[15px] font-semibold tabular-nums"
+                        style={{ color: "var(--ink-primary)" }}
+                      >
+                        {m.value}
+                      </div>
+                      <div className="text-[11px]" style={{ color: "var(--ink-tertiary)" }}>
+                        {m.label}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {showMoreStats && (
+                  <div
+                    className="mt-2.5 grid grid-cols-3 gap-x-2 gap-y-2.5 pt-2.5"
+                    style={{ borderTop: "0.5px solid var(--hairline)" }}
+                  >
+                    {[
+                      { value: formatCompactCount(profile.topicsEntered), label: "浏览话题" },
+                      { value: formatCompactCount(profile.postsReadCount), label: "阅读帖子" },
+                      { value: formatCompactCount(profile.likesGiven), label: "送出赞" },
+                      { value: formatCompactCount(profile.topicCount), label: "发表主题" },
+                      { value: formatCompactCount(profile.postCount), label: "发表回复" },
+                    ].map((m) => (
+                      <div key={m.label}>
+                        <div
+                          className="text-[14px] font-semibold tabular-nums"
+                          style={{ color: "var(--ink-primary)" }}
+                        >
+                          {m.value}
+                        </div>
+                        <div className="text-[11px]" style={{ color: "var(--ink-tertiary)" }}>
+                          {m.label}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => setShowMoreStats((v) => !v)}
+                  className="mt-2 inline-flex items-center gap-1 text-[11.5px] font-medium cursor-pointer"
+                  style={{ color: "var(--ink-secondary)" }}
+                >
+                  <span>{showMoreStats ? "收起社区数据" : "社区数据"}</span>
+                  {showMoreStats ? (
+                    <LinDoIcons.ChevronUp size={13} />
+                  ) : (
+                    <LinDoIcons.ChevronDown size={13} />
+                  )}
+                </button>
+              </div>
             </div>
 
-            {cardBadges.length > 0 && (
-              <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-                {cardBadges.map((cb) => (
+            {/* 6. 吸顶 4 分栏：全部动态 | 主题 (N) | 回复 (N) | 徽章 (N) */}
+            <div
+              role="tablist"
+              aria-label="用户主页分栏"
+              className="lindo-hairline-b lindo-hairline-t sticky top-0 z-10 flex items-center gap-5 px-5 text-[13px]"
+              style={{ backgroundColor: "var(--card-surface)" }}
+            >
+              {(
+                [
+                  { key: "all", label: "全部动态" },
+                  { key: "topics", label: `主题 (${profile.topicCount})` },
+                  { key: "replies", label: `回复 (${profile.postCount})` },
+                  { key: "badges", label: `徽章 (${distinctBadgeCount})` },
+                ] as const
+              ).map((tab) => {
+                const selected = activeTab === tab.key;
+                return (
                   <button
-                    key={cb.id}
+                    key={tab.key}
                     type="button"
-                    onClick={() => onInspectBadge?.(cb)}
-                    className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium cursor-pointer transition-opacity hover:opacity-85"
+                    role="tab"
+                    aria-selected={selected}
+                    onClick={() => setActiveTab(tab.key)}
+                    className="relative select-none py-2.5 tabular-nums transition-colors cursor-pointer"
                     style={{
-                      backgroundColor: "var(--subtle-surface)",
-                      border: "0.5px solid var(--hairline)",
-                      color: "var(--ink-primary)",
+                      color: selected ? "var(--ink-primary)" : "var(--ink-secondary)",
+                      fontWeight: selected ? 600 : 400,
                     }}
                   >
-                    <OfficialBadgeIcon badge={cb} size={13} />
-                    <span>{cb.name}</span>
+                    <span className="lindo-tab-label" data-label={tab.label}>
+                      <span>{tab.label}</span>
+                    </span>
+                    {selected && (
+                      <span
+                        className="absolute right-0 bottom-0 left-0 h-[2px] rounded-full"
+                        style={{ backgroundColor: "var(--tab-indicator)" }}
+                      />
+                    )}
                   </button>
-                ))}
-              </div>
-            )}
-
-            {userObj.bio_excerpt && (
-              <div
-                className="lindo-cooked mt-3 line-clamp-3 text-[12.8px]"
-                style={{ color: "var(--ink-secondary)" }}
-                dangerouslySetInnerHTML={{ __html: userObj.bio_excerpt }}
-              />
-            )}
-
-            {/* 互动按钮栏 */}
-            <div className="mt-4 flex items-center gap-2">
-              {isAuthorized && !isSelf && userObj.can_follow !== false && (
-                <button
-                  type="button"
-                  onClick={async () => {
-                    const next = !following;
-                    try {
-                      await toggleFollowUser(userObj.username, next);
-                      setFollowing(next);
-                    } catch {}
-                  }}
-                  className="flex-1 rounded-xl py-1.5 text-[12.8px] font-bold cursor-pointer"
-                  style={{
-                    backgroundColor: following
-                      ? "var(--subtle-surface)"
-                      : "var(--publish-btn-bg)",
-                    border: "0.5px solid var(--hairline)",
-                    color: following ? "var(--ink-secondary)" : "var(--publish-btn-fg)",
-                  }}
-                >
-                  {following ? "已关注" : "+ 关注"}
-                </button>
-              )}
-
-              {isAuthorized && !isSelf && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    onClose();
-                    onStartPm(userObj.username);
-                  }}
-                  className="lindo-interactive flex flex-1 items-center justify-center gap-1.5 rounded-xl py-1.5 text-[12.8px] font-medium"
-                  style={{
-                    backgroundColor: "var(--subtle-surface)",
-                    border: "0.5px solid var(--hairline)",
-                    color: "var(--ink-primary)",
-                  }}
-                >
-                  <LinDoIcons.Mail size={14.5} />
-                  <span>发私信</span>
-                </button>
-              )}
-
-              <button
-                type="button"
-                onClick={() => {
-                  const next = !showRecent;
-                  setShowRecent(next);
-                  if (next && recentActions.length === 0) {
-                    setLoadingRecent(true);
-                    fetchUserActions(userObj.username, "4,5")
-                      .then((acts) => setRecentActions(acts.slice(0, 10)))
-                      .catch(() => {})
-                      .finally(() => setLoadingRecent(false));
-                  }
-                }}
-                className="lindo-interactive rounded-xl px-3 py-1.5 text-[12.5px] font-medium"
-                style={{
-                  backgroundColor: "var(--subtle-surface)",
-                  border: "0.5px solid var(--hairline)",
-                  color: "var(--ink-secondary)",
-                }}
-              >
-                {showRecent ? "收起动态" : "近期发言"}
-              </button>
+                );
+              })}
             </div>
 
-            {showRecent && (
-              <div
-                className="mt-3 max-h-[210px] rounded-xl overflow-hidden lindo-scroll divide-y"
-                style={{
-                  backgroundColor: "var(--subtle-surface)",
-                  border: "0.5px solid var(--hairline)",
-                }}
-              >
-                {loadingRecent ? (
-                  <div className="p-4 text-center text-[12px]" style={{ color: "var(--ink-tertiary)" }}>
-                    加载中...
-                  </div>
-                ) : recentActions.length === 0 ? (
-                  <div className="p-4 text-center text-[12px]" style={{ color: "var(--ink-tertiary)" }}>
-                    暂无近期公开动态
-                  </div>
-                ) : (
-                  recentActions.map((act, i) => (
+            {/* 7. 分栏内容区 */}
+            {activeTab === "badges" ? (
+              badgesLoading && allBadges === null ? (
+                <div className="space-y-2.5 p-5">
+                  {Array.from({ length: 4 }).map((_, i) => (
+                    <div key={i} className="lindo-shimmer h-14 w-full rounded-xl" />
+                  ))}
+                </div>
+              ) : badgesError && allBadges === null ? (
+                <div className="px-5 py-10 text-center">
+                  <p className="text-[12.5px]" style={{ color: "var(--ink-secondary)" }}>
+                    {badgesError}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setBadgesRetryNonce((n) => n + 1)}
+                    className="mt-2.5 rounded-full px-4 py-1 text-[12px] font-semibold cursor-pointer"
+                    style={{
+                      backgroundColor: "var(--publish-btn-bg)",
+                      color: "var(--publish-btn-fg)",
+                    }}
+                  >
+                    重试
+                  </button>
+                </div>
+              ) : (allBadges ?? []).length === 0 ? (
+                <div className="px-5 py-10 text-center text-[12.5px]" style={{ color: "var(--ink-tertiary)" }}>
+                  暂无已获徽章
+                </div>
+              ) : (
+                <div className="divide-y divide-[var(--hairline)]">
+                  {(allBadges ?? []).map((b) => {
+                    const tier = badgeTierMeta(b.badgeTypeId);
+                    return (
+                      <button
+                        key={b.id}
+                        type="button"
+                        onClick={() => onInspectBadge?.(b)}
+                        className="lindo-interactive flex w-full items-center gap-3 px-5 py-3 text-left"
+                      >
+                        <span className="shrink-0">
+                          <OfficialBadgeIcon badge={b} size={22} />
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5">
+                            <span
+                              className="truncate text-[13.5px] font-semibold"
+                              style={{ color: "var(--ink-primary)" }}
+                            >
+                              {b.name}
+                            </span>
+                            {b.count && b.count > 1 && (
+                              <span
+                                className="shrink-0 text-[11px] font-bold tabular-nums"
+                                style={{ color: tier.color }}
+                              >
+                                ×{b.count}
+                              </span>
+                            )}
+                          </div>
+                          {(b.description || b.longDescription) && (
+                            <div
+                              className="mt-0.5 line-clamp-2 text-[12px] leading-snug"
+                              style={{ color: "var(--ink-secondary)" }}
+                            >
+                              {b.description || b.longDescription}
+                            </div>
+                          )}
+                        </div>
+                        {b.grantedAt && (
+                          <span
+                            className="shrink-0 text-[11px] tabular-nums"
+                            style={{ color: "var(--ink-tertiary)" }}
+                          >
+                            {b.grantedAt}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                  {onOpenSiteBadges && (
+                    <div className="px-5 py-3 text-center">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onClose();
+                          onOpenSiteBadges();
+                        }}
+                        className="lindo-interactive rounded-full px-4 py-1 text-[12px] font-medium"
+                        style={{ color: "var(--active-chip-text)" }}
+                      >
+                        查看全站徽章墙
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )
+            ) : tabLoading && activeActivityList.length === 0 ? (
+              <div className="space-y-2.5 p-5">
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <div key={i} className="lindo-shimmer h-14 w-full rounded-xl" />
+                ))}
+              </div>
+            ) : activeActivityList.length === 0 ? (
+              <div className="px-5 py-10 text-center text-[12.5px]" style={{ color: "var(--ink-tertiary)" }}>
+                暂无公开动态
+              </div>
+            ) : (
+              <div className="divide-y divide-[var(--hairline)]">
+                {activeActivityList.map((act, i) => {
+                  const cv = act.categoryName
+                    ? resolveCategoryVisual(act.categoryName, act.categoryColorHex)
+                    : null;
+                  return (
                     <button
-                      key={`${act.topic_id}_${i}`}
+                      key={`${act.topicId}_${act.postNumber}_${act.actionType}_${i}`}
                       type="button"
                       onClick={() => {
                         onClose();
-                        onOpenTopic(
-                          Number(act.topic_id),
-                          String(act.title || "社区话题"),
-                          Number(act.post_number || 1)
-                        );
+                        onOpenTopic(act.topicId, act.title, act.postNumber);
                       }}
-                      className="lindo-interactive flex w-full flex-col px-3 py-2 text-left"
+                      className="lindo-interactive flex w-full flex-col gap-1 px-5 py-3 text-left"
                     >
-                      <span
-                        className="truncate text-[12.5px] font-semibold"
+                      <div
+                        className="flex w-full items-center gap-1.5 text-[11.5px]"
+                        style={{ color: "var(--ink-tertiary)" }}
+                      >
+                        {act.categoryName && cv && (
+                          <LinDoCategoryBadge
+                            name={act.categoryName}
+                            fallbackColor={cv.dotColor}
+                            iconSize={11}
+                            className="text-[11.5px]"
+                          />
+                        )}
+                        {activeTab === "all" && (
+                          <span>
+                            {act.categoryName ? "· " : ""}
+                            {userActionTypeLabel(act.actionType)}
+                          </span>
+                        )}
+                        {act.postNumber > 1 && <span>· #{act.postNumber} 楼</span>}
+                        <span className="ml-auto shrink-0 tabular-nums">
+                          {act.createdAt ? formatRelativeTime(act.createdAt) : ""}
+                        </span>
+                      </div>
+                      <div
+                        className="line-clamp-2 text-[13.6px] font-semibold leading-snug"
                         style={{ color: "var(--ink-primary)" }}
                       >
                         {act.title}
-                      </span>
-                      {act.excerpt && (
-                        <span
-                          className="mt-0.5 line-clamp-1 text-[11.5px]"
+                      </div>
+                      {act.excerpt && act.excerpt !== act.title && (
+                        <div
+                          className="line-clamp-2 text-[12px] leading-relaxed"
                           style={{ color: "var(--ink-secondary)" }}
-                          dangerouslySetInnerHTML={{ __html: act.excerpt }}
-                        />
+                        >
+                          {act.excerpt}
+                        </div>
                       )}
                     </button>
-                  ))
+                  );
+                })}
+
+                {activeHasMore && (
+                  <div className="py-3 text-center">
+                    {loadMoreError && (
+                      <div className="mb-1.5 text-[11.5px]" style={{ color: "#EF4444" }}>
+                        {loadMoreError}
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      disabled={loadingMore}
+                      onClick={() => void handleLoadMoreActions()}
+                      className="lindo-interactive rounded-full px-4 py-1 text-[12px] font-medium disabled:opacity-55"
+                      style={{ color: "var(--active-chip-text)" }}
+                    >
+                      {loadingMore ? "正在加载…" : loadMoreError ? "重试加载更多" : "加载更多"}
+                    </button>
+                  </div>
                 )}
               </div>
             )}
           </div>
-        )}
+        ) : null}
       </div>
+
+      {pendingExternalLink && (
+        <ExternalLinkSafetyModal
+          assessment={pendingExternalLink}
+          onCancel={() => setPendingExternalLink(null)}
+          onConfirm={(remember) => {
+            const target = pendingExternalLink;
+            setPendingExternalLink(null);
+            if (remember && target.canRememberHost && target.hostname) {
+              rememberTrustedExternalHost(target.hostname);
+            }
+            openUrl(target.normalizedUrl);
+          }}
+        />
+      )}
     </div>
   );
 };
@@ -8860,7 +11070,7 @@ export const SiteBadgesModal: React.FC<{
     setError(null);
     fetchSiteBadges()
       .then((list) => {
-        if (alive) setBadges(list);
+        if (alive) setBadges(mapSiteBadgeList(list, false));
       })
       .catch((e: any) => {
         if (alive) setError(e?.message || "加载全站徽章失败");
