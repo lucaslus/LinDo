@@ -1,6 +1,10 @@
 package do_.linux.lindo.ui
 
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -26,12 +30,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.key.Key
@@ -79,6 +87,29 @@ import do_.linux.lindo.core.render.*
 import do_.linux.lindo.core.site.LinuxDoEmojiCatalog
 import do_.linux.lindo.core.site.LinuxDoSiteRules
 import do_.linux.lindo.ui.components.LinDoIcons
+
+@Composable
+private fun Modifier.postImageSkeleton(palette: LinDoThemePalette): Modifier {
+    val base = background(palette.subtleSurface.copy(alpha = 0.78f))
+    if (!LocalLinDoAnimations.current) return base
+
+    val progress = rememberInfiniteTransition(label = "postImageLoading").animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(durationMillis = 1500, delayMillis = 300, easing = LinearEasing)),
+        label = "highlightPosition"
+    )
+    val peak = Color.White.copy(alpha = if (palette.isDark) 0.08f else 0.6f)
+    return base.drawWithCache {
+        val band = Size(size.width / 2f, size.height)
+        val edge = peak.copy(alpha = 0f)
+        val highlight = Brush.horizontalGradient(listOf(edge, peak, edge), endX = band.width)
+        onDrawBehind {
+            val left = (size.width + band.width) * progress.value - band.width
+            translate(left = left) { drawRect(highlight, size = band) }
+        }
+    }
+}
 
 @Composable
 internal fun RichPostText(rich: RichText, palette: LinDoThemePalette,
@@ -851,23 +882,6 @@ private fun PostRichContentBody(
                                 .build()
                         }
                         val isLoading = loadState == 0
-                        val animationsEnabled = LocalLinDoAnimations.current
-                        val skeletonAlpha = if (isLoading && animationsEnabled) {
-                            val pulse = androidx.compose.animation.core.rememberInfiniteTransition(label = "img_skel_$index")
-                            val a by pulse.animateFloat(
-                                initialValue = 0.55f,
-                                targetValue = 0.92f,
-                                animationSpec = androidx.compose.animation.core.infiniteRepeatable(
-                                    animation = androidx.compose.animation.core.tween(
-                                        durationMillis = 950,
-                                        easing = androidx.compose.animation.core.FastOutSlowInEasing
-                                    ),
-                                    repeatMode = androidx.compose.animation.core.RepeatMode.Reverse
-                                ),
-                                label = "img_skel_alpha_$index"
-                            )
-                            a
-                        } else 0.78f
                         BoxWithConstraints(
                             modifier = Modifier
                                 .widthIn(max = 560.dp)
@@ -882,35 +896,20 @@ private fun PostRichContentBody(
                                 maxHeightDp = 360f
                             )
                             val shape = RoundedCornerShape(10.dp)
-                            val boxMod = if (resolvedBox != null) {
-                                Modifier
-                                    .size(width = resolvedBox.widthDp.dp, height = resolvedBox.heightDp.dp)
-                                    .clip(shape)
-                                    .let { m ->
-                                        if (isLoading) {
-                                            m.background(palette.subtleSurface.copy(alpha = skeletonAlpha))
-                                                .border(0.5.dp, palette.hairline, shape)
-                                                .testTag("post_image_skeleton_$index")
-                                        } else {
-                                            m
-                                        }
-                                    }
+                            val boxSize = if (resolvedBox != null) {
+                                Modifier.size(width = resolvedBox.widthDp.dp, height = resolvedBox.heightDp.dp)
                             } else if (isLoading) {
-                                val fallbackW = minOf(availWidthDp, 400f).dp
-                                Modifier
-                                    .size(width = fallbackW, height = 200.dp)
-                                    .clip(shape)
-                                    .background(palette.subtleSurface.copy(alpha = skeletonAlpha))
+                                Modifier.size(width = minOf(availWidthDp, 400f).dp, height = 200.dp)
+                            } else {
+                                Modifier.widthIn(max = 560.dp).heightIn(max = 360.dp)
+                            }
+                            val skeleton = if (isLoading) {
+                                Modifier.postImageSkeleton(palette)
                                     .border(0.5.dp, palette.hairline, shape)
                                     .testTag("post_image_skeleton_$index")
-                            } else {
-                                Modifier
-                                    .widthIn(max = 560.dp)
-                                    .heightIn(max = 360.dp)
-                                    .clip(shape)
-                            }
+                            } else Modifier
                             Box(
-                                modifier = boxMod.clickable {
+                                modifier = boxSize.clip(shape).then(skeleton).clickable {
                                     if (isExternalArticleLink) {
                                         onOpenLink(linkTarget)
                                     } else {

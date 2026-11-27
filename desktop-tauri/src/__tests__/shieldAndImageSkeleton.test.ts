@@ -407,7 +407,38 @@ describe("SideRail shield indicator, Settings manual verify, and zero-CLS image 
     }
   });
 
-  it("verifies CSS skeleton tokens, overflow-anchor, and wide-layout floating pill consolidation", () => {
+  it.each(["light", "dark"])("paints the loading highlight over the image background in the %s theme", (theme) => {
+    const style = document.createElement("style");
+    style.textContent = fs.readFileSync(path.resolve(__dirname, "../styles/app.css"), "utf8").replace('@import "tailwindcss";', "");
+    const post = document.createElement("div");
+    post.className = "lindo-cooked";
+    post.innerHTML = prepareCookedHtml('<img src="https://cdn.example.com/photo.jpg" width="320" height="180">');
+    const img = post.querySelector("img")!;
+    const root = document.documentElement;
+    const originalClasses = root.className;
+    try {
+      document.head.append(style);
+      document.body.append(post);
+      root.classList.toggle("dark", theme === "dark");
+      expect(getComputedStyle(img).backgroundImage).toContain("linear-gradient");
+      expect(getComputedStyle(img).animationName).toBe("lindo-img-skeleton-shimmer");
+      expect(getComputedStyle(img).backgroundRepeat).toBe("no-repeat");
+
+      root.classList.add("lindo-reduce-motion");
+      expect(getComputedStyle(img).animationName).toBe("none");
+      expect(getComputedStyle(img).backgroundPositionX).toBe("-100%");
+      root.classList.remove("lindo-reduce-motion");
+
+      markCookedImageLoaded(img);
+      expect(getComputedStyle(img).backgroundImage).toBe("none");
+    } finally {
+      root.className = originalClasses;
+      style.remove();
+      post.remove();
+    }
+  });
+
+  it("preserves reader scroll anchoring and wide-layout floating pill consolidation", () => {
     const srcRoot = path.resolve(__dirname, "..");
     const css = fs.readFileSync(path.join(srcRoot, "styles/app.css"), "utf8");
     const app = fs.readFileSync(path.join(srcRoot, "App.tsx"), "utf8");
@@ -415,10 +446,6 @@ describe("SideRail shield indicator, Settings manual verify, and zero-CLS image 
 
     expect(css).toContain(".lindo-reader-scroll");
     expect(css).toContain("overflow-anchor: auto");
-    expect(css).toContain("#e7e9ed");
-    expect(css).toContain("#eef1f5");
-    expect(css).toContain("#1a1e27");
-    expect(css).toContain("#232836");
     expect(css).toContain(".lindo-cooked img.lindo-img-loading.lindo-img-loading-fallback");
     expect(css).toContain(".lindo-cooked img.lindo-img-error");
     expect(reader).toContain("lindo-reader-scroll");

@@ -1,5 +1,7 @@
 package do_.linux.lindo.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.MaterialTheme
@@ -10,9 +12,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.test.ComposeUiTest
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasScrollToNodeAction
 import androidx.compose.ui.test.hasSetTextAction
@@ -31,6 +36,7 @@ import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.runDesktopComposeUiTest
+import com.sun.net.httpserver.HttpServer
 import do_.linux.lindo.core.connect.ScreenTrackEngine
 import do_.linux.lindo.core.connect.UserPresenceService
 import do_.linux.lindo.core.copy.LinDoReaderCopy
@@ -47,7 +53,12 @@ import do_.linux.lindo.core.network.NetworkRecoveryPolicy
 import do_.linux.lindo.core.network.UserApiKeyAuthManager
 import do_.linux.lindo.core.render.PostBlockNode
 import kotlinx.coroutines.runBlocking
+import java.awt.image.BufferedImage
+import java.io.ByteArrayOutputStream
+import java.net.InetSocketAddress
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.CopyOnWriteArrayList
+import javax.imageio.ImageIO
 import javax.swing.SwingUtilities
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
@@ -827,6 +838,78 @@ class Wave2ParityUiRegressionTest {
             edt {
                 onNodeWithTag("composer_link_quote_search_input").assertIsDisplayed()
                 assertTrue(onAllNodesWithTag("composer_link_external_url_input").fetchSemanticsNodes().isEmpty())
+            }
+        }
+
+    @Test
+    fun postImageHighlightTravelsAcrossTheReservedBoxOnlyWhileLoading() =
+        runDesktopComposeUiTest(width = 420, height = 340) {
+            val finishLoading = CountDownLatch(1)
+            val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+            val image = ByteArrayOutputStream().apply {
+                ImageIO.write(BufferedImage(2, 1, BufferedImage.TYPE_INT_RGB), "png", this)
+            }.toByteArray()
+            server.createContext("/picture.png") { exchange ->
+                finishLoading.await()
+                exchange.responseHeaders.add("Content-Type", "image/png")
+                exchange.sendResponseHeaders(200, image.size.toLong())
+                exchange.responseBody.use { it.write(image) }
+            }
+            server.start()
+            try {
+                val gallery = PostBlockNode.ImageGallery(
+                    urls = listOf("http://127.0.0.1:${server.address.port}/picture.png"),
+                    captions = listOf("插图"), widths = listOf(320), heights = listOf(160)
+                )
+                var animate by mutableStateOf(false)
+                var dark by mutableStateOf(false)
+                setContent {
+                    val palette = buildLinDoPalette(dark)
+                    CompositionLocalProvider(LocalLinDoAnimations provides animate) {
+                        Box(Modifier.background(palette.cardSurface)) {
+                            PostRichContent(listOf(gallery), palette, onOpenLink = {})
+                        }
+                    }
+                }
+                val placeholder = onNodeWithTag("post_image_skeleton_0")
+                fun sample() = edt {
+                    val pixels = placeholder.captureToImage().toPixelMap()
+                    val y = pixels.height / 4
+                    pixels[pixels.width / 4, y].red to pixels[pixels.width * 3 / 4, y].red
+                }
+                waitForTag("post_image_skeleton_0")
+                val reserved = placeholder.fetchSemanticsNode().size
+                mainClock.autoAdvance = false
+                for (darkTheme in listOf(false, true)) {
+                    edt { dark = darkTheme; animate = false }
+                    mainClock.advanceTimeByFrame()
+                    val idle = sample()
+                    mainClock.advanceTimeBy(900)
+                    assertEquals(idle, sample())
+                    assertEquals(idle.first, idle.second)
+
+                    edt { animate = true }
+                    mainClock.advanceTimeByFrame()
+                    mainClock.advanceTimeByFrame()
+                    mainClock.advanceTimeBy(800)
+                    val left = sample()
+                    mainClock.advanceTimeBy(500)
+                    val right = sample()
+                    assertTrue(left.first > left.second + 0.02f, "Highlight should cross the left quarter first: $left")
+                    assertTrue(right.second > right.first + 0.02f, "Highlight should reach the right quarter: $right")
+                    assertEquals(reserved, placeholder.fetchSemanticsNode().size)
+                }
+                mainClock.autoAdvance = true
+                finishLoading.countDown()
+                waitUntil(timeoutMillis = 5_000L) {
+                    onAllNodesWithTag("post_image_skeleton_0").fetchSemanticsNodes().isEmpty()
+                }
+                val loaded = onNodeWithContentDescription("插图", useUnmergedTree = true)
+                loaded.assertIsDisplayed()
+                assertEquals(reserved, loaded.fetchSemanticsNode().size)
+            } finally {
+                finishLoading.countDown()
+                server.stop(0)
             }
         }
 
