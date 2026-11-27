@@ -3551,9 +3551,11 @@ const AuthorFeedbackModal: React.FC<{
 export function formatSiteVerifyStatusLabel(params: {
   cfAttentionNeeded?: boolean;
   verifyActive?: boolean;
+  connectionRecovering?: boolean;
   lastVerifiedAtMs?: number | null;
   nowMs?: number;
 }): string {
+  if (params.connectionRecovering) return "网页已通过，正在恢复连接…";
   if (params.verifyActive) return "验证中…";
   if (params.cfAttentionNeeded) return "待验证";
   if (params.lastVerifiedAtMs != null) {
@@ -3601,6 +3603,7 @@ export const ProfileSettingsView: React.FC<{
   onRefreshEchStatus?: () => void;
   cfAttentionNeeded?: boolean;
   verifyActive?: boolean;
+  connectionRecovering?: boolean;
   lastVerifiedAtMs?: number | null;
   onTriggerVerify?: () => void;
 }> = ({
@@ -3636,6 +3639,7 @@ export const ProfileSettingsView: React.FC<{
   onRefreshEchStatus,
   cfAttentionNeeded = false,
   verifyActive = false,
+  connectionRecovering = false,
   lastVerifiedAtMs = null,
   onTriggerVerify,
 }) => {
@@ -4435,13 +4439,12 @@ export const ProfileSettingsView: React.FC<{
               value={formatSiteVerifyStatusLabel({
                 cfAttentionNeeded,
                 verifyActive,
+                connectionRecovering,
                 lastVerifiedAtMs,
                 nowMs: verifyStatusNowMs,
               })}
-              onClick={() => {
-                if (verifyActive) return;
-                onTriggerVerify?.();
-              }}
+              disabled={verifyActive || connectionRecovering}
+              onClick={() => onTriggerVerify?.()}
             />
             <ToggleSettingRow
               icon={<LinDoIcons.Sparkles size={19} />}
@@ -7016,6 +7019,7 @@ const SettingRow: React.FC<{
   highlightValue?: boolean;
   valueColor?: string;
   hideDivider?: boolean;
+  disabled?: boolean;
   onClick: () => void;
 }> = ({
   icon,
@@ -7026,11 +7030,13 @@ const SettingRow: React.FC<{
   highlightValue,
   valueColor,
   hideDivider,
+  disabled,
   onClick,
 }) => (
   <div>
     <button
       type="button"
+      disabled={disabled}
       onClick={onClick}
       className="lindo-interactive flex min-h-[46px] w-full items-center justify-between py-2.5 px-5 text-left"
     >

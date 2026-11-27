@@ -425,10 +425,6 @@ describe("SideRail shield indicator, Settings manual verify, and zero-CLS image 
 
     expect(app).toContain('setGlobalNotice(forceRefresh ? "安全验证已刷新" : "连接验证正常")');
     expect(app).toContain("(!inMainApp || !isWideLayout)");
-    expect(app).toContain("onTriggerVerify={handleForceRefreshVerify}");
-    expect(app).toContain("onTriggerVerify={handleReactiveVerify}");
-    expect(app).toContain("handleTriggerVerify({ forceRefresh: true })");
-    expect(app).toContain("handleTriggerVerify({ forceRefresh: false })");
   });
 
   it("enforces single-shot forceRefresh separation in triggerInteractiveVerifyOnce and live lastVerifiedAtMs labels", async () => {

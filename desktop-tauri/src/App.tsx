@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { initialVerificationStatus, verificationStatus, type VerifyPillEvent } from "./lib/verificationStatus";
 import { LinDoIcons } from "./components/LinDoIcons";
 import { ensureGlobalImeTracking, isImeComposingEvent } from "./lib/imeGuard";
 import type {
@@ -291,15 +292,12 @@ export const App: React.FC = () => {
   const [globalNotice, setGlobalNotice] = useState<string | null>(null);
   const [feedCollapsed, setFeedCollapsed] = useState(false);
   const [isDraggingSplit, setIsDraggingSplit] = useState(false);
-  const [cfAttentionNeeded, setCfAttentionNeeded] = useState(false);
+  const [verification, dispatchVerification] = useReducer(verificationStatus, initialVerificationStatus);
+  const cfAttentionNeeded = verification.attentionNeeded;
+  const connectionRecovering = verification.stage === "recovering";
+  const verifyActive = verification.pillVisible || verification.manualBusy;
   const [cfAttentionDismissed, setCfAttentionDismissed] = useState(false);
-  const [manualVerifyBusy, setManualVerifyBusy] = useState(false);
   const [lastVerifiedAtMs, setLastVerifiedAtMs] = useState<number | null>(null);
-  const [verifyPill, setVerifyPill] = useState<{
-    visible: boolean;
-    round: number;
-    stage: string;
-  } | null>(null);
   const lastFeedSyncedAtRef = useRef<number>(Date.now());
   const backgroundPollInFlightRef = useRef(false);
 
@@ -1288,7 +1286,7 @@ export const App: React.FC = () => {
           });
         }),
         listen("lindo://verified", () => {
-          setCfAttentionNeeded(false);
+          dispatchVerification({ type: "verified" });
           setCfAttentionDismissed(false);
           setLastVerifiedAtMs(Date.now());
           resumeTimingsAfterVerify();
@@ -1324,7 +1322,7 @@ export const App: React.FC = () => {
         }),
         listen<boolean>("lindo://cf-attention-needed", (ev) => {
           const needed = Boolean(ev.payload);
-          setCfAttentionNeeded(needed);
+          dispatchVerification({ type: "attention", needed });
           if (needed) {
             setCfAttentionDismissed(false);
             pauseAndDropPendingTimings();
@@ -1332,18 +1330,15 @@ export const App: React.FC = () => {
             resumeTimingsAfterVerify();
           }
         }),
-        listen<{ visible?: boolean; round?: number; stage?: string }>("lindo://verify-pill", (ev) => {
-          const p = ev.payload;
-          if (p?.visible) {
+        listen<VerifyPillEvent>("lindo://verify-pill", ({ payload }) => {
+          dispatchVerification({ type: "progress", event: payload });
+          if (payload.stage === "recovering") {
+            setLastVerifiedAtMs(Date.now());
+          } else if (payload.visible) {
             pauseAndDropPendingTimings();
-            setVerifyPill({
-              visible: true,
-              round: Number(p.round || 0),
-              stage: String(p.stage || "checking"),
-            });
           } else {
             resumeTimingsAfterVerify();
-            setVerifyPill(null);
+            if (payload.stage === "unavailable") setGlobalNotice("网页验证已通过，连接暂未恢复");
           }
         }),
         listen<string>("lindo://auth-notice", (ev) => {
@@ -1898,12 +1893,13 @@ export const App: React.FC = () => {
 
   const handleTriggerVerify = useCallback(
     async (opts?: { forceRefresh?: boolean }) => {
+      if (connectionRecovering) return;
       const forceRefresh = Boolean(opts?.forceRefresh);
-      setManualVerifyBusy(true);
+      dispatchVerification({ type: "manual", busy: true });
       try {
         const ok = await triggerInteractiveVerifyOnce({ manual: true, forceRefresh });
         if (ok) {
-          setCfAttentionNeeded(false);
+          dispatchVerification({ type: "verified" });
           setCfAttentionDismissed(false);
           setLastVerifiedAtMs(Date.now());
           setGlobalNotice(forceRefresh ? "安全验证已刷新" : "连接验证正常");
@@ -1911,10 +1907,10 @@ export const App: React.FC = () => {
       } catch {
         setGlobalNotice("连接未完成，请重试");
       } finally {
-        setManualVerifyBusy(false);
+        dispatchVerification({ type: "manual", busy: false });
       }
     },
-    []
+    [connectionRecovering]
   );
 
   // Entry A: Reactive verify (SideRail shield, banners, error cards) -> NEVER force-purges healthy ticket
@@ -1922,10 +1918,10 @@ export const App: React.FC = () => {
     void handleTriggerVerify({ forceRefresh: false });
   }, [handleTriggerVerify]);
 
-  // Entry B: Explicit Settings -> 站点安全验证 -> single-shot manual forceRefresh
-  const handleForceRefreshVerify = useCallback(() => {
-    void handleTriggerVerify({ forceRefresh: true });
-  }, [handleTriggerVerify]);
+  // Settings resumes a pending challenge. An idle explicit check requests a fresh verification.
+  const handleSettingsVerify = useCallback(() => {
+    void handleTriggerVerify({ forceRefresh: !cfAttentionNeeded });
+  }, [cfAttentionNeeded, handleTriggerVerify]);
 
   const handleLoadMoreTopics = useCallback(async () => {
     if (loadingMoreTopics || !hasMoreTopics || feedLoading) return;
@@ -2289,7 +2285,7 @@ export const App: React.FC = () => {
             showFeedToggle={isWideLayout && (currentTab === "HOME" || currentTab === "MESSAGES")}
             feedCollapsed={feedCollapsed}
             cfAttentionNeeded={cfAttentionNeeded && !cfAttentionDismissed}
-            verifyActive={Boolean(verifyPill?.visible) || manualVerifyBusy}
+            verifyActive={verifyActive}
             onToggleFeedCollapse={toggleFeedCollapse}
             onTriggerVerify={handleReactiveVerify}
             onSelectTab={(tab) => {
@@ -2409,9 +2405,10 @@ export const App: React.FC = () => {
                   getEchStatus().then(setEchStatus).catch(() => {});
                 }}
                 cfAttentionNeeded={cfAttentionNeeded}
-                verifyActive={Boolean(verifyPill?.visible) || manualVerifyBusy}
+                connectionRecovering={connectionRecovering}
+                verifyActive={verifyActive}
                 lastVerifiedAtMs={lastVerifiedAtMs}
-                onTriggerVerify={handleForceRefreshVerify}
+                onTriggerVerify={handleSettingsVerify}
               />
             ) : isWideLayout ? (
               <>
@@ -3158,7 +3155,7 @@ export const App: React.FC = () => {
 
       {/* 4 档渐进式安全校验轻胶囊 / 窄屏或欢迎页安全确认入口（宽屏主界面已整合至 SideRail 盾牌指示器，避免双重提示） */}
       {(!inMainApp || !isWideLayout) &&
-        (verifyPill?.visible ||
+        (verification.pillVisible ||
           (inMainApp &&
             cfAttentionNeeded &&
             !cfAttentionDismissed &&
@@ -3174,7 +3171,7 @@ export const App: React.FC = () => {
             type="button"
             onMouseDown={(e) => e.preventDefault()}
             onClick={() => {
-              if (verifyPill?.visible) setVerifyPill(null);
+              if (verification.pillVisible) dispatchVerification({ type: "hidePill" });
               handleReactiveVerify();
             }}
             title="点击展开安全确认面板"
@@ -3187,7 +3184,7 @@ export const App: React.FC = () => {
               color: "var(--ink-primary)",
             }}
           >
-            {verifyPill?.visible ? (
+            {verification.pillVisible ? (
               <span
                 className="h-2 w-2 rounded-full animate-pulse shrink-0"
                 style={{ backgroundColor: "var(--brand-gold)" }}
@@ -3200,7 +3197,7 @@ export const App: React.FC = () => {
               />
             )}
             <span className="text-[12px] font-medium" style={{ color: "var(--ink-primary)" }}>
-              {verifyPill?.visible ? "安全校验中…" : "连接需安全确认 · 去验证"}
+              {verification.pillVisible ? "安全校验中…" : "连接需安全确认 · 去验证"}
             </span>
             <LinDoIcons.ChevronRight
               size={12.5}

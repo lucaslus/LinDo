@@ -570,7 +570,7 @@ static NSDictionary *lindoReadLocalMediaFile(NSString *path, NSUInteger maxBytes
     } else if ([eventName isEqualToString:@"unloading"]) {
         if (!self.loginModeState && !self.userReloading) {
             // Instant 0ms mask cover BEFORE the post-challenge 404 navigation even starts!
-            [self setVerifyMask:YES dark:self.maskDarkState message:@"已通过，正在继续…"];
+            [self setVerifyMask:YES dark:self.maskDarkState message:@"正在确认验证结果…"];
         }
     }
 }
@@ -950,7 +950,7 @@ static NSDictionary *lindoReadLocalMediaFile(NSString *path, NSUInteger maxBytes
     BOOL allowed = [scheme isEqualToString:@"https"] || [url.absoluteString isEqualToString:@"about:blank"];
     // If we already displayed Turnstile and main frame is navigating back to bare `/challenge`, cover immediately before request!
     if (allowed && !self.loginModeState && !self.userReloading && self.challengeInteractiveRequired && [url.path isEqualToString:@"/challenge"] && !url.query.length) {
-        [self setVerifyMask:YES dark:self.maskDarkState message:@"已通过，正在继续…"];
+        [self setVerifyMask:YES dark:self.maskDarkState message:@"正在确认验证结果…"];
     }
     decision(allowed ? WKNavigationActionPolicyAllow : WKNavigationActionPolicyCancel);
 }
@@ -972,17 +972,17 @@ static NSDictionary *lindoReadLocalMediaFile(NSString *path, NSUInteger maxBytes
         if (!self.loginModeState && isForumHost(host)) {
             if (isCfChallenge) {
                 self.challengeOriginReached = NO;
-                if (_maskVisibleState && [_maskMessageState isEqualToString:@"已通过，正在继续…"]) {
+                if (_maskVisibleState && [_maskMessageState isEqualToString:@"正在确认验证结果…"]) {
                     [self setVerifyMask:YES dark:self.maskDarkState message:@"校验连接中…"];
                 }
             } else if ([path hasPrefix:@"/challenge"] && (http.statusCode == 404 || (http.statusCode >= 200 && http.statusCode < 400))) {
                 self.challengeOriginReached = YES;
-                [self setVerifyMask:YES dark:self.maskDarkState message:@"已通过，正在继续…"];
+                [self setVerifyMask:YES dark:self.maskDarkState message:@"正在确认验证结果…"];
                 if (gEventReply) {
                     sendReply(gEventReply, 0, @{ @"cfVerifyEvent": @"origin404" }, nil);
                 }
             } else if (http.statusCode == 200 || http.statusCode == 404) {
-                [self setVerifyMask:YES dark:self.maskDarkState message:@"已通过，正在继续…"];
+                [self setVerifyMask:YES dark:self.maskDarkState message:@"正在确认验证结果…"];
             } else if (http.statusCode >= 500) {
                 self.challengeOriginReached = NO;
                 [self setVerifyMask:YES dark:self.maskDarkState message:@"站点临时繁忙，请点右上角刷新重试"];

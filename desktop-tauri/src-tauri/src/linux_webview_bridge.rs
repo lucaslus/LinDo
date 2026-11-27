@@ -975,7 +975,7 @@ pub async fn native_call(
         }
         "hide" => {
             if let Some(wv) = app.get_webview_window(BRIDGE_WINDOW_LABEL) {
-                let _ = wv.hide();
+                wv.hide().map_err(|err| err.to_string())?;
             }
             Ok(json!({}))
         }

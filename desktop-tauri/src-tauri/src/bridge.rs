@@ -45,6 +45,78 @@ enum UnifiedVerifyDisposition {
     UserDismissed,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OriginRecovery {
+    Ready,
+    Challenged,
+    Unavailable,
+}
+
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VerificationTimeline {
+    round: u64,
+    panel_shown: bool,
+    web_passed_at_ms: Option<u64>,
+    panel_closed_at_ms: Option<u64>,
+    connection_ready_at_ms: Option<u64>,
+}
+
+impl VerificationTimeline {
+    fn log(&self, app: &AppHandle, level: &str, summary: &str) {
+        emit_diag(app, level, "AUTH", "VerifyRound", summary, Some(&json!(self).to_string()));
+    }
+
+    async fn page_passed(&mut self, app: &AppHandle, shown: bool) {
+        self.record_page_pass(
+            shown,
+            native_call("hide", json!({}), 5),
+            |timeline| {
+                let _ = app.emit("lindo://verify-pill", json!({
+                    "visible": false, "round": timeline.round, "stage": "recovering",
+                }));
+                timeline.log(app, "INFO", "网页验证已通过，正在恢复连接");
+            },
+        ).await;
+        if shown {
+            self.log_panel_close(app);
+        }
+    }
+
+    async fn record_page_pass(
+        &mut self,
+        shown: bool,
+        hide: impl std::future::Future<Output = Result<Value, String>>,
+        on_passed: impl FnOnce(&Self),
+    ) {
+        self.panel_shown = shown;
+        self.web_passed_at_ms = Some(now_epoch_ms());
+        on_passed(self);
+        if shown && hide.await.is_ok() {
+            self.panel_closed_at_ms = Some(now_epoch_ms());
+        }
+    }
+
+    fn finish_recovery(&mut self, recovery: OriginRecovery) -> (&'static str, &'static str) {
+        match recovery {
+            OriginRecovery::Ready => {
+                self.connection_ready_at_ms = Some(now_epoch_ms());
+                ("INFO", "验证后的连接已恢复")
+            }
+            OriginRecovery::Challenged => ("WARN", "恢复连接时站点再次要求验证"),
+            OriginRecovery::Unavailable => ("WARN", "网页验证已通过，连接暂未恢复"),
+        }
+    }
+
+    fn log_panel_close(&self, app: &AppHandle) {
+        if self.panel_closed_at_ms.is_some() {
+            self.log(app, "INFO", "验证窗口已关闭");
+        } else {
+            self.log(app, "WARN", "未收到验证窗口关闭确认");
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UiActivityEventPayload {
@@ -1649,7 +1721,7 @@ impl BridgeEngine {
     /// Navigates the hidden shared bridge WebView back to lightweight `https://linux.do/about`
     /// and waits for the NEW `/about` document to actually commit (guarded by `window.__lindoLeavingNonce`)
     /// before returning so immediate POST/GET replays never match the outgoing document or blindly mark a broken page ready.
-    async fn restore_about_origin_context(&self) -> bool {
+    async fn restore_about_origin_context(&self) -> OriginRecovery {
         // Fast path: if the bridge WebView is ALREADY committed on a clean non-challenged `https://linux.do`
         // document (e.g., `/challenge` 404 HTML right after passing Turnstile), reuse it in-place (<5ms)
         // without navigating to `/about`!
@@ -1685,7 +1757,7 @@ impl BridgeEngine {
             let mut rt = self.inner.lock().unwrap();
             rt.origin_ready = true;
             rt.bootstrap_challenged = false;
-            return true;
+            return OriginRecovery::Ready;
         }
 
         let nonce = self.next_nav_nonce();
@@ -1731,7 +1803,7 @@ impl BridgeEngine {
                     let mut rt = self.inner.lock().unwrap();
                     rt.origin_ready = true;
                     rt.bootstrap_challenged = false;
-                    return true;
+                    return OriginRecovery::Ready;
                 }
                 Some("challenge") => {
                     saw_challenge = true;
@@ -1750,8 +1822,10 @@ impl BridgeEngine {
         rt.origin_ready = false;
         if saw_challenge {
             rt.bootstrap_challenged = true;
+            OriginRecovery::Challenged
+        } else {
+            OriginRecovery::Unavailable
         }
-        false
     }
 
     /// Proactive Cloudflare precheck for cold-start, near-expiry, route changes, and background challenges:
@@ -1774,42 +1848,10 @@ impl BridgeEngine {
         let (composer_open, _) = self.ui_typing_guard_state(now_epoch_ms());
         let pres = resolve_proactive_cf_presentation(reason, has_user, visible, composer_open);
         let is_dark = self.current_is_dark();
-        let outcome = self
-            .coordinate_cf_verification_ext(app, pres, is_dark, false, false)
-            .await;
-        if outcome.passed {
-            self.bg_challenge_tracker.lock().unwrap().reset();
-            let mut rt = self.inner.lock().unwrap();
-            rt.pending_interactive_challenge = false;
-            if rt.cf_attention_notified {
-                rt.cf_attention_notified = false;
-                drop(rt);
-                let _ = app.emit("lindo://cf-attention-needed", false);
-            }
-        } else {
-            let is_guest_prewarm = !has_user && matches!(reason, "cold_start" | "near_expiry");
-            let should_keep_banner = if is_guest_prewarm {
-                false
-            } else {
-                let rt = self.inner.lock().unwrap();
-                !rt.verifying
-                    && (rt.cf_attention_notified
-                        || rt.pending_interactive_challenge
-                        || rt.bootstrap_challenged
-                        || self
-                            .bg_challenge_tracker
-                            .lock()
-                            .unwrap()
-                            .has_unresolved_write_challenges()
-                        || (reason != "near_expiry"
-                            && !self.cf_authority.lock().unwrap().has_healthy_incumbent()))
-            };
-            if should_keep_banner {
-                self.inner.lock().unwrap().cf_attention_notified = true;
-                let _ = app.emit("lindo://cf-attention-needed", true);
-            }
-        }
-        outcome
+        // The coordinator owns the shield for the whole round, including its followers.
+        // A failed reconnect alone gives the user nothing to verify.
+        self.coordinate_cf_verification_ext(app, pres, is_dark, false, false)
+            .await
     }
 
     /// Unified single-flight Cloudflare verification coordinator:
@@ -1966,11 +2008,12 @@ impl BridgeEngine {
                 let _verify_guard = self.verify_lock.lock().await;
                 let mut saw_interactive_or_challenge = self.has_unresolved_challenge_hint();
                 let verifying_flag = VerifyingFlagGuard::enter(&self.inner);
+                let mut timeline = VerificationTimeline { round, ..Default::default() };
                 let disposition = self
                     .run_unified_cf_verify(
                         app,
                         is_dark,
-                        round,
+                        &mut timeline,
                         &presentation,
                         &escalate_notify,
                         &mut saw_interactive_or_challenge,
@@ -1979,12 +2022,30 @@ impl BridgeEngine {
                     .await
                     .unwrap_or(UnifiedVerifyDisposition::Failed);
 
-                let _ = native_call("hide", json!({}), 5).await;
-                let ready = {
+                if timeline.panel_closed_at_ms.is_none() {
+                    let hidden = native_call("hide", json!({}), 5).await.is_ok();
+                    if timeline.panel_shown {
+                        if hidden {
+                            timeline.panel_closed_at_ms = Some(now_epoch_ms());
+                        }
+                        timeline.log_panel_close(app);
+                    }
+                }
+                let recovery = {
                     let _nav = self.nav_lock.write().await;
                     self.restore_about_origin_context().await
                 };
-                let passed = disposition == UnifiedVerifyDisposition::Passed && ready;
+                let web_passed = disposition == UnifiedVerifyDisposition::Passed;
+                let passed = web_passed && recovery == OriginRecovery::Ready;
+                if web_passed {
+                    let (level, summary) = timeline.finish_recovery(recovery);
+                    timeline.log(app, level, summary);
+                }
+                let needs_attention = if web_passed {
+                    recovery == OriginRecovery::Challenged
+                } else {
+                    disposition == UnifiedVerifyDisposition::UserDismissed || saw_interactive_or_challenge
+                };
                 if passed {
                     self.cf_429_classifier.lock().unwrap().reset();
                     self.bg_challenge_tracker.lock().unwrap().reset();
@@ -2006,31 +2067,27 @@ impl BridgeEngine {
                         .unwrap()
                         .record_user_dismiss(&cur_sig, Instant::now());
                     self.inner.lock().unwrap().cf_attention_notified = true;
-                } else if saw_interactive_or_challenge {
-                    self.inner.lock().unwrap().cf_attention_notified = true;
+                } else if web_passed || needs_attention {
+                    self.inner.lock().unwrap().cf_attention_notified = needs_attention;
                 }
 
-                drop(verifying_flag);
-                let outcome = match disposition {
-                    UnifiedVerifyDisposition::Abandoned
-                    | UnifiedVerifyDisposition::UserDismissed => {
-                        flight_guard.abandon(Instant::now())
-                    }
-                    _ => flight_guard.complete(passed, Instant::now()),
-                };
                 let _ = app.emit(
                     "lindo://verify-pill",
-                    json!({ "visible": false, "round": round, "stage": "done" }),
+                    json!({ "visible": false, "round": round, "stage": if web_passed && recovery == OriginRecovery::Unavailable { "unavailable" } else { "done" } }),
                 );
                 if passed {
                     let _ = app.emit("lindo://cf-attention-needed", false);
                     let _ = app.emit("lindo://verified", ());
-                } else if disposition == UnifiedVerifyDisposition::UserDismissed
-                    || saw_interactive_or_challenge
-                {
-                    let _ = app.emit("lindo://cf-attention-needed", true);
+                } else if web_passed || needs_attention {
+                    let _ = app.emit("lindo://cf-attention-needed", needs_attention);
                 }
-                outcome
+                drop(verifying_flag);
+                match disposition {
+                    UnifiedVerifyDisposition::Abandoned | UnifiedVerifyDisposition::UserDismissed => {
+                        flight_guard.abandon(Instant::now())
+                    }
+                    _ => flight_guard.complete(passed, Instant::now()),
+                }
             }
         }
     }
@@ -2131,12 +2188,13 @@ impl BridgeEngine {
         &self,
         app: &AppHandle,
         is_dark: bool,
-        round: u64,
+        timeline: &mut VerificationTimeline,
         presentation: &Arc<AtomicU8>,
         escalate_notify: &Arc<Notify>,
         saw_interactive_or_challenge: &mut bool,
         force_refresh: bool,
     ) -> Result<UnifiedVerifyDisposition, String> {
+        let round = timeline.round;
         native_call("init", json!({}), 10).await?;
         self.inner.lock().unwrap().initialized = true;
         let _ = self.seed_session_verified(true).await;
@@ -2324,6 +2382,8 @@ impl BridgeEngine {
 
             if (cur_pres.allows_ui() || panel_shown) && user_cancelled {
                 *saw_interactive_or_challenge = true;
+                timeline.panel_shown = panel_shown;
+                timeline.log(app, "INFO", "用户关闭了验证窗口，尚未收到网页通过结果");
                 disposition = UnifiedVerifyDisposition::UserDismissed;
                 break;
             }
@@ -2536,27 +2596,9 @@ impl BridgeEngine {
                         )
                         .await
                 {
-                    if panel_shown {
-                        let _ = native_call("hide", json!({}), 5).await;
-                    }
+                    timeline.page_passed(app, panel_shown).await;
                     self.cf_authority.lock().unwrap().mark_rotation_open();
                     let _ = self.sync_cookies_from_webkit_verified(false, true).await;
-                    let pass_detail = format!(
-                        "round={round}, panelShown={panel_shown}, elapsedMs={}, outcome=XhrConfirmedFreshCf",
-                        loop_started.elapsed().as_millis()
-                    );
-                    emit_diag(
-                        app,
-                        "INFO",
-                        "AUTH",
-                        "VerifyPassed",
-                        if panel_shown {
-                            "安全确认已完成并恢复请求通道"
-                        } else {
-                            "静默安全确认已通过，自动恢复请求通道"
-                        },
-                        Some(&pass_detail),
-                    );
                     disposition = UnifiedVerifyDisposition::Passed;
                     break;
                 }
@@ -2627,7 +2669,7 @@ impl BridgeEngine {
                 if ready_to_reveal && mask_visible {
                     mask_visible = false;
                     let _ = native_call("setVerifyMask", json!({ "visible": false, "dark": is_dark }), 4).await;
-                } else if mask_visible && native_mask_message == "已通过，正在继续…" {
+                } else if mask_visible && native_mask_message == "正在确认验证结果…" {
                     let _ = native_call(
                         "setVerifyMask",
                         json!({ "visible": true, "dark": is_dark, "message": "校验连接中…" }),
@@ -2643,7 +2685,7 @@ impl BridgeEngine {
                 mask_visible = true;
                 let _ = native_call(
                     "setVerifyMask",
-                    json!({ "visible": true, "dark": is_dark, "message": "已通过，正在继续…" }),
+                    json!({ "visible": true, "dark": is_dark, "message": "正在确认验证结果…" }),
                     4,
                 )
                 .await;
@@ -2672,7 +2714,7 @@ impl BridgeEngine {
                     panel_shown = true;
                     let _ = native_call("show", json!({ "dark": is_dark, "login": false }), 8).await;
                 }
-                if (cur_pres.allows_ui() || panel_shown) && mask_visible && native_mask_message == "已通过，正在继续…" {
+                if (cur_pres.allows_ui() || panel_shown) && mask_visible && native_mask_message == "正在确认验证结果…" {
                     mask_visible = false;
                     let _ = native_call("setVerifyMask", json!({ "visible": false, "dark": is_dark }), 4).await;
                 }
@@ -2774,12 +2816,15 @@ impl BridgeEngine {
                     if clean_ip_passed {
                         self.cf_authority.lock().unwrap().mark_rotation_open();
                     }
-                    let _ = self.sync_cookies_from_webkit_verified(false, false).await;
                 }
                 ForceRefreshOutcomeDecision::PassRotated
                 | ForceRefreshOutcomeDecision::PassExistingValid => {}
             }
 
+            timeline.page_passed(app, panel_shown).await;
+            if matches!(decision, ForceRefreshOutcomeDecision::PassCleanIpNoCookie) {
+                let _ = self.sync_cookies_from_webkit_verified(false, false).await;
+            }
             let ticket_verified = matches!(
                 decision,
                 ForceRefreshOutcomeDecision::PassRotated
@@ -2831,10 +2876,6 @@ impl BridgeEngine {
                 self.commit_authenticated_user(app, profile);
             }
 
-            // Hide verification panel IMMEDIATELY (<16ms) before cookie disk sync so there is zero post-click lag!
-            if panel_shown {
-                let _ = native_call("hide", json!({}), 5).await;
-            }
             if ticket_verified {
                 self.cf_authority.lock().unwrap().mark_rotation_open();
             }
@@ -2851,9 +2892,9 @@ impl BridgeEngine {
                 "AUTH",
                 "VerifyPassed",
                 if panel_shown {
-                    "安全确认已完成并恢复请求通道"
+                    "已识别网页验证结果"
                 } else {
-                    "静默安全确认已通过，自动恢复请求通道"
+                    "已识别后台网页验证结果"
                 },
                 Some(&pass_detail),
             );
@@ -2861,6 +2902,7 @@ impl BridgeEngine {
             break;
         }
 
+        timeline.panel_shown = panel_shown;
         Ok(disposition)
     }
 
@@ -5710,7 +5752,7 @@ impl BridgeEngine {
                     }
                     {
                         let _nav = self.nav_lock.write().await;
-                        if !self.restore_about_origin_context().await { return Ok(false); }
+                        if self.restore_about_origin_context().await != OriginRecovery::Ready { return Ok(false); }
                     }
                     let pass_detail = format!(
                         "elapsedMs={}, outcome=XhrConfirmedFreshCf",
@@ -5743,7 +5785,7 @@ impl BridgeEngine {
                 if ready_to_reveal && mask_visible {
                     mask_visible = false;
                     let _ = native_call("setVerifyMask", json!({ "visible": false, "dark": is_dark }), 4).await;
-                } else if mask_visible && native_mask_message == "已通过，正在继续…" {
+                } else if mask_visible && native_mask_message == "正在确认验证结果…" {
                     let _ = native_call(
                         "setVerifyMask",
                         json!({
@@ -5769,7 +5811,7 @@ impl BridgeEngine {
                         json!({
                             "visible": true,
                             "dark": is_dark,
-                            "message": "已通过，正在继续…"
+                            "message": "正在确认验证结果…"
                         }),
                         4,
                     )
@@ -5792,7 +5834,7 @@ impl BridgeEngine {
                         panel_shown = true;
                         let _ = native_call("show", json!({ "dark": is_dark, "login": false }), 8).await;
                     }
-                    if mask_visible && native_mask_message == "已通过，正在继续…" {
+                    if mask_visible && native_mask_message == "正在确认验证结果…" {
                         mask_visible = false;
                         let _ = native_call("setVerifyMask", json!({ "visible": false, "dark": is_dark }), 4).await;
                     }
@@ -5927,7 +5969,7 @@ impl BridgeEngine {
                 // Restore clean origin context (in-place <5ms when `/challenge` 404 is already on `https://linux.do`)
                 {
                     let _nav = self.nav_lock.write().await;
-                    if !self.restore_about_origin_context().await { return Ok(false); }
+                    if self.restore_about_origin_context().await != OriginRecovery::Ready { return Ok(false); }
                 }
                 let pass_detail = format!(
                     "elapsedMs={}, hasFreshCf={}, origin404={}, ready={}",
@@ -7760,6 +7802,50 @@ pub(crate) fn resolve_proactive_cf_presentation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn web_pass_dismisses_panel_before_connection_recovery() {
+        use std::cell::Cell;
+
+        let notified = Cell::new(false);
+        let mut times = VerificationTimeline { round: 7, ..Default::default() };
+        times.record_page_pass(true, async {
+            assert!(notified.get(), "UI must already be in connection recovery");
+            Ok(json!({}))
+        }, |phase| {
+            assert!(phase.web_passed_at_ms.is_some());
+            assert!(phase.panel_closed_at_ms.is_none());
+            notified.set(true);
+        }).await;
+
+        assert_eq!(times.round, 7);
+        assert!(times.panel_closed_at_ms.unwrap() >= times.web_passed_at_ms.unwrap());
+        assert!(times.connection_ready_at_ms.is_none());
+        times.finish_recovery(OriginRecovery::Ready);
+        let logged = serde_json::to_value(&times).unwrap();
+        assert_eq!(logged["round"], 7);
+        let passed = logged["webPassedAtMs"].as_u64().unwrap();
+        let closed = logged["panelClosedAtMs"].as_u64().unwrap();
+        let ready = logged["connectionReadyAtMs"].as_u64().unwrap();
+        assert!(passed <= closed && closed <= ready);
+    }
+
+    #[tokio::test]
+    async fn hidden_or_failed_panel_is_not_reported_as_successfully_closed() {
+        let mut hidden = VerificationTimeline::default();
+        hidden.record_page_pass(false, async { panic!("no visible panel") }, |_| {}).await;
+        assert!(hidden.web_passed_at_ms.is_some());
+        assert!(hidden.panel_closed_at_ms.is_none());
+
+        let mut failed = VerificationTimeline::default();
+        failed.record_page_pass(true, async { Err("window unavailable".into()) }, |_| {}).await;
+        assert!(failed.web_passed_at_ms.is_some());
+        assert!(failed.panel_closed_at_ms.is_none());
+        for recovery in [OriginRecovery::Unavailable, OriginRecovery::Challenged] {
+            failed.finish_recovery(recovery);
+            assert!(failed.connection_ready_at_ms.is_none());
+        }
+    }
 
     #[test]
     fn forum_forms_encode_repeated_values_and_keep_named_fields() {

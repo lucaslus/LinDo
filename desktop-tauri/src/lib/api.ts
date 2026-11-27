@@ -451,7 +451,9 @@ export async function siteVerify(
     ok ? "INFO" : "WARN",
     "AUTH",
     ok ? "AuthSuccess" : "WebVerify",
-    ok ? (login ? "内置窗口登录已完成" : "站点安全验证已通过") : "登录/验证窗口已关闭（未完成）"
+    ok
+      ? (login ? "内置窗口登录已完成" : "站点安全验证已通过")
+      : (login ? "登录窗口已关闭（未完成）" : "验证流程已结束，连接尚未确认可用")
   );
   return ok;
 }
