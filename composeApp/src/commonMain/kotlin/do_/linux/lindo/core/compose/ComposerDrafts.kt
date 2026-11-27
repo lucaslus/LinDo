@@ -6,6 +6,7 @@ import do_.linux.lindo.core.network.ApiFailureKind
 import do_.linux.lindo.core.network.ApiReadException
 import do_.linux.lindo.core.network.CloudDraftItem
 import do_.linux.lindo.core.network.LinuxDoRepository
+import do_.linux.lindo.core.network.UserApiKeyAuthManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -14,6 +15,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -77,7 +79,7 @@ object LocalComposerDrafts {
     private fun id(owner: String, key: String) = "${owner.lowercase()}\u0000$key"
     fun restore(encoded: String?) {
         if (encoded.isNullOrBlank()) return
-        runCatching { json.decodeFromString<List<ComposerDraft>>(encoded) }.getOrNull()?.forEach {
+        runCatching { json.decodeFromString<List<ComposerDraft>>(encoded) }.getOrNull()?.filter { it.hasContent || it.action == ComposerAction.EDIT }?.forEach {
             drafts[id(it.owner, it.key)] = it
         }
     }
@@ -93,54 +95,46 @@ object LocalComposerDrafts {
     internal fun sequence(owner: String, key: String): Int? = sequences[id(owner, key)]
     internal fun recordSequence(owner: String, key: String, value: Int) { sequences[id(owner, key)] = value }
     fun forgetSequence(owner: String, key: String) { sequences.remove(id(owner, key)) }
-    fun remove(owner: String, key: String) { drafts.remove(id(owner, key)); schedulePersist(immediate = true) }
+    fun remove(owner: String, key: String) {
+        if (drafts.remove(id(owner, key)) != null) schedulePersist(immediate = true)
+    }
     fun clearAll() {
         synchronized(persistLock) {
             persistJob?.cancel()
             persistJob = null
             dirtyPersist = false
+            drafts.clear()
+            sequences.clear()
+            queues.clear()
+            onPersist?.invoke(null)
         }
-        drafts.clear()
-        sequences.clear()
-        queues.clear()
-        onPersist?.invoke(null)
+    }
+    // Read and write the snapshot under the same lock, including lifecycle flushes.
+    private fun persistDirtyLocked() {
+        if (!dirtyPersist) return
+        onPersist?.invoke(json.encodeToString(drafts.values.toList()))
+        dirtyPersist = false
     }
     fun flushPendingPersist() {
-        val shouldWrite = synchronized(persistLock) {
+        synchronized(persistLock) {
             persistJob?.cancel()
             persistJob = null
-            val wasDirty = dirtyPersist
-            dirtyPersist = false
-            wasDirty
-        }
-        if (shouldWrite) {
-            onPersist?.invoke(json.encodeToString(drafts.values.toList()))
+            persistDirtyLocked()
         }
     }
     private fun schedulePersist(immediate: Boolean) {
         if (onPersist == null) return
-        if (immediate) {
-            synchronized(persistLock) {
-                persistJob?.cancel()
-                persistJob = null
-                dirtyPersist = false
-            }
-            val snapshot = drafts.values.toList()
-            persistScope.launch {
-                onPersist?.invoke(json.encodeToString(snapshot))
-            }
-            return
-        }
         synchronized(persistLock) {
             dirtyPersist = true
             persistJob?.cancel()
             persistJob = persistScope.launch {
-                delay(400L)
+                if (!immediate) delay(400L)
                 synchronized(persistLock) {
-                    dirtyPersist = false
-                    persistJob = null
+                    if (isActive) {
+                        persistDirtyLocked()
+                        persistJob = null
+                    }
                 }
-                onPersist?.invoke(json.encodeToString(drafts.values.toList()))
             }
         }
     }
@@ -173,6 +167,19 @@ class ComposerDraftSession(
         private set
     private var synced: ComposerDraft? = null
     private var completed = false
+    private val openingDraft = initial
+    private val accountGeneration = UserApiKeyAuthManager.sessionGeneration
+    private val restoredDraft = initialExistsOnServer || LocalComposerDrafts.get(initial.owner, initial.key) != null
+    private var keepLocalDraft = initial.hasContent
+    private var knownCloudSequence = initial.sequence.takeIf { initialExistsOnServer }
+    private var knownCloudFloor = initial.replyToPostNumber
+    private var openingLookup: CompletableDeferred<Unit>? = null
+    private var checkedCloudAtOpen = false
+
+    private fun rememberCloudVersion(sequence: Int, draft: ComposerDraft) {
+        knownCloudSequence = sequence
+        knownCloudFloor = draft.replyToPostNumber
+    }
 
     private fun stripGeneratedDraftTitle(rawTitle: String): String {
         val untitledPrefix = LinDoNetworkCopy.DRAFT_UNTITLED_TOPIC.text.take(3)
@@ -202,6 +209,8 @@ class ComposerDraftSession(
         )
         existsOnServer = true
         savedSequence = remote.sequence
+        rememberCloudVersion(remote.sequence, hydrated)
+        keepLocalDraft = true
         current = hydrated
         synced = hydrated
         LocalComposerDrafts.recordSequence(hydrated.owner, hydrated.key, remote.sequence)
@@ -214,12 +223,21 @@ class ComposerDraftSession(
     fun keepLocalOverRemote(remoteSequence: Int): ComposerDraft {
         existsOnServer = true
         savedSequence = remoteSequence
+        rememberCloudVersion(remoteSequence, current)
         current = current.copy(sequence = remoteSequence, updatedAt = System.currentTimeMillis())
         synced = null
         LocalComposerDrafts.recordSequence(current.owner, current.key, remoteSequence)
-        LocalComposerDrafts.save(current)
+        if (keepLocalDraft) LocalComposerDrafts.save(current)
         return current
     }
+
+    private fun matchesRemote(draft: ComposerDraft, remote: CloudDraftItem): Boolean =
+        draft.raw.trim() == remote.raw.trim() &&
+            (draft.action != ComposerAction.REPLY || draft.replyToPostNumber == remote.replyToPostNumber) &&
+            (draft.action != ComposerAction.NEW_TOPIC || (
+                draft.title.trim() == stripGeneratedDraftTitle(remote.title).trim() && draft.tags == remote.tags &&
+                    (remote.categoryId == null || draft.categoryId == remote.categoryId))) &&
+            (draft.cloudKind != CloudDraftKind.PRIVATE_MESSAGE || draft.recipients.trim() == remote.recipients.trim())
 
     /**
      * Queries `GET /drafts/{key}.json` on composer open to hydrate Web drafts or surface conflicts:
@@ -230,6 +248,17 @@ class ComposerDraftSession(
      */
     suspend fun prepareWithRemote(untouchedBaselineRaw: String? = null): CloudDraftItem? {
         if (completed || current.owner.isBlank()) return null
+        val lookup = CompletableDeferred<Unit>()
+        openingLookup = lookup
+        return try {
+            loadRemote(untouchedBaselineRaw)
+        } finally {
+            lookup.complete(Unit)
+            if (openingLookup === lookup) openingLookup = null
+        }
+    }
+
+    private suspend fun loadRemote(untouchedBaselineRaw: String?): CloudDraftItem? {
         val remote = try {
             LinuxDoRepository.fetchCloudDraftByKey(current.key)
         } catch (ce: CancellationException) {
@@ -238,12 +267,14 @@ class ComposerDraftSession(
             return null
         }
         if (completed) return null
+        checkedCloudAtOpen = true
         val remoteDraft = remote.draft
         if (remoteDraft == null) {
             existsOnServer = false
+            knownCloudSequence = null
             savedSequence = remote.sequence
             LocalComposerDrafts.recordSequence(current.owner, current.key, remote.sequence)
-            if (current.hasContent) {
+            if (keepLocalDraft && current.hasContent && (current.raw != untouchedBaselineRaw || userModifiedInSession)) {
                 current = current.copy(sequence = remote.sequence)
                 LocalComposerDrafts.save(current)
             }
@@ -261,44 +292,42 @@ class ComposerDraftSession(
             return null
         }
 
-        val cleanRemoteTitle = stripGeneratedDraftTitle(remoteDraft.title)
-        val isPrivateMessageDraft = current.cloudKind == CloudDraftKind.PRIVATE_MESSAGE
-        val contentDiffers = differentReplyTarget || remoteDraft.raw.trim() != current.raw.trim() ||
-            (current.action == ComposerAction.NEW_TOPIC && (
-                cleanRemoteTitle.trim() != current.title.trim() || current.tags != remoteDraft.tags ||
-                    (remoteDraft.categoryId != null && remoteDraft.categoryId != current.categoryId)
-                )) ||
-            (isPrivateMessageDraft && remoteDraft.recipients.trim() != current.recipients.trim())
-
         existsOnServer = true
-        if (contentDiffers) {
+        if (!matchesRemote(current, remoteDraft)) {
+            if (userModifiedInSession && openingDraft.hasContent && matchesRemote(openingDraft, remoteDraft)) {
+                rememberCloudVersion(remote.sequence, openingDraft)
+                savedSequence = remote.sequence
+                if (!keepLocalDraft) return null
+            }
             // Do NOT overwrite current and do NOT stamp remote.sequence onto LocalComposerDrafts yet.
             return remoteDraft.copy(sequence = remote.sequence, sequenceKnown = true)
         }
 
         savedSequence = remote.sequence
+        rememberCloudVersion(remote.sequence, current)
         current = current.copy(sequence = remote.sequence)
         synced = current
         LocalComposerDrafts.recordSequence(current.owner, current.key, remote.sequence)
-        LocalComposerDrafts.save(current)
+        if (keepLocalDraft) LocalComposerDrafts.save(current)
         return null
     }
 
     suspend fun hydrateFromServer(untouchedBaselineRaw: String? = null): RemoteDraftHydration =
         RemoteDraftHydration(conflict = prepareWithRemote(untouchedBaselineRaw))
 
-    fun update(value: ComposerDraft, fromUserEdit: Boolean = true) {
+    fun update(value: ComposerDraft, fromUserEdit: Boolean = true, keepLocal: Boolean = value.hasContent) {
         if (completed) return
         if (fromUserEdit) {
             userModifiedInSession = true
         }
         current = value.copy(sequence = savedSequence)
-        LocalComposerDrafts.save(current)
+        keepLocalDraft = keepLocal
+        if (keepLocal) LocalComposerDrafts.save(current) else LocalComposerDrafts.remove(current.owner, current.key)
     }
     fun isSynced() = synced?.sameContent(current) == true
 
     fun syncInBackground() {
-        if (completed || !current.hasContent) return
+        if (completed || !keepLocalDraft || !current.hasContent) return
         LocalComposerDrafts.save(current)
         LinuxDoRepository.launchDetachedDraftOp {
             runCatching { sync() }
@@ -306,7 +335,7 @@ class ComposerDraftSession(
     }
 
     suspend fun sync(): Boolean = serialWrite {
-        if (completed || !current.hasContent || isSynced()) return@serialWrite true
+        if (completed || !keepLocalDraft || !current.hasContent || isSynced()) return@serialWrite true
         val snapshot = current
         val sequence = LocalComposerDrafts.sequence(snapshot.owner, snapshot.key) ?: savedSequence
             ?: LinuxDoRepository.fetchDraftSequence(snapshot.key).also { savedSequence = it }
@@ -326,11 +355,32 @@ class ComposerDraftSession(
         ) ?: return@serialWrite false
         existsOnServer = true
         savedSequence = next
+        rememberCloudVersion(next, snapshot)
         LocalComposerDrafts.recordSequence(snapshot.owner, snapshot.key, next)
         current = current.copy(sequence = next)
-        LocalComposerDrafts.save(current)
+        if (keepLocalDraft) LocalComposerDrafts.save(current)
         synced = snapshot
         true
+    }
+
+    /** Drop only the cloud revision this editor displayed or saved. Other reply targets share the topic key. */
+    suspend fun closeClearedDraft() {
+        if (restoredDraft) openingLookup?.await()
+        serialWrite {
+            if (completed || accountGeneration != UserApiKeyAuthManager.sessionGeneration) return@serialWrite
+            if (restoredDraft && !checkedCloudAtOpen && knownCloudSequence == null && openingDraft.hasContent) {
+                val lookup = LinuxDoRepository.fetchCloudDraftByKey(current.key)
+                if (lookup.draft?.let { matchesRemote(openingDraft, it) } == true) rememberCloudVersion(lookup.sequence, openingDraft)
+                checkedCloudAtOpen = true
+            }
+            if (accountGeneration != UserApiKeyAuthManager.sessionGeneration) return@serialWrite
+            knownCloudSequence?.takeIf { current.action != ComposerAction.REPLY || knownCloudFloor == current.replyToPostNumber }?.let {
+                check(LinuxDoRepository.deleteCloudDraft(current.key, it, background = true, preserveNewerVersion = true))
+            }
+            LocalComposerDrafts.remove(current.owner, current.key)
+            LocalComposerDrafts.forgetSequence(current.owner, current.key)
+            completed = true
+        }
     }
 
     suspend fun <T> publish(block: suspend () -> T?): T? = serialWrite {

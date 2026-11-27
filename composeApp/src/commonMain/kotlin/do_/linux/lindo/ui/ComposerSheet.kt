@@ -36,6 +36,7 @@ import do_.linux.lindo.core.copy.LinDoFeedCopy
 import do_.linux.lindo.core.copy.LinDoNetworkCopy
 import do_.linux.lindo.core.copy.LinDoReaderCopy
 import do_.linux.lindo.core.copy.isSiteVerificationError
+import do_.linux.lindo.core.model.TopicDetailModel
 import do_.linux.lindo.core.model.PostItemModel
 import do_.linux.lindo.core.network.*
 import do_.linux.lindo.core.site.LinuxDoSiteRules
@@ -188,6 +189,7 @@ internal fun ComposerSheet(
     action: ComposerAction,
     topicId: Int? = null,
     topicTitle: String = "",
+    topicDetail: TopicDetailModel? = null,
     replyToPostNumber: Int? = null,
     replyToUsername: String? = null,
     replyToDisplayName: String? = null,
@@ -343,6 +345,7 @@ internal fun ComposerSheet(
     var showExit by remember(stateKey) { mutableStateOf(false) }
     var pendingAfterExit by remember(stateKey) { mutableStateOf<(() -> Unit)?>(null) }
     var discardError by remember(stateKey) { mutableStateOf<String?>(null) }
+    var clearDraftFailed by remember(stateKey) { mutableStateOf(false) }
     var showCost by remember(stateKey) { mutableStateOf(false) }
     var syncRetry by remember(stateKey) { mutableIntStateOf(0) }
     var tagChoices by remember(stateKey, draft.categoryId) { mutableStateOf(ComposerTagChoices(emptyList())) }
@@ -353,6 +356,7 @@ internal fun ComposerSheet(
     var tagsError by remember(stateKey, draft.categoryId) { mutableStateOf<String?>(null) }
     var tagRetry by remember(stateKey, draft.categoryId) { mutableIntStateOf(0) }
     var appliedTemplate by remember(stateKey) { mutableStateOf<String?>(null) }
+    var bodyEditRevision by remember(stateKey) { mutableIntStateOf(0) }
 
     var replyContextExpanded by remember(stateKey) { mutableStateOf(false) }
     var viewMode by remember(stateKey) { mutableStateOf(WorkbenchViewMode.SOURCE) }
@@ -368,23 +372,25 @@ internal fun ComposerSheet(
     val hasTopicMetaControls = action == ComposerAction.NEW_TOPIC || isEditingTopicOp
 
     val busy = submitting || uploading || pendingReview
-    val isUntouchedTemplate = action == ComposerAction.NEW_TOPIC &&
+    fun isDefaultTemplate(value: ComposerDraft) = action == ComposerAction.NEW_TOPIC &&
         appliedTemplate != null &&
-        draft.raw.trim() == appliedTemplate!!.trim() &&
-        draft.title.isBlank() &&
-        draft.tags.isEmpty()
-    val hasChanges = prepared && !isUntouchedTemplate &&
+        value.raw.trim() == appliedTemplate!!.trim() &&
+        value.title.isBlank() &&
+        value.tags.isEmpty()
+    fun hasDraftChanges(value: ComposerDraft) = prepared && !isDefaultTemplate(value) &&
         if (action == ComposerAction.EDIT) {
-            draft.raw != originalRaw || (
+            value.raw != originalRaw || (
                 isEditingTopicOp && (
-                    draft.title.trim() != originalTitle.trim() ||
-                        draft.categoryId != originalCategoryId ||
-                        draft.tags != originalTags
+                    value.title.trim() != originalTitle.trim() ||
+                        value.categoryId != originalCategoryId ||
+                        value.tags != originalTags
                     )
                 )
         } else {
-            draft.hasContent
+            value.hasContent
         }
+    val isUntouchedTemplate = isDefaultTemplate(draft)
+    val hasChanges = hasDraftChanges(draft)
 
     val openWebUrl = LocalOpenInAppWebUrl.current
     val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
@@ -432,13 +438,43 @@ internal fun ComposerSheet(
 
     fun update(next: ComposerDraft) {
         if (submitting || !prepared) return
+        if (next.raw != draft.raw) bodyEditRevision++
         draft = next.copy(updatedAt = System.currentTimeMillis())
-        session?.update(draft)
+        session?.update(draft, keepLocal = hasDraftChanges(draft))
         if (!draftSyncBlockedByVerification) {
             draftSyncFailed = false
             draftSyncErrorMsg = null
         }
         submitError = null
+    }
+    fun finishExit() {
+        val after = pendingAfterExit
+        pendingAfterExit = null
+        onDismiss()
+        after?.invoke()
+    }
+    fun exitEditor(after: (() -> Unit)? = null) {
+        if (submitting || uploading || pendingReview) return
+        keyboard?.hide()
+        pendingAfterExit = after
+        if (hasDraftChanges(draft)) {
+            showExit = true
+            return
+        }
+        val active = session
+        if (active == null || (!active.userModifiedInSession && !(action == ComposerAction.EDIT && active.existsOnServer))) {
+            finishExit()
+            return
+        }
+        submitting = true
+        scope.launch {
+            try {
+                active.closeClearedDraft()
+                finishExit()
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { clearDraftFailed = true }
+            finally { submitting = false }
+        }
     }
     fun requestClose() {
         if (busy) return
@@ -450,39 +486,11 @@ internal fun ComposerSheet(
             viewMode = WorkbenchViewMode.SOURCE
             return
         }
-        pendingAfterExit = null
-        if (hasChanges) {
-            keyboard?.hide()
-            showExit = true
-        } else {
-            keyboard?.hide()
-            if (action == ComposerAction.EDIT && session?.existsOnServer == true) {
-                val closingSession = session
-                LinuxDoRepository.launchDetachedDraftOp {
-                    runCatching { closingSession?.discard() }
-                }
-            }
-            onDismiss()
-        }
+        exitEditor()
     }
 
     val latestExternalExitHandler by rememberUpdatedState<(() -> Unit) -> Unit> { proceed ->
-        if (busy) return@rememberUpdatedState
-        if (hasChanges) {
-            keyboard?.hide()
-            pendingAfterExit = proceed
-            showExit = true
-        } else {
-            keyboard?.hide()
-            if (action == ComposerAction.EDIT && session?.existsOnServer == true) {
-                val closingSession = session
-                LinuxDoRepository.launchDetachedDraftOp {
-                    runCatching { closingSession?.discard() }
-                }
-            }
-            onDismiss()
-            proceed()
-        }
+        exitEditor(proceed)
     }
     DisposableEffect(exitInterceptor) {
         val currentHandler: (() -> Unit) -> Unit = { proceed -> latestExternalExitHandler(proceed) }
@@ -497,12 +505,10 @@ internal fun ComposerSheet(
     // 兜底保护：若组件因外部不可抗因素（如会话切换）意外卸载且未走「不保存 / 已发布」，自动补推一次后台云端草稿同步
     val latestHasChangesForDispose by rememberUpdatedState(hasChanges && !checkingRemoteDraft && conflictRemoteDraft == null)
     val latestSessionForDispose by rememberUpdatedState(session)
-    val latestDraftForDispose by rememberUpdatedState(draft)
     DisposableEffect(stateKey) {
         onDispose {
             val s = latestSessionForDispose
             if (latestHasChangesForDispose && s != null && s.userModifiedInSession) {
-                s.update(latestDraftForDispose, fromUserEdit = false)
                 s.syncInBackground()
             }
         }
@@ -718,8 +724,9 @@ internal fun ComposerSheet(
         val category = draft.categoryId ?: return@LaunchedEffect
         val canReplaceWithTemplate = draft.raw.isBlank() || (appliedTemplate != null && draft.raw.trim() == appliedTemplate!!.trim())
         if (!canReplaceWithTemplate) return@LaunchedEffect
+        val beforeLookup = bodyEditRevision
         val template = runCatching { LinuxDoRepository.fetchCategoryTopicTemplate(category) }.getOrNull().orEmpty()
-        if (draft.categoryId == category && (draft.raw.isBlank() || (appliedTemplate != null && draft.raw.trim() == appliedTemplate!!.trim()))) {
+        if (draft.categoryId == category && bodyEditRevision == beforeLookup && (draft.raw.isBlank() || (appliedTemplate != null && draft.raw.trim() == appliedTemplate!!.trim()))) {
             appliedTemplate = template.takeIf { it.isNotBlank() }
             draft = draft.copy(raw = template, updatedAt = System.currentTimeMillis())
         }
@@ -1452,7 +1459,17 @@ internal fun ComposerSheet(
 
                     // ==================== 4. 顶部 Action Tools Bar + 弹性全高创作画布 ====================
                     val showBodyError = submitAttempted && bodyValidation != null
+                    val floor = draft.replyToPostNumber
+                    val target = if (action == ComposerAction.EDIT) post else topicDetail?.posts?.find { it.postNumber == floor }
                     LinDoMarkdownWorkbench(
+                        forumContext = ForumComposerContext(
+                            detail = topicDetail, topicId = topicId, topicTitle = topicTitle,
+                            quoteFloor = if (action == ComposerAction.REPLY && topicId != null) floor ?: 1 else null,
+                            replyUsername = target?.username ?: draft.replyToUsername?.takeIf { floor != null },
+                            replyName = target?.displayName ?: replyToDisplayName?.takeIf { floor != null && floor == replyToPostNumber },
+                            firstPost = action == ComposerAction.NEW_TOPIC || (action == ComposerAction.EDIT && (draft.postNumber ?: post?.postNumber) == 1)
+                        ),
+                        onTemplateTitle = { if (action == ComposerAction.NEW_TOPIC && draft.title.isBlank()) update(draft.copy(title = it)) },
                         rawValue = draft.raw,
                         onRawValueChange = { update(draft.copy(raw = it)) },
                         placeholder = when (action) {
@@ -1548,6 +1565,16 @@ internal fun ComposerSheet(
             onDismiss()
             after?.invoke()
         }
+    )
+    if (clearDraftFailed) LinDoConfirmDialog(
+        title = "云端草稿未清除",
+        detail = "可以重试，也可以保留云端副本并退出。",
+        confirmLabel = "重试",
+        alternateAction = {
+            TextButton(onClick = { clearDraftFailed = false; finishExit() }) { Text("直接退出") }
+        },
+        onDismiss = { clearDraftFailed = false; pendingAfterExit = null },
+        onConfirm = { clearDraftFailed = false; exitEditor(pendingAfterExit) }
     )
     if (showCost) LinDoConfirmDialog(
         title = LinDoComposerCopy.CONFIRM_LOTTERY_TOPIC_TITLE.text,

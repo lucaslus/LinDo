@@ -21,7 +21,11 @@ object MarkdownPreview {
         val tokenPrefix = "LINDOCODE${java.util.UUID.randomUUID().toString().replace("-", "")}X"
         fun protect(value: String): String { protected += value; return "$tokenPrefix${protected.lastIndex}END" }
         var source = Regex("(?m)^ {0,3}(`{3,}|~{3,})[^\\n]*\\n[\\s\\S]*?^ {0,3}\\1[\\t ]*$")
-            .replace(raw) { protect(it.value) }
+            .replace(raw) { fence ->
+                val info = fence.value.substringBefore('\n').trimStart().dropWhile { it == '`' || it == '~' }.trim()
+                val label = if ("ai" in info.split(Regex("\\s+"))) "\n\n**AI 生成**\n\n" else ""
+                label + protect(fence.value)
+            }
         source = Regex("(`+)([^`]|(?!\\1)`)*?\\1").replace(source) { protect(it.value) }
         // Indented code must also remain literal when it contains Discourse-looking syntax.
         source = Regex("(?m)^(?:(?: {4}|\\t)[^\\n]*(?:\\n|$))+").replace(source) { protect(it.value) }
@@ -65,10 +69,12 @@ object MarkdownPreview {
             val expr = match.groupValues[1].trim()
             "<span class=\"math\" data-math=\"${attr(expr)}\">${org.jsoup.nodes.Entities.escape(expr)}</span>"
         }
-        val detailsRegex = Regex("\\[details(?:=\"?([^\\]\"]*)\"?)?]((?:(?!\\[details\\b)[\\s\\S])*?)\\[/details]", RegexOption.IGNORE_CASE)
+        val detailsRegex = Regex("""\[details(?:=(?:"([^"]*)"|'([^']*)'|([^\]]*?)))?(\s+ai)?]((?:(?!\[details\b)[\s\S])*?)\[/details]""", RegexOption.IGNORE_CASE)
         for (depth in 0 until 8) {
             val next = detailsRegex.replace(source) {
-                "\n<details><summary>${org.jsoup.nodes.Entities.escape(it.groupValues[1].ifBlank { "展开内容" })}</summary>\n\n${it.groupValues[2]}\n\n</details>\n"
+                val title = it.groupValues.slice(1..3).firstOrNull(String::isNotBlank) ?: "展开内容"
+                val label = if (it.groupValues[4].isNotEmpty()) " · AI 生成" else ""
+                "\n<details><summary>${org.jsoup.nodes.Entities.escape(title)}$label</summary>\n\n${it.groupValues[5]}\n\n</details>\n"
             }
             if (next == source) break
             source = next
@@ -113,7 +119,7 @@ object MarkdownPreview {
         protected.indices.reversed().forEach { source = source.replace("$tokenPrefix${it}END", protected[it]) }
         val body = Jsoup.parseBodyFragment(renderer.render(parser.parse(source))).body()
         val alertMarker = Regex(
-            "^\\[!(NOTE|INFO|TODO|TIP|HINT|IMPORTANT|SUCCESS|CHECK|DONE|WARNING|ATTENTION|CAUTION|DANGER|ERROR|FAILURE|FAIL|BUG|EXAMPLE|QUOTE|CITE|ABSTRACT|SUMMARY|TLDR|QUESTION|HELP|FAQ)\\]([+-])?(?:[ \\t]+([^\\r\\n]*))?",
+            "^\\[!(AI|NOTE|INFO|TODO|TIP|HINT|IMPORTANT|SUCCESS|CHECK|DONE|WARNING|ATTENTION|CAUTION|DANGER|ERROR|FAILURE|FAIL|BUG|EXAMPLE|QUOTE|CITE|ABSTRACT|SUMMARY|TLDR|QUESTION|HELP|FAQ)\\]([+-])?(?:[ \\t]+([^\\r\\n]*))?",
             RegexOption.IGNORE_CASE
         )
         body.select("blockquote").forEach { quote ->
@@ -132,7 +138,7 @@ object MarkdownPreview {
                 else -> "note"
             }
             val foldFlag = match.groupValues[2]
-            val customTitle = match.groupValues[3].trim()
+            val customTitle = match.groupValues[3].trim().ifEmpty { if (rawKind == "ai") "AI 生成" else "" }
             quote.tagName("div").addClass("markdown-alert").addClass("markdown-alert-$normalizedKind")
             if (customTitle.isNotEmpty()) {
                 quote.attr("data-callout-title", customTitle)

@@ -518,7 +518,8 @@ data class AuthenticatedUserProfile(
     val avatarTemplate: String = "",
     val animatedAvatar: String? = null,
     val trustLevel: Int = 1,
-    val userTitle: String? = null
+    val userTitle: String? = null,
+    val canUseTemplates: Boolean? = null
 )
 
 /**
@@ -850,7 +851,8 @@ object UserApiKeyAuthManager {
         trustLevel: Int,
         userId: Int = 0,
         animatedAvatar: String? = null,
-        userTitle: String? = null
+        userTitle: String? = null,
+        canUseTemplates: Boolean? = null
     ) {
         if (username.isBlank() || username == "linuxdo_user") return
         expiredSessionUsername = null
@@ -874,7 +876,8 @@ object UserApiKeyAuthManager {
             avatarTemplate = avatarUrl,
             animatedAvatar = animatedAvatar,
             trustLevel = trustLevel,
-            userTitle = userTitle
+            userTitle = userTitle,
+            canUseTemplates = canUseTemplates ?: currentUser?.takeUnless { accountChanged }?.canUseTemplates
         )
         currentUser = updated
         onPersistSession?.invoke(updated, activeUserApiKey)
@@ -3600,7 +3603,8 @@ object LinuxDoRepository {
             trustLevel = trustLevel,
             userId = userId,
             animatedAvatar = animatedAvatar,
-            userTitle = title
+            userTitle = title,
+            canUseTemplates = cu["can_use_templates"]?.jsonPrimitive?.booleanOrNull
         )
 
         val cachedDistinctCount = getCachedUserBadges(uname)?.distinctBy { it.id }?.size ?: 0
@@ -4652,7 +4656,8 @@ object LinuxDoRepository {
             trustLevel = trustLevel,
             userId = userId,
             animatedAvatar = animatedAvatar,
-            userTitle = title
+            userTitle = title,
+            canUseTemplates = cu["can_use_templates"]?.jsonPrimitive?.booleanOrNull
         )
 
         val cachedDistinctCount = getCachedUserBadges(uname)?.distinctBy { it.id }?.size ?: 0
@@ -5419,6 +5424,23 @@ object LinuxDoRepository {
             }
             categories
         }
+    }
+
+    internal suspend fun fetchForumTemplates() = withContext(Dispatchers.IO) {
+        val root = readApiObject(executeHttp("https://linux.do/discourse_templates", preserveFailure = true))
+        root.requireArray("templates").mapNotNull { item ->
+            val row = item as? JsonObject ?: return@mapNotNull null
+            val id = (row["id"] as? JsonPrimitive)?.intOrNull?.takeIf { it > 0 } ?: return@mapNotNull null
+            val title = (row["title"] as? JsonPrimitive)?.contentOrNull ?: return@mapNotNull null
+            val content = (row["content"] as? JsonPrimitive)?.contentOrNull ?: return@mapNotNull null
+            do_.linux.lindo.core.compose.ForumTemplate(id, title, content,
+                (row["tags"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }.orEmpty(),
+                (row["usages"] as? JsonPrimitive)?.intOrNull ?: 0)
+        }.sortedWith(compareByDescending<do_.linux.lindo.core.compose.ForumTemplate> { it.usages }.thenBy { it.title })
+    }
+
+    internal suspend fun recordForumTemplateUse(id: Int) = withContext(Dispatchers.IO) {
+        requireMutationSuccess(executeHttp("https://linux.do/discourse_templates/$id/use", method = "POST", preserveFailure = true))
     }
 
     suspend fun fetchCategoryTopicTemplate(categoryId: Int): String? = withContext(Dispatchers.IO) {
@@ -7353,6 +7375,8 @@ object LinuxDoRepository {
             id = id,
             title = title,
             originalPosterUsername = resolvedOpUsername,
+            lastPosterUsername = root["last_poster_username"]?.jsonPrimitive?.contentOrNull
+                ?: ((root["details"] as? JsonObject)?.get("last_poster") as? JsonObject)?.get("username")?.jsonPrimitive?.contentOrNull,
             originalPosterDisplayName = resolvedOpDisplayName,
             originalPosterAvatarTemplate = resolvedOpAvatarTemplate,
             originalPosterAnimatedAvatar = resolvedOpAnimatedAvatar,
@@ -8263,7 +8287,8 @@ object LinuxDoRepository {
     suspend fun deleteCloudDraft(
         draftKey: String,
         sequence: Int,
-        background: Boolean = false
+        background: Boolean = false,
+        preserveNewerVersion: Boolean = false
     ): Boolean = withContext(Dispatchers.IO) {
         val encoded = encodeUrlSegment(draftKey)
         val headers = if (background) mapOf("Discourse-Background" to "true") else emptyMap()
@@ -8283,7 +8308,9 @@ object LinuxDoRepository {
                 preserveFailure = true
             )
         )
-        root["draft"] == null || root["draft"] is JsonNull
+        val remainingSequence = (root["draft_sequence"] as? JsonPrimitive)?.intOrNull
+        root["draft"] == null || root["draft"] is JsonNull ||
+            (preserveNewerVersion && remainingSequence != null && remainingSequence > sequence)
     }
 
     /**

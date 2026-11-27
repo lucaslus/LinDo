@@ -6426,6 +6426,7 @@ impl BridgeEngine {
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string()),
+            can_use_templates: u.get("can_use_templates").and_then(|v| v.as_bool()),
             admin: u.get("admin").and_then(|v| v.as_bool()).unwrap_or(false),
             moderator: u.get("moderator").and_then(|v| v.as_bool()).unwrap_or(false),
         })

@@ -17,6 +17,8 @@ pub struct UserProfile {
     #[serde(default)]
     pub user_title: Option<String>,
     #[serde(default)]
+    pub can_use_templates: Option<bool>,
+    #[serde(default)]
     pub admin: bool,
     #[serde(default)]
     pub moderator: bool,
@@ -360,6 +362,7 @@ fn apply_legacy_props(target: &mut PersistedState, props: &HashMap<String, Strin
             animated_avatar,
             trust_level,
             user_title,
+            can_use_templates: None,
             admin: false,
             moderator: false,
         });
@@ -553,6 +556,7 @@ mod tests {
             animated_avatar: None,
             trust_level: 2,
             user_title: None,
+            can_use_templates: None,
             admin: false,
             moderator: false,
         }

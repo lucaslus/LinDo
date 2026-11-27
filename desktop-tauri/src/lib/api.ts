@@ -46,6 +46,7 @@ import { parseInternalTopicLink } from "./cooked";
 import { extractUsernameFromAvatarUrl } from "./palette";
 import { diagLog } from "./diagnostics";
 import { FORUM_CONNECTION_PENDING } from "./verificationStatus";
+import { parseForumTemplates } from "./composerTemplates";
 import { clearForumMediaBlobCache } from "./forumMedia";
 import { registerCustomSiteEmojis } from "./markdownPreview";
 import {
@@ -219,13 +220,13 @@ export async function siteRequest(
   method: "GET" | "POST" | "PUT" | "DELETE" = "GET",
   form?: Record<string, string>,
   headers?: Record<string, string>,
-  opts?: { silentDiag?: boolean }
+  opts?: { silentDiag?: boolean; readOwner?: string }
 ): Promise<SiteHttpResponse> {
   const isGet = method === "GET";
   const isWrite = method === "POST" || method === "PUT" || method === "DELETE";
   const isForceRetry = headers?.["X-LinDo-Force-Retry"] === "1";
   const bgKey = headers?.["Discourse-Background"] === "true" ? "bg" : "fg";
-  const dedupeKey = isGet && !isForceRetry ? `${bgKey}:${url}` : null;
+  const dedupeKey = isGet && !isForceRetry ? `${opts?.readOwner ?? ""}:${bgKey}:${url}` : null;
   const diagPath = extractDiagPath(url);
 
   if (dedupeKey) {
@@ -722,7 +723,8 @@ function extractDiscourseError(obj: any): string | null {
 async function getJsonOrThrow(
   url: string,
   background = false,
-  extraHeaders?: Record<string, string>
+  extraHeaders?: Record<string, string>,
+  readOwner?: string
 ): Promise<any> {
   const headers: Record<string, string> = { ...(extraHeaders ?? {}) };
   if (background) {
@@ -731,7 +733,7 @@ async function getJsonOrThrow(
     headers["X-LinDo-Force-Retry"] = "1";
     forceNextRetryUntilMs = 0;
   }
-  const res = await siteRequest(url, "GET", undefined, Object.keys(headers).length ? headers : undefined);
+  const res = await siteRequest(url, "GET", undefined, Object.keys(headers).length ? headers : undefined, { readOwner });
   if (res.isChallenge) {
     throw buildChallengeSiteError(res, "需要完成站点验证");
   }
@@ -1171,6 +1173,7 @@ export async function refreshCurrentUserSession(): Promise<{ profile: UserProfil
     avatarTemplate: String(cu.avatar_template || ""),
     animatedAvatar: cu.animated_avatar ? String(cu.animated_avatar) : null,
     trustLevel: Number(cu.trust_level ?? 1),
+    canUseTemplates: typeof cu.can_use_templates === "boolean" ? cu.can_use_templates : undefined,
     userTitle: cu.title ? String(cu.title) : null,
   };
   if (profile.avatarTemplate) {
@@ -2239,6 +2242,7 @@ export async function fetchTopicDetail(
         : Number(data.posts_count || posts.length || 1),
     lastReadPostNumber: lastReadPostNum,
     opUsername,
+    lastPosterUsername: data.last_poster_username || data.details?.last_poster?.username,
     opDisplayName,
     opAvatarTemplate,
     opAnimatedAvatar,
@@ -3359,6 +3363,14 @@ export async function searchUsersForMention(term: string): Promise<MentionUserCa
 
 /* ==================== 7. 创作台版块可选标签查询 (1:1 对齐 fetchCategoryAllowedTags) ==================== */
 
+export async function fetchForumTemplates(owner: string) {
+  return parseForumTemplates(await getJsonOrThrow("https://linux.do/discourse_templates", false, undefined, owner));
+}
+
+export async function recordForumTemplateUse(id: number) {
+  await mutateJsonOrThrow(`https://linux.do/discourse_templates/${id}/use`, "POST");
+}
+
 export async function fetchCategoryAllowedTags(
   categoryId: number,
   query: string,
@@ -3723,11 +3735,15 @@ export async function saveCloudDraft(params: {
   return Number.isFinite(nextSeq) ? nextSeq : params.sequence;
 }
 
-export async function deleteCloudDraft(draftKey: string, sequence = 0): Promise<void> {
+export async function deleteCloudDraft(draftKey: string, sequence = 0, verify = false): Promise<void> {
   await mutateJsonOrThrow(
     `https://linux.do/drafts/${encodeURIComponent(draftKey)}.json?sequence=${sequence}`,
     "DELETE"
   );
+  if (verify) {
+    const remaining = await fetchSingleCloudDraft(draftKey);
+    if (remaining.draft && remaining.sequence <= sequence) throw new Error("云端草稿未清除");
+  }
 }
 
 export async function fetchUserCardDetail(username: string): Promise<any> {

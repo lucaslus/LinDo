@@ -490,7 +490,8 @@ data class TopicDetailModel(
     val canInviteTo: Boolean = false,
     val canRemoveAllowedUsers: Boolean = false,
     val acceptedAnswerPostNumber: Int? = null,
-    val hasAcceptedAnswer: Boolean = false
+    val hasAcceptedAnswer: Boolean = false,
+    val lastPosterUsername: String? = null
 )
 
 /**

@@ -10,6 +10,7 @@ export interface UserProfile {
   avatarTemplate: string;
   animatedAvatar?: string | null;
   trustLevel: number;
+  canUseTemplates?: boolean;
   userTitle?: string | null;
   admin?: boolean;
   moderator?: boolean;
@@ -426,6 +427,7 @@ export interface TopicDetailModel {
   highestPostNumber?: number | null;
   lastReadPostNumber?: number | null;
   opUsername: string;
+  lastPosterUsername?: string;
   opDisplayName?: string;
   opAvatarTemplate?: string;
   opAnimatedAvatar?: string | null;

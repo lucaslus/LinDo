@@ -2130,8 +2130,9 @@ export const App: React.FC = () => {
       ? "new_topic" : composerReq.action === "EDIT" ? `edit_${composerReq.postId}` : replyKey);
     return (
       <ComposerModal
-        key={`${composerReq.action}_${composerReq.topicId || 0}_${composerReq.postId || 0}`}
+        key={`${currentUser?.userId ?? 0}_${composerReq.action}_${composerReq.topicId || 0}_${composerReq.postId || 0}`}
         request={composerReq}
+        currentUser={currentUser}
         categories={categories}
         presentation="modal"
         appendQuote={composerAppendQuote}

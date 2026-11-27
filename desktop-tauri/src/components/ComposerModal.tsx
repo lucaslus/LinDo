@@ -1,4 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ForumComposerTools } from "./ForumComposerTools";
+import { expandForumTemplate } from "../lib/composerTemplates";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { isImeComposingEvent } from "../lib/imeGuard";
 import {
@@ -16,6 +18,7 @@ import type {
   PostItemModel,
   TagChoiceOption,
   TagChoiceResult,
+  UserProfile,
 } from "../lib/types";
 import {
   type CommunitySearchHit,
@@ -23,6 +26,7 @@ import {
   deleteLocalDraftInRust,
   fetchCategoryAllowedTags,
   fetchPostRawMarkdown,
+  recordForumTemplateUse,
   fetchRecentTopicsForLinkPicker,
   fetchSingleCloudDraft,
   fetchSiteCustomEmojis,
@@ -59,6 +63,7 @@ import { AvatarWithFlair, ConfirmDialog, isValidSearchQuery } from "./SecondaryS
 interface ComposerModalProps {
   request: ComposerLaunchRequest;
   categories: CategoryMeta[];
+  currentUser?: UserProfile | null;
   savedDraft?: LocalDraftRecord;
   localDraftKey?: string;
   presentation?: "modal" | "drawer";
@@ -73,6 +78,14 @@ interface ComposerModalProps {
     pendingReview?: boolean;
   }) => void;
   onTriggerVerify: () => void;
+}
+
+function matchesCloudDraft(remote: CloudDraftItem, request: ComposerLaunchRequest, value: Pick<LocalDraftRecord, "raw" | "title" | "tags" | "categoryId">) {
+  if (remote.action !== request.action || value.raw.trim() !== remote.raw.trim()) return false;
+  if (request.action === "REPLY") return (remote.replyToPostNumber ?? null) === (request.replyToPostNumber ?? null);
+  return value.title.trim() === remote.title.trim() &&
+    (remote.categoryId == null || remote.categoryId === value.categoryId) &&
+    remote.tags.join(",") === value.tags.join(",");
 }
 
 const QUICK_EMOJIS = [
@@ -182,6 +195,7 @@ const MAX_TAGS = 5;
 export const ComposerModal: React.FC<ComposerModalProps> = ({
   request,
   categories,
+  currentUser,
   savedDraft,
   localDraftKey,
   presentation = "modal",
@@ -276,7 +290,12 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
     | "CALLOUT"
     | "TABLE"
     | "POLL"
+    | "MORE"
+    | "FORUM_TEMPLATE"
+    | "FORUM_DATE"
   >("NONE");
+
+  const moreToolsOpen = activePicker === "MORE" || activePicker === "FORUM_TEMPLATE" || activePicker === "FORUM_DATE";
 
   // Cloud draft conflict state (`P1-4`)
   const [cloudDraftConflict, setCloudDraftConflict] = useState<CloudDraftItem | null>(null);
@@ -347,6 +366,14 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
   const [cloudSyncedAt, setCloudSyncedAt] = useState<number | null>(null);
   const [cloudReady, setCloudReady] = useState(false);
   const cloudSave = useRef<Promise<void>>(Promise.resolve());
+  const cloudLookup = useRef<Promise<void>>(Promise.resolve());
+  const checkedCloudAtOpen = useRef(false);
+  const knownCloudSequence = useRef<number | null>(null);
+  const localWrite = useRef<Promise<void>>(Promise.resolve());
+  const localCopies = useRef(new Set(savedDraft ? [draftKey] : []));
+  const closingDraft = useRef(false);
+  const mounted = useRef(true);
+  const [clearFailure, setClearFailure] = useState<"local" | "cloud" | null>(null);
   const [cloudSequence, setCloudSequence] = useState(savedDraft?.sequence ?? 0);
   const [submitNeedsVerification, setSubmitNeedsVerification] = useState(false);
   const [rawRetry, setRawRetry] = useState(0);
@@ -377,10 +404,37 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
   const lastAppendedNonceRef = useRef<number>(0);
   const composerOpenedAtRef = useRef<number>(Date.now());
   const firstTypedAtRef = useRef<number | null>(null);
+  const openingDraft = useRef({ raw, title, categoryId, tags, floor: request.replyToPostNumber });
+  const currentFloor = useRef(request.replyToPostNumber);
+  currentFloor.current = request.replyToPostNumber;
+  const editedText = useRef(false);
+  const clearedBodyCategory = useRef<number | null>(null);
+  const isUntouchedTemplate = isNewTopic && Boolean(lastAppliedTemplate) &&
+    raw.trim() === lastAppliedTemplate.trim() && !title.trim() && tags.length === 0;
+  const hasDraftContent = !isUntouchedTemplate && Boolean(raw.trim() || (isNewTopic && title.trim()));
+  const hadDraftContent = useRef(false);
+
+  const writeLocal = useCallback((value: LocalDraftRecord | null) => {
+    if (!value && !localCopies.current.has(draftKey)) return localWrite.current;
+    if (value) localCopies.current.add(draftKey); else localCopies.current.delete(draftKey);
+    const next = localWrite.current.catch(() => {}).then(() => {
+      if (mounted.current) return value ? saveLocalDraftInRust(value) : deleteLocalDraftInRust(draftKey);
+    });
+    localWrite.current = next;
+    void next.catch(() => { if (localWrite.current === next) localCopies.current.add(draftKey); });
+    return next;
+  }, [draftKey]);
+  const saveCurrentLocal = useCallback(() => writeLocal({
+    key: draftKey, action: request.action, topicId: request.topicId ?? null, postId: request.postId ?? null,
+    replyToPostNumber: request.replyToPostNumber ?? null, categoryId, title, raw, tags,
+    sequence: cloudDraftSeqRef.current, updatedAt: Date.now(),
+  }), [writeLocal, draftKey, request, categoryId, title, raw, tags]);
 
   // Revoke locally created preview blob URLs when composer closes
   useEffect(() => {
+    mounted.current = true;
     return () => {
+      mounted.current = false;
       for (const url of createdBlobUrlsRef.current) {
         try {
           URL.revokeObjectURL(url);
@@ -479,20 +533,19 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
   }, [needsOriginal, restoringEdit, request.postId, rawRetry]);
 
   // Apply category topic_template automatically when switching categories on a new topic if raw is blank or still equals previous template
+  const categoryTemplate = categories.find(c => c.id === categoryId)?.topicTemplate?.trim();
   useEffect(() => {
-    if (!isNewTopic) return;
-    const cat = categories.find((c) => c.id === categoryId);
-    const tpl = (cat?.topicTemplate || "").trim();
-    if (!tpl) return;
+    if (!isNewTopic || !categoryTemplate) return;
     setRaw((prev) => {
       const trimmed = prev.trim();
+      if (!trimmed && clearedBodyCategory.current === categoryId) return prev;
       if (!trimmed || (lastAppliedTemplate && trimmed === lastAppliedTemplate.trim())) {
-        setLastAppliedTemplate(tpl);
-        return tpl;
+        setLastAppliedTemplate(categoryTemplate);
+        return categoryTemplate;
       }
       return prev;
     });
-  }, [isNewTopic, categoryId, categories, lastAppliedTemplate]);
+  }, [isNewTopic, categoryId, categoryTemplate, lastAppliedTemplate]);
 
   useEffect(() => {
     setSubmitAttempted(false);
@@ -615,11 +668,14 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
   useEffect(() => {
     setCloudReady(false);
     setCloudDraftConflict(null);
+    checkedCloudAtOpen.current = false;
+    knownCloudSequence.current = null;
     if (!cloudDraftKey || request.action === "EDIT") return;
     let alive = true;
-    fetchSingleCloudDraft(cloudDraftKey)
+    cloudLookup.current = fetchSingleCloudDraft(cloudDraftKey)
       .then(({ draft: remote, sequence }) => {
         if (!alive) return;
+        checkedCloudAtOpen.current = true;
         cloudDraftSeqRef.current = sequence;
         if (!remote) {
           setCloudReady(true);
@@ -634,8 +690,15 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
         const remoteTitle = remote.title.trim();
         if (!remoteRaw && !remoteTitle) return;
 
-        if (!curRaw && !curTitle && !liveMeta.current.tags.length && liveMeta.current.categoryId === defaultCatId) {
+        const opened = openingDraft.current;
+        const matchesOpening = opened.floor === request.replyToPostNumber &&
+          Boolean(opened.raw.trim() || (isNewTopic && opened.title.trim())) && matchesCloudDraft(remote, request, opened);
+        if (matchesOpening) knownCloudSequence.current = sequence;
+        if (closingDraft.current) return;
+        if (!curRaw && (!isNewTopic || !curTitle) && !liveMeta.current.tags.length && liveMeta.current.categoryId === defaultCatId &&
+            !editedText.current && !hadDraftContent.current) {
           // Local is empty -> silently hydrate cloud draft & preserve real sequence
+          knownCloudSequence.current = sequence;
           if (remote.title && isNewTopic) setTitle(remote.title);
           if (remote.raw) {
             rawRef.current = remote.raw;
@@ -646,13 +709,9 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
           return;
         }
 
-        const differs =
-          remoteRaw !== curRaw || (isNewTopic && (
-            remoteTitle !== curTitle ||
-            (remote.categoryId != null && remote.categoryId !== liveMeta.current.categoryId) ||
-            remote.tags.join(",") !== liveMeta.current.tags.join(",")
-          ));
-        if (differs) {
+        if (matchesCloudDraft(remote, request, { raw: rawRef.current, ...liveMeta.current })) {
+          knownCloudSequence.current = sequence;
+        } else if (!matchesOpening) {
           setCloudDraftConflict(remote);
         }
       })
@@ -666,32 +725,27 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
 
   // Persist local draft quietly on edit (preserving real server sequence!)
   useEffect(() => {
-    if (request.action === "EDIT" || submitting) return;
-    if (!title.trim() && !raw.trim() && tags.length === 0) return;
+    if (request.action === "EDIT" || submitting || clearFailure || closingDraft.current) return;
+    if (!hasDraftContent) {
+      if (localCopies.current.has(draftKey)) void writeLocal(null).catch(() => {});
+      setDraftSavedAt(null);
+      setCloudSyncedAt(null);
+      return;
+    }
+    hadDraftContent.current = true;
     const timer = setTimeout(() => {
-      saveLocalDraftInRust({
-        key: draftKey,
-        action: request.action,
-        topicId: request.topicId ?? null,
-        postId: request.postId ?? null,
-        replyToPostNumber: request.replyToPostNumber ?? null,
-        categoryId,
-        title,
-        raw,
-        tags,
-        sequence: cloudDraftSeqRef.current,
-        updatedAt: Date.now(),
-      })
-        .then(() => setDraftSavedAt(Date.now()))
+      if (closingDraft.current) return;
+      saveCurrentLocal()
+        .then(() => { if (localCopies.current.has(draftKey)) setDraftSavedAt(Date.now()); })
         .catch(() => {});
     }, 450);
     return () => clearTimeout(timer);
-  }, [draftKey, request, categoryId, title, raw, tags, submitting, cloudSequence]);
+  }, [request.action, hasDraftContent, saveCurrentLocal, writeLocal, submitting, clearFailure, cloudSequence, draftKey]);
 
   // Best-effort bidirectional Discourse cloud draft sync (debounced 2.8s, strictly non-blocking)
   useEffect(() => {
     if (request.action === "EDIT") return;
-    if (!title.trim() && !raw.trim()) return;
+    if (!hasDraftContent || clearFailure || closingDraft.current) return;
     if (!cloudDraftKey || !cloudReady || cloudDraftConflict || submitting) return;
     let active = true;
     const timer = setTimeout(() => {
@@ -716,9 +770,12 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               typingTime: firstTypedAtRef.current ? Date.now() - firstTypedAtRef.current : 0,
             };
       cloudSave.current = cloudSave.current.then(async () => {
-        if (!active) return;
+        if (!active || closingDraft.current) return;
         const nextSeq = await saveCloudDraft({ draftKey: cloudDraftKey, sequence: cloudDraftSeqRef.current, data: payload });
-        cloudDraftSeqRef.current = nextSeq;
+        if (currentFloor.current === request.replyToPostNumber) {
+          cloudDraftSeqRef.current = nextSeq;
+          knownCloudSequence.current = nextSeq;
+        }
         if (active) {
           setCloudSequence(nextSeq);
           setCloudSyncedAt(Date.now());
@@ -726,7 +783,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
       }).catch(() => {});
     }, 2800);
     return () => { active = false; clearTimeout(timer); };
-  }, [cloudDraftKey, cloudReady, cloudDraftConflict, request, categoryId, title, raw, tags, submitting]);
+  }, [cloudDraftKey, cloudReady, cloudDraftConflict, request, categoryId, title, raw, tags, submitting, hasDraftContent, clearFailure]);
 
   // Live inline `@` mention fetch when user types `@term` directly in the editor
   useEffect(() => {
@@ -804,13 +861,6 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
         ? `还差 ${bodyRemaining} 个字`
         : null;
 
-  const isUntouchedTemplate =
-    isNewTopic &&
-    Boolean(lastAppliedTemplate) &&
-    raw.trim() === lastAppliedTemplate.trim() &&
-    title.trim().length === 0 &&
-    tags.length === 0;
-
   const hasChanges = useMemo(() => {
     if (loadingRawEdit || isUntouchedTemplate) return false;
     if (request.action === "EDIT") {
@@ -822,10 +872,11 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
       }
       return false;
     }
-    return raw.trim().length > 0 || title.trim().length > 0;
+    return hasDraftContent;
   }, [
     loadingRawEdit,
     isUntouchedTemplate,
+    hasDraftContent,
     request.action,
     request.initialTitle,
     request.initialCategoryId,
@@ -838,23 +889,69 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
     tags,
   ]);
 
+  const finishExit = useCallback(() => {
+    const after = pendingProceedRef.current;
+    pendingProceedRef.current = null;
+    onClose();
+    after?.();
+  }, [onClose]);
+
+  const discardAndClose = useCallback(async () => {
+    if (closingDraft.current) return;
+    closingDraft.current = true;
+    setSubmitting(true);
+    setClearFailure(null);
+    setShowExitConfirm(false);
+    let step: "local" | "cloud" = "local";
+    try {
+      await writeLocal(null);
+      step = "cloud";
+      if (cloudDraftKey && request.action !== "EDIT") {
+        // A restored draft can be cleared before its cloud lookup or its last write finishes.
+        const opened = openingDraft.current;
+        const openedWithContent = opened.floor === request.replyToPostNumber &&
+          Boolean(opened.raw.trim() || (isNewTopic && opened.title.trim()));
+        if (openedWithContent) await cloudLookup.current;
+        await cloudSave.current;
+        if (!mounted.current) return;
+        if (openedWithContent && !checkedCloudAtOpen.current && knownCloudSequence.current === null) {
+          const lookup = await fetchSingleCloudDraft(cloudDraftKey);
+          if (lookup.draft && matchesCloudDraft(lookup.draft, request, opened)) knownCloudSequence.current = lookup.sequence;
+          checkedCloudAtOpen.current = true;
+        }
+        if (mounted.current && knownCloudSequence.current !== null) {
+          await deleteCloudDraft(cloudDraftKey, knownCloudSequence.current, true);
+          knownCloudSequence.current = null;
+        }
+      }
+      if (mounted.current) finishExit();
+    } catch {
+      setClearFailure(step);
+    } finally {
+      closingDraft.current = false;
+      setSubmitting(false);
+    }
+  }, [cloudDraftKey, request, isNewTopic, writeLocal, finishExit]);
+
   const requestClose = useCallback(
     (afterProceed?: () => void) => {
-      if (submitting || uploading) return;
+      if (submitting || uploading || closingDraft.current || clearFailure) return;
       if (!afterProceed && activePicker !== "NONE") {
         setActivePicker("NONE");
         return;
       }
+      pendingProceedRef.current = afterProceed ?? null;
       if (hasChanges) {
-        pendingProceedRef.current = afterProceed ?? null;
         setShowExitConfirm(true);
+      } else if (request.action === "EDIT"
+        ? !loadingRawEdit && restoringEdit && editedText.current
+        : hadDraftContent.current || editedText.current || localCopies.current.has(draftKey)) {
+        void discardAndClose();
       } else {
-        pendingProceedRef.current = null;
-        onClose();
-        afterProceed?.();
+        finishExit();
       }
     },
-    [submitting, uploading, activePicker, hasChanges, onClose]
+    [submitting, uploading, activePicker, hasChanges, discardAndClose, finishExit, clearFailure, request.action, loadingRawEdit, restoringEdit, draftKey]
   );
 
   useEffect(() => {
@@ -1267,7 +1364,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
           typingDurationMs,
           composerOpenDurationMs,
         });
-        await deleteLocalDraftInRust(draftKey).catch(() => {});
+        await writeLocal(null).catch(() => {});
         onPublished({ topicId: res.topicId, pendingReview: res.pendingReview });
       } else if (request.action === "REPLY" && request.topicId) {
         const res = await publishReply({
@@ -1277,7 +1374,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
           typingDurationMs,
           composerOpenDurationMs,
         });
-        await deleteLocalDraftInRust(draftKey).catch(() => {});
+        await writeLocal(null).catch(() => {});
         onPublished({
           topicId: request.topicId,
           post: res.post,
@@ -1306,7 +1403,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
           raw,
           editReason: editReason.trim() || undefined,
         }) : null;
-        if (restoringEdit) await deleteLocalDraftInRust(draftKey).catch(() => {});
+        if (restoringEdit) await writeLocal(null).catch(() => {});
         onPublished({ topicId: request.topicId, post: updated });
       }
     } catch (err: any) {
@@ -1418,7 +1515,6 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
   useEffect(() => {
     const tid = request.topicId;
     if (!tid || request.action === "NEW_TOPIC") return;
-    if (request.replyToUsername && request.replyToAvatarTemplate && request.topicTitle) return;
     const cached = getCachedTopicDetail(tid);
     if (cached?.posts.some((p) => p.postNumber === contextFloor)) {
       setContextDetail(cached);
@@ -2248,7 +2344,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               ref={titleInputRef}
               type="text"
               value={title}
-              onChange={(e) => setTitle(e.target.value)}
+              onChange={(e) => { editedText.current = true; setTitle(e.target.value); }}
               onKeyDown={(e) => {
                 if (isImeComposingEvent(e)) return;
                 if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
@@ -2494,6 +2590,10 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
           </div>
 
           <div className="flex shrink-0 items-center gap-2 pl-2">
+            <button type="button" title="更多创作工具" aria-label="更多创作工具" aria-expanded={moreToolsOpen}
+              className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
+              style={{ color: moreToolsOpen ? "var(--brand-gold)" : "var(--ink-secondary)" }}
+              onClick={() => setActivePicker(moreToolsOpen ? "NONE" : "MORE")}><LinDoIcons.Plus size={18} /></button>
             {uploading && (
               <span className="text-[12px] tabular-nums" style={{ color: "var(--brand-gold)" }}>
                 {uploadProgressLabel || "正在上传..."}
@@ -2508,6 +2608,47 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
         </div>
       )}
 
+      {moreToolsOpen && <ForumComposerTools key={`${contextFloor}-${activePicker}`}
+        initialPanel={activePicker === "FORUM_TEMPLATE" ? "templates" : activePicker === "FORUM_DATE" ? "date" : "menu"}
+        owner={currentUser?.username ?? ""} canQuote={request.action === "REPLY" && !!request.topicId} canInsertToc={hasMetaControls}
+        canUseTemplates={currentUser?.canUseTemplates !== false}
+        selection={() => {
+          const field = bodyTextareaRef.current;
+          return field ? rawRef.current.slice(field.selectionStart, field.selectionEnd) : "";
+        }}
+        onExistingTool={setActivePicker}
+        readQuote={async () => {
+          const topic = request.topicId!;
+          const post = author || (await fetchTopicDetail(topic, { targetPostNumber: contextFloor, trackVisit: false }))
+            .posts.find(p => p.postNumber === contextFloor);
+          if (!post) throw new Error("未找到要引用的楼层");
+          const body = post.raw?.trim() ? post.raw : await fetchPostRawMarkdown(post.id);
+          return `[quote="${post.username}, post:${post.postNumber}, topic:${topic}"]\n${body}\n[/quote]`;
+        }}
+        onInsert={(markup, inline) => {
+          if (inline) insertTextAtCursor(markup);
+          else insertBlockSnippet(markup);
+          setActivePicker("NONE");
+        }}
+        onTemplate={template => {
+          const replyTarget = request.action === "EDIT" || !!request.replyToPostNumber;
+          const url = request.topicId ? `https://linux.do/t/${request.topicId}` : undefined;
+          const variables = {
+            my_username: currentUser?.username, my_name: currentUser?.displayName,
+            context_title: effectiveTopicTitle, topic_title: effectiveTopicTitle, topic_url: url, context_url: url,
+            original_poster_username: detail?.opUsername, original_poster_name: detail?.opDisplayName,
+            reply_to_username: replyTarget ? effectiveReplyUsername : undefined,
+            reply_to_name: replyTarget ? effectiveReplyDisplayName : undefined,
+            last_poster_username: detail?.lastPosterUsername,
+            reply_to_or_last_poster_username: (replyTarget && effectiveReplyUsername) || detail?.lastPosterUsername,
+          };
+          if (isNewTopic) setTitle(previous => previous.trim() ? previous : expandForumTemplate(template.title, variables));
+          const content = expandForumTemplate(template.content, variables);
+          if (content) insertBlockSnippet(content);
+          setActivePicker("NONE");
+          void recordForumTemplateUse(template.id).catch(() => { /* Usage is independent of the draft. */ });
+        }}
+      />}
       {/* 表情与社区热梗快捷面板（含搜索、分组与 `/emojis.json` 站点自定义表情） */}
       {activePicker === "EMOJI" && (() => {
         const customGroups = Array.from(
@@ -3422,6 +3563,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                   cloudDraftSeqRef.current,
                   cloudDraftConflict.sequence
                 );
+                knownCloudSequence.current = cloudDraftConflict.sequence;
                 setCloudDraftConflict(null);
               }}
               className="rounded-full px-3 py-0.5 font-semibold cursor-pointer"
@@ -3434,7 +3576,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
             </button>
             <button
               type="button"
-              onClick={() => setCloudDraftConflict(null)}
+              onClick={() => { knownCloudSequence.current = cloudDraftConflict.sequence; setCloudDraftConflict(null); }}
               className="lindo-interactive rounded-full px-2.5 py-0.5 font-medium"
               style={{
                 backgroundColor: "var(--card-surface)",
@@ -3504,6 +3646,9 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                     firstTypedAtRef.current = Date.now();
                   }
                   const val = e.target.value;
+                  editedText.current = true;
+                  clearedBodyCategory.current = val.trim() ? null : categoryId;
+                  rawRef.current = val;
                   setRaw(val);
                   const caret = e.target.selectionStart ?? val.length;
                   const beforeCaret = val.slice(0, caret);
@@ -3641,6 +3786,16 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                   }
                   if (mod && !e.altKey) {
                     const keyLower = e.key.toLowerCase();
+                    if (e.shiftKey && keyLower === "i") {
+                      e.preventDefault();
+                      if (currentUser?.canUseTemplates !== false) setActivePicker("FORUM_TEMPLATE");
+                      return;
+                    }
+                    if (e.shiftKey && (e.code === "Period" || keyLower === "." || keyLower === ">")) {
+                      e.preventDefault();
+                      setActivePicker("FORUM_DATE");
+                      return;
+                    }
                     if (keyLower === "b") {
                       e.preventDefault();
                       insertAroundSelection("**", "**");
@@ -3971,41 +4126,32 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               pendingProceedRef.current = null;
               setShowExitConfirm(false);
             }}
-            onAlternate={() => {
-              const after = pendingProceedRef.current;
-              pendingProceedRef.current = null;
+            onAlternate={() => void discardAndClose()}
+            onConfirm={async () => {
+              if (closingDraft.current) return;
+              closingDraft.current = true;
               setShowExitConfirm(false);
-              deleteLocalDraftInRust(draftKey).catch(() => {});
-              if (cloudDraftKey && cloudReady) {
-                void cloudSave.current.then(() => deleteCloudDraft(cloudDraftKey, cloudDraftSeqRef.current)).catch(() => {});
+              setSubmitting(true);
+              try {
+                await saveCurrentLocal();
+                finishExit();
+              } catch {
+                setSubmitError("草稿保存失败，请重试");
+              } finally {
+                closingDraft.current = false;
+                setSubmitting(false);
               }
-              onClose();
-              after?.();
-            }}
-            onConfirm={() => {
-              const after = pendingProceedRef.current;
-              pendingProceedRef.current = null;
-              setShowExitConfirm(false);
-              if (title.trim() || raw.trim() || tags.length > 0) {
-                saveLocalDraftInRust({
-                  key: draftKey,
-                  action: request.action,
-                  topicId: request.topicId ?? null,
-                  postId: request.postId ?? null,
-                  replyToPostNumber: request.replyToPostNumber ?? null,
-                  categoryId,
-                  title,
-                  raw,
-                  tags,
-                  sequence: cloudDraftSeqRef.current,
-                  updatedAt: Date.now(),
-                }).catch(() => {});
-              }
-              onClose();
-              after?.();
             }}
           />
         ))}
+      {clearFailure && <ConfirmDialog
+        title={clearFailure === "cloud" ? "云端草稿未清除" : "本机草稿未清除"}
+        detail="可以重试，也可以保留副本并退出。"
+        confirmLabel="重试" alternateLabel="直接退出"
+        onConfirm={() => void discardAndClose()}
+        onAlternate={finishExit}
+        onCancel={() => { pendingProceedRef.current = null; setClearFailure(null); }}
+      />}
     </>
   );
 

@@ -1358,6 +1358,7 @@ class MainActivity : ComponentActivity() {
                     remove("animated_avatar")
                     remove("user_id")
                     remove("user_title")
+                    remove("can_use_templates")
                     remove("trust_level")
                     remove("unread_notifications")
                     remove("read_topic_posts")
@@ -4316,6 +4317,7 @@ class MainActivity : ComponentActivity() {
                     avatarTemplate = avatarTemplate.orEmpty(),
                     animatedAvatar = prefs.getString("animated_avatar", null),
                     userTitle = userTitle,
+                    canUseTemplates = if (prefs.contains("can_use_templates")) prefs.getBoolean("can_use_templates", false) else null,
                     trustLevel = trustLevel
                 )
             } else {
@@ -4476,6 +4478,8 @@ class MainActivity : ComponentActivity() {
                 editor.putString("avatar_template", user.avatarTemplate)
                 editor.putString("animated_avatar", user.animatedAvatar)
                 editor.putString("user_title", user.userTitle)
+                if (user.canUseTemplates == null) editor.remove("can_use_templates")
+                else editor.putBoolean("can_use_templates", user.canUseTemplates)
                 editor.putInt("trust_level", user.trustLevel)
                 editor.putInt("unread_notifications", UserApiKeyAuthManager.cachedUnreadNotificationCount)
             } else {
@@ -4485,6 +4489,7 @@ class MainActivity : ComponentActivity() {
                 editor.remove("avatar_template")
                 editor.remove("animated_avatar")
                 editor.remove("user_title")
+                editor.remove("can_use_templates")
                 editor.remove("trust_level")
                 if (UserApiKeyAuthManager.isAuthorized()) {
                     editor.putInt("unread_notifications", UserApiKeyAuthManager.cachedUnreadNotificationCount)

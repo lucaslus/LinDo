@@ -270,6 +270,7 @@ import org.jetbrains.compose.resources.painterResource
 import do_.linux.lindo.ui.components.SmartAvatar
 import do_.linux.lindo.ui.components.UniversalBadgeChip
 import do_.linux.lindo.ui.components.UserTitleTag
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -11466,6 +11467,7 @@ internal fun CommunityTopicReaderPane(
         val canEditMeta = (target.postNumber == 1) && (detail?.canEditTopic == true || isTargetYours || target.canEdit)
         ComposerSheet(
             action = ComposerAction.EDIT,
+            topicDetail = detail,
             topicId = summary.id,
             topicTitle = detail?.title ?: summary.title,
             post = target,
@@ -11546,6 +11548,7 @@ internal fun CommunityTopicReaderPane(
         }
 
         TopicReplyComposerSheet(
+            topicDetail = detail,
             topicId = summary.id,
             topicTitle = effectiveTopicTitle,
             replyToPostNumber = replyTargetPostNumber,
@@ -17265,6 +17268,7 @@ private fun <T> SettingsChoices(
 @Composable
 private fun TopicReplyComposerSheet(
     topicId: Int,
+    topicDetail: TopicDetailModel? = null,
     topicTitle: String,
     replyToPostNumber: Int?,
     replyToUsername: String?,
@@ -17282,6 +17286,7 @@ private fun TopicReplyComposerSheet(
     ComposerSheet(
         ComposerAction.REPLY,
         topicId = topicId,
+        topicDetail = topicDetail,
         topicTitle = topicTitle,
         replyToPostNumber = replyToPostNumber,
         replyToUsername = replyToUsername,
@@ -17350,7 +17355,13 @@ internal enum class WorkbenchSubPanel(val titleCopy: LinDoComposerCopy?) {
     MORE_TOOLS(LinDoComposerCopy.PANEL_MORE_TOOLS),
     HEADINGS(LinDoComposerCopy.PANEL_HEADINGS),
     CALLOUT(LinDoComposerCopy.PANEL_CALLOUT),
-    TABLE(LinDoComposerCopy.PANEL_INSERT_TABLE);
+    TABLE(LinDoComposerCopy.PANEL_INSERT_TABLE),
+    TEMPLATES(LinDoComposerCopy.INSERT_SITE_TEMPLATE),
+    AI_CONTENT(LinDoComposerCopy.LABEL_AI_CONTENT),
+    DATE_TIME(LinDoComposerCopy.INSERT_DATE_TIME),
+    CHART(LinDoComposerCopy.BUILD_CHART),
+    WRAP(LinDoComposerCopy.APPLY_WRAP),
+    QUOTE_POST(LinDoComposerCopy.QUOTE_WHOLE_POST);
 
     val title: String get() = titleCopy?.text.orEmpty()
 }
@@ -17378,12 +17389,13 @@ internal fun LinDoMarkdownWorkbench(
     validationError: Boolean = false,
     externalFocusRequester: FocusRequester? = null,
     fillAvailableHeight: Boolean = false,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    forumContext: ForumComposerContext = ForumComposerContext(),
+    onTemplateTitle: (String) -> Unit = {}
 ) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
     val keyboard = LocalSoftwareKeyboardController.current
-    val currentRawValue by rememberUpdatedState(rawValue)
     val currentOnRawValueChange by rememberUpdatedState(onRawValueChange)
     val currentEnabled by rememberUpdatedState(enabled)
 
@@ -17404,13 +17416,14 @@ internal fun LinDoMarkdownWorkbench(
 
     fun updateTfv(newVal: TextFieldValue, recordHistory: Boolean = true) {
         if (!currentEnabled) return
-        if (recordHistory && newVal.text != tfv.text) {
+        val textChanged = newVal.text != tfv.text
+        if (recordHistory && textChanged) {
             if (undoStack.size >= 40) undoStack.removeAt(0)
             undoStack.add(tfv)
             redoStack.clear()
         }
         tfv = newVal
-        if (newVal.text != currentRawValue) {
+        if (textChanged) {
             if (emittedValues.size >= 128) emittedValues.remove(emittedValues.first())
             emittedValues.add(newVal.text)
             currentOnRawValueChange(newVal.text)
@@ -18053,8 +18066,34 @@ internal fun LinDoMarkdownWorkbench(
 
     // 5. 统一模态底部抽屉（更多工具 / 插入链接 / 选择表情 / 提及用户 / 投票 / 表格 / 代码块 / 折叠块）
     if (activeViewMode == WorkbenchViewMode.SOURCE && activeSubPanel != WorkbenchSubPanel.NONE) {
+        fun insertForumMarkup(text: String, inline: Boolean) {
+            if (text.isNotEmpty()) {
+                val block = if (inline) text else separatedForumBlock(tfv.text, tfv.selection.min, tfv.selection.max, text)
+                insertAtCursor(block)
+            }
+            closeTools()
+        }
         WorkbenchDrawerBottomSheet(
             subPanel = activeSubPanel,
+            forumContext = forumContext,
+            onForumMarkup = { tool ->
+                val selected = tfv.text.substring(tfv.selection.min, tfv.selection.max)
+                insertForumMarkup(forumMarkup(tool, selected), tool == ForumMarkup.Footnote)
+            },
+            forumPanel = { panel ->
+                ForumInsertionPanel(panel, tfv.text.substring(tfv.selection.min, tfv.selection.max), forumContext,
+                    onTemplate = { template ->
+                        val variables = forumContext.variables()
+                        onTemplateTitle(expandForumTemplate(template.title, variables))
+                        insertForumMarkup(expandForumTemplate(template.content, variables), false)
+                        scope.launch {
+                            try { LinuxDoRepository.recordForumTemplateUse(template.id) }
+                            catch (cancelled: CancellationException) { throw cancelled }
+                            catch (_: Exception) { /* The draft already contains the template. */ }
+                        }
+                    },
+                    onInsert = ::insertForumMarkup)
+            },
             showBackToMoreTools = subPanelFromMoreTools && activeSubPanel != WorkbenchSubPanel.MORE_TOOLS,
             onBackToMoreTools = { activeSubPanel = WorkbenchSubPanel.MORE_TOOLS },
             onNavigateSubPanel = { target ->
@@ -18252,7 +18291,10 @@ internal fun WorkbenchDrawerBottomSheet(
     onWrapSelection: (String, String) -> Unit,
     onInsertSnippet: (String) -> Unit,
     onOptimizePangu: () -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    forumContext: ForumComposerContext = ForumComposerContext(),
+    onForumMarkup: (ForumMarkup) -> Unit = {},
+    forumPanel: @Composable (WorkbenchSubPanel) -> Unit = {}
 ) {
     val palette = LocalPalette.current
     if (LocalIsWebModalActive.current) return
@@ -18266,6 +18308,9 @@ internal fun WorkbenchDrawerBottomSheet(
     ) {
         WorkbenchDrawerContent(
             subPanel = subPanel,
+            forumContext = forumContext,
+            onForumMarkup = onForumMarkup,
+            forumPanel = forumPanel,
             showBackToMoreTools = showBackToMoreTools,
             onBackToMoreTools = onBackToMoreTools,
             onNavigateSubPanel = onNavigateSubPanel,
@@ -18303,7 +18348,10 @@ internal fun WorkbenchDrawerContent(
     onWrapSelection: (String, String) -> Unit,
     onInsertSnippet: (String) -> Unit,
     onOptimizePangu: () -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    forumContext: ForumComposerContext = ForumComposerContext(),
+    onForumMarkup: (ForumMarkup) -> Unit = {},
+    forumPanel: @Composable (WorkbenchSubPanel) -> Unit = {}
 ) {
     val palette = LocalPalette.current
     val needsTallSheet = subPanel == WorkbenchSubPanel.EMOJI ||
@@ -18372,6 +18420,8 @@ internal fun WorkbenchDrawerContent(
             HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
 
             when (subPanel) {
+                WorkbenchSubPanel.TEMPLATES, WorkbenchSubPanel.QUOTE_POST, WorkbenchSubPanel.AI_CONTENT,
+                WorkbenchSubPanel.CHART, WorkbenchSubPanel.DATE_TIME, WorkbenchSubPanel.WRAP -> forumPanel(subPanel)
                 WorkbenchSubPanel.MORE_TOOLS -> {
                     val formatTools = remember(onNavigateSubPanel, onWrapSelection, onInsertSnippet, onOptimizePangu) {
                         listOf(
@@ -18397,20 +18447,26 @@ internal fun WorkbenchDrawerContent(
                             WorkbenchDrawerToolItem(LinDoComposerCopy.TOOL_UPLOAD_ATTACHMENT.text, LinDoIcons.Paperclip) { onPickAttachment() }
                         )
                     }
-                    val advancedTools = remember(onNavigateSubPanel, onInsertSnippet, onWrapSelection) {
-                        listOf(
-                            WorkbenchDrawerToolItem(LinDoComposerCopy.PANEL_INSERT_TABLE.text, LinDoIcons.Table) { onNavigateSubPanel(WorkbenchSubPanel.TABLE) },
-                            WorkbenchDrawerToolItem(LinDoComposerCopy.PANEL_CREATE_POLL.text, LinDoIcons.BarChartPoll) { onNavigateSubPanel(WorkbenchSubPanel.POLL) },
-                            WorkbenchDrawerToolItem(LinDoComposerCopy.TOOL_AUTO_TOC.text, LinDoIcons.BookOpen) { onInsertSnippet("\n[toc]\n") },
-                            WorkbenchDrawerToolItem(LinDoComposerCopy.TOOL_MATH_FORMULA.text, LinDoIcons.Bolt) { onWrapSelection("\n$$\n", "\n$$\n") },
-                            WorkbenchDrawerToolItem(LinDoComposerCopy.TOOL_MERMAID_FLOW.text, LinDoIcons.KanbanBoard) {
-                                onInsertSnippet("\n```mermaid\ngraph TD\n    A[开始] --> B[处理]\n    B --> C[完成]\n```\n")
-                            },
-                            WorkbenchDrawerToolItem(LinDoComposerCopy.TOOL_DYNAMIC_DATE.text, LinDoIcons.Calendar) {
-                                val today = java.time.LocalDate.now().toString()
-                                onInsertSnippet("[date=$today timezone=\"Asia/Shanghai\"] ")
-                            }
-                        )
+                    val advancedTools = buildList {
+                        fun tool(label: String, icon: ImageVector, action: () -> Unit) {
+                            add(WorkbenchDrawerToolItem(label, icon, onClick = action))
+                        }
+                        if (UserApiKeyAuthManager.currentUser?.canUseTemplates != false) {
+                            tool(WorkbenchSubPanel.TEMPLATES.title, LinDoIcons.FileText) { onNavigateSubPanel(WorkbenchSubPanel.TEMPLATES) }
+                        }
+                        if (forumContext.quoteFloor != null) tool(WorkbenchSubPanel.QUOTE_POST.title, LinDoIcons.Quote) { onNavigateSubPanel(WorkbenchSubPanel.QUOTE_POST) }
+                        tool(LinDoComposerCopy.PANEL_INSERT_TABLE.text, LinDoIcons.Table) { onNavigateSubPanel(WorkbenchSubPanel.TABLE) }
+                        tool(LinDoComposerCopy.PANEL_CREATE_POLL.text, LinDoIcons.BarChartPoll) { onNavigateSubPanel(WorkbenchSubPanel.POLL) }
+                        tool(WorkbenchSubPanel.AI_CONTENT.title, LinDoIcons.Sparkles) { onNavigateSubPanel(WorkbenchSubPanel.AI_CONTENT) }
+                        if (forumContext.firstPost) tool(LinDoComposerCopy.TOOL_AUTO_TOC.text, LinDoIcons.BookOpen) { onForumMarkup(ForumMarkup.Toc) }
+                        tool("插入滚动内容", LinDoIcons.FileText) { onForumMarkup(ForumMarkup.Scroll) }
+                        tool(LinDoComposerCopy.TOOL_MATH_FORMULA.text, LinDoIcons.Bolt) { onWrapSelection("\n$$\n", "\n$$\n") }
+                        tool("Mermaid 图表", LinDoIcons.KanbanBoard) { onForumMarkup(ForumMarkup.Mermaid) }
+                        tool("Graphviz 图表", LinDoIcons.KanbanBoard) { onForumMarkup(ForumMarkup.Graphviz) }
+                        tool(WorkbenchSubPanel.CHART.title, LinDoIcons.BarChartPoll) { onNavigateSubPanel(WorkbenchSubPanel.CHART) }
+                        tool(WorkbenchSubPanel.DATE_TIME.title, LinDoIcons.Calendar) { onNavigateSubPanel(WorkbenchSubPanel.DATE_TIME) }
+                        tool("添加脚注", LinDoIcons.Edit) { onForumMarkup(ForumMarkup.Footnote) }
+                        tool(WorkbenchSubPanel.WRAP.title, LinDoIcons.Layers) { onNavigateSubPanel(WorkbenchSubPanel.WRAP) }
                     }
 
                     Column(
@@ -18420,9 +18476,9 @@ internal fun WorkbenchDrawerContent(
                             .verticalScroll(rememberScrollState()),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        WorkbenchToolGridSection(LinDoComposerCopy.SECTION_TEXT_TYPOGRAPHY.text, formatTools)
-                        WorkbenchToolGridSection(LinDoComposerCopy.SECTION_BLOCKS_AND_LISTS.text, blockTools)
                         WorkbenchToolGridSection(LinDoComposerCopy.SECTION_INTERACTIVE_AND_EXT.text, advancedTools)
+                        WorkbenchToolGridSection(LinDoComposerCopy.SECTION_BLOCKS_AND_LISTS.text, blockTools)
+                        WorkbenchToolGridSection(LinDoComposerCopy.SECTION_TEXT_TYPOGRAPHY.text, formatTools)
                     }
                 }
 

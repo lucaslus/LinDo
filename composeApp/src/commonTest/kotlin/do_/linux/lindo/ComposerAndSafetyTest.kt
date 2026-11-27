@@ -142,6 +142,89 @@ class ComposerAndSafetyTest {
         }
     }
 
+    @Test fun clearingAReplyWaitsForItsPendingSaveAndReopensEmpty() = runTest {
+        val account = owner()
+        val empty = ComposerDraft(account, "topic_8", ComposerAction.REPLY, topicId = 8, title = "原话题标题")
+        val session = ComposerDraftSession(empty)
+        val writing = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        var serverRaw: String? = null
+        var version = 2
+        val deletes = mutableListOf<String>()
+        withTransport({ url, method, _ -> when (method) {
+            "POST" -> {
+                writing.complete(Unit); release.await()
+                serverRaw = "已经删除的正文"
+                version++
+                200 to """{"draft_sequence":$version}"""
+            }
+            "DELETE" -> {
+                deletes += url.substringAfter("sequence=")
+                if (deletes.last() == version.toString()) serverRaw = null
+                200 to """{"success":true}"""
+            }
+            else -> 200 to buildJsonObject {
+                put("draft_sequence", version)
+                put("draft", serverRaw?.let { buildJsonObject { put("reply", it) } } ?: JsonNull)
+            }.toString()
+        } }) {
+            session.prepareWithRemote()
+            session.update(empty.copy(raw = "已经删除的正文"))
+            val saving = async { session.sync() }
+            writing.await()
+            session.update(empty.copy(raw = " \n"))
+            assertNull(LocalComposerDrafts.get(account, empty.key))
+            val closing = async(start = CoroutineStart.UNDISPATCHED) { session.closeClearedDraft() }
+            assertFalse(closing.isCompleted)
+            release.complete(Unit)
+            saving.await()
+            closing.await()
+            assertEquals(listOf("3"), deletes)
+            assertNull(LocalComposerDrafts.get(account, empty.key))
+            val reopened = ComposerDraftSession(empty)
+            assertNull(reopened.prepareWithRemote())
+            assertTrue(reopened.current.raw.isBlank())
+        }
+    }
+
+    @Test fun clearingReplyLeavesAnotherFloorsCloudDraftAlone() = runTest {
+        val empty = ComposerDraft(owner(), "topic_8", ComposerAction.REPLY, topicId = 8, replyToPostNumber = 2)
+        val session = ComposerDraftSession(empty)
+        withTransport({ _, method, _ ->
+            assertEquals("GET", method)
+            200 to """{"draft_sequence":4,"draft":{"reply":"另一楼的草稿","replyToPostNumber":3}}"""
+        }) {
+            assertNotNull(session.prepareWithRemote())
+            session.update(empty.copy(raw = "这一楼的回复"))
+            session.update(empty)
+            session.closeClearedDraft()
+            assertNull(LocalComposerDrafts.get(empty.owner, empty.key))
+        }
+    }
+
+    @Test fun clearingRestoredDraftRechecksItsContentsWhenTheOpeningLookupWasOffline() = runTest {
+        val draft = ComposerDraft(owner(), "new_topic", ComposerAction.NEW_TOPIC, raw = "上次的草稿", title = "旧标题")
+        LocalComposerDrafts.save(draft)
+        val session = ComposerDraftSession(draft)
+        withTransport({ _, _, _ -> null }) {
+            session.prepareWithRemote()
+            session.update(draft.copy(raw = "", title = "保留的标题"))
+            assertEquals("保留的标题", LocalComposerDrafts.get(draft.owner, draft.key)?.title)
+            session.update(draft.copy(raw = "", title = ""))
+            assertNull(LocalComposerDrafts.get(draft.owner, draft.key))
+            assertFailsWith<ApiReadException> { session.closeClearedDraft() }
+        }
+        var deleted = false
+        withTransport({ url, method, _ ->
+            when {
+                method == "DELETE" -> { assertTrue(url.endsWith("sequence=6")); deleted = true; 200 to """{"success":true}""" }
+                deleted -> 200 to """{"draft":null,"draft_sequence":6}"""
+                else -> 200 to """{"draft_sequence":6,"draft":{"title":"旧标题","reply":"上次的草稿"}}"""
+            }
+        }) { session.closeClearedDraft() }
+        assertTrue(deleted)
+    }
+
     @Test fun changingOnlyTagsMarksTheSessionUnsynced() = runTest {
         val draft = ComposerDraft(owner(), "new_topic", ComposerAction.NEW_TOPIC, raw = "body text", sequence = 1)
         val session = ComposerDraftSession(draft)

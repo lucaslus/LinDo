@@ -380,7 +380,9 @@ function parseMarkdownBlocks(
     if (fenceMatch) {
       const fenceChar = fenceMatch[1][0];
       const fenceLen = fenceMatch[1].length;
-      const lang = fenceMatch[2] || "";
+      const info = trimmed.slice(fenceMatch[1].length).trim().split(/\s+/);
+      const ai = info.includes("ai");
+      const lang = fenceMatch[2] === "ai" ? "" : fenceMatch[2] || "";
       i++;
       const codeLines: string[] = [];
       const closeRe = new RegExp(`^${fenceChar}{${fenceLen},}\\s*$`);
@@ -390,6 +392,7 @@ function parseMarkdownBlocks(
       }
       if (i < lines.length) i++;
       const cls = lang ? ` class="lang-${escapeAttr(lang)}"` : "";
+      if (ai) out.push("<p><small>AI 生成</small></p>");
       out.push(`<pre><code${cls}>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
       continue;
     }
@@ -441,7 +444,7 @@ function parseMarkdownBlocks(
     }
 
     // 3. Discourse `[details="..."]...[/details]`
-    const detailsOpen = trimmed.match(/^\[details(?:=(?:"([^"]*)"|'([^']*)'|([^\]]*)))?\]/i);
+    const detailsOpen = trimmed.match(/^\[details(?:=(?:"([^"]*)"|'([^']*)'|([^\]]*?)))?(\s+ai)?\]/i);
     if (detailsOpen) {
       const summaryText = (detailsOpen[1] ?? detailsOpen[2] ?? detailsOpen[3] ?? "摘要").trim() || "摘要";
       const bodyLines: string[] = [];
@@ -459,7 +462,7 @@ function parseMarkdownBlocks(
         if (i < lines.length) i++;
       }
       const innerHtml = parseMarkdownBlocks(bodyLines, previewMap, depth + 1);
-      out.push(`<details open><summary>${escapeHtml(summaryText)}</summary><div>${innerHtml}</div></details>`);
+      out.push(`<details open><summary>${escapeHtml(summaryText)}${detailsOpen[4] ? " · AI 生成" : ""}</summary><div>${innerHtml}</div></details>`);
       continue;
     }
 
@@ -569,6 +572,7 @@ function parseMarkdownBlocks(
         const fold = alertMatch[2] || "";
         const customTitle = (alertMatch[3] || "").trim();
         const toneMap: Record<string, { tone: string; label: string }> = {
+          ai: { tone: "note", label: "AI 生成" },
           note: { tone: "note", label: "说明" },
           info: { tone: "note", label: "信息" },
           todo: { tone: "note", label: "待办" },
