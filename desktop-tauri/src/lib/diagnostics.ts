@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { DiagRuntimeSnapshot } from "./types";
 
-export const DESKTOP_APP_VERSION = "1.1.8";
+export const DESKTOP_APP_VERSION = "1.1.9";
 
 export type DiagCategory = "NETWORK" | "AUTH" | "ERROR" | "SYSTEM";
 export type DiagLevel = "INFO" | "WARN" | "ERROR";

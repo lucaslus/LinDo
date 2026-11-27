@@ -8,6 +8,11 @@ export type Release = {
 export const CHANGELOG: Release[] = [
   {
     date: "2026-11-27",
+    version: "v1.1.9",
+    items: ["Android 和桌面端发现新版时会提醒一次。可以直接下载，也可以选「稍后」，回头在设置里检查更新。"],
+  },
+  {
+    date: "2026-11-27",
     version: "v1.1.8",
     items: [
       "桌面端的楼层选择器和回复按钮移到了正文右下角，最后一楼可以滚动到按钮上方。左侧导航栏也换成了半透明样式。",
