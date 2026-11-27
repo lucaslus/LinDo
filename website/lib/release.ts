@@ -43,8 +43,11 @@ const fallback: ReleaseDownloads = { url: SITE.releases, assets: {} };
 export async function getReleaseDownloads(): Promise<ReleaseDownloads> {
   try {
     const res = await fetch(RELEASE_API, {
-      headers: { Accept: "application/vnd.github+json" },
-      next: { revalidate: 300 },
+      headers: {
+        Accept: "application/vnd.github+json",
+        ...(process.env.GITHUB_TOKEN && { Authorization: `Bearer ${process.env.GITHUB_TOKEN}` }),
+      },
+      ...(process.env.NEXT_PUBLIC_BASE_PATH !== undefined ? { cache: "force-cache" as const } : { next: { revalidate: 300 } }),
       signal: AbortSignal.timeout(3500),
     });
     if (!res.ok) return fallback;

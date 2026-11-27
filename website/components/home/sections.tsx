@@ -60,8 +60,9 @@ export function Highlights({ release }: { release: ReleaseDownloads }) {
           <span className="feature-icon-raw" aria-hidden="true">
             <IconShieldCheck size={34} strokeWidth={1.6} />
           </span>
-          <h3>连接恢复</h3>
-          <p>切网后尝试恢复加载。站点验证可在应用内完成。</p>
+          <h3>站点验证</h3>
+          <p>换网后遇到 Cloudflare 验证，可以直接在 LinDo 里完成，再回到刚才的帖子。</p>
+          <Link href="/docs/verification" className="home-text-link mt-2">查看验证指南 <IconArrowRight size={15} /></Link>
         </article>
         <article className="feature-card matte-card">
           <span className="feature-icon-raw" aria-hidden="true">
@@ -122,7 +123,7 @@ export function SecuritySection() {
           </span>
           <div>
             <h2 id="security-title">隐私</h2>
-            <p>登录凭证、草稿和阅读进度保存在设备上。LinDo 没有自建中转服务，也没有接入遥测 SDK。</p>
+            <p>登录凭证和阅读进度保存在设备上。社区请求直接发往 LINUX DO。</p>
           </div>
         </div>
         <div className="security-actions">
@@ -150,7 +151,7 @@ export function SiteFooter() {
             <Wordmark size={16} />
           </Link>
           <span className="text-[12.5px]" style={{ color: "var(--ink-3)" }}>
-            LINUX DO 第三方开源客户端
+            LINUX DO 第三方客户端
           </span>
         </div>
         <nav
@@ -162,7 +163,7 @@ export function SiteFooter() {
           <Link href="/changelog" className="transition-colors hover:text-[var(--ink-1)]">更新日志</Link>
           <a href={SITE.issues} className="transition-colors hover:text-[var(--ink-1)]">反馈</a>
           <a href={SITE.repo} className="transition-colors hover:text-[var(--ink-1)]">GitHub</a>
-          <a href={SITE.forum} className="transition-colors hover:text-[var(--ink-1)]">LINUX DO</a>
+          <a href={SITE.forum} className="community-friend"><span>友情链接</span> LINUX DO 社区 <IconArrowRight size={14} /></a>
         </nav>
       </div>
     </footer>

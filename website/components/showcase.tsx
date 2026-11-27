@@ -43,11 +43,11 @@ export function DeviceShowcase() {
       <div className="stage-meta">
         <div className="stage-theme-switch" role="group" aria-label="切换预览主题">
           <button type="button" className="stage-theme-btn stage-theme-light"
-            aria-pressed={mounted ? !isDark : undefined} onClick={(e) => set("light", originFromEvent(e))}>
+            disabled={!mounted} aria-pressed={mounted ? !isDark : undefined} onClick={(e) => set("light", originFromEvent(e))}>
             <IconSun size={13} />浅色
           </button>
           <button type="button" className="stage-theme-btn stage-theme-dark"
-            aria-pressed={mounted ? isDark : undefined} onClick={(e) => set("dark", originFromEvent(e))}>
+            disabled={!mounted} aria-pressed={mounted ? isDark : undefined} onClick={(e) => set("dark", originFromEvent(e))}>
             <IconMoon size={13} />深色
           </button>
         </div>

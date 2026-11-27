@@ -7,6 +7,14 @@ export type Release = {
 
 export const CHANGELOG: Release[] = [
   {
+    date: "2026-11-27",
+    version: "v1.1.7",
+    items: [
+      "修复切网后验证页反复刷新的问题。Android 验证页加载慢时，可选择等待或重新加载。",
+      "折叠屏和平板的底部导航居中显示。回复按钮浮在正文上方，最后一楼仍可滚动到按钮上方。",
+    ],
+  },
+  {
     date: "2026-11-26",
     version: "v1.1.6",
     items: [

@@ -1,3 +1,5 @@
+import { SITE } from "./site";
+
 /**
  * 零依赖轻量 QR Code SVG 路径生成器（ISO/IEC 18004，Byte 模式，纠错等级 L，支持 Version 1~6，最长 134 字节）
  * 用于桌面端生成「手机扫码下载 Android 版」矢量二维码，自动跟随深浅主题色。
@@ -90,7 +92,7 @@ export function encodeQrSvg(text: string): { size: number; path: string } {
     version++;
   }
   if (version > 6) {
-    return encodeQrSvg("https://lindo.app/#download");
+    return encodeQrSvg(`${SITE.url}/#download`);
   }
 
   const [totalCw, ecPerBlock, numBlocks] = VERSION_SPEC[version];

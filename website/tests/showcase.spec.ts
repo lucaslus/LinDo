@@ -3,14 +3,16 @@ import { expect, test } from "@playwright/test";
 for (const width of [360, 768, 1440]) {
   test(`four equal-height screenshots with a gap between each pair at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
-    await page.goto("/");
+    await page.goto("./");
     const gallery = page.getByRole("list", { name: "各端界面" });
     await expect(gallery.getByRole("button")).toHaveCount(4);
     await expect(gallery).toHaveText("", { useInnerText: true });
     const sources: string[][] = [];
 
     for (const theme of ["浅色", "深色"]) {
-      await page.getByRole("group", { name: "切换预览主题" }).getByRole("button", { name: theme }).click();
+      const toggle = page.getByRole("group", { name: "切换预览主题" }).getByRole("button", { name: theme });
+      await toggle.click();
+      await expect(toggle).toHaveAttribute("aria-pressed", "true");
       const pictures = gallery.locator("img:visible");
       await expect(pictures).toHaveCount(4);
       for (const picture of await pictures.all()) {
@@ -58,7 +60,7 @@ for (const width of [360, 768, 1440]) {
 }
 
 test("keyboard users can open each screenshot and return to its button", async ({ page }) => {
-  await page.goto("/#screens");
+  await page.goto("./#screens");
   const gallery = page.getByRole("list", { name: "各端界面" });
   const dialog = page.getByRole("dialog", { name: "界面大图" });
   await gallery.getByRole("button", { name: "放大桌面端截图" }).focus();
@@ -78,7 +80,7 @@ test.describe("touch", () => {
   test.use({ hasTouch: true, isMobile: true, viewport: { width: 360, height: 780 } });
 
   test("can reach and open the last screenshot in the horizontal strip", async ({ page }) => {
-    await page.goto("/#screens");
+    await page.goto("./#screens");
     const strip = page.locator(".device-family-viewport");
     expect(await strip.evaluate(el => el.scrollWidth)).toBeGreaterThan(await strip.evaluate(el => el.clientWidth));
     await strip.evaluate(el => { el.scrollLeft = el.scrollWidth; });

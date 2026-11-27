@@ -9,7 +9,13 @@ npm run lint
 npm run build
 ```
 
-`npm run build` 会生成 Pagefind 文档搜索索引。首页从 GitHub Releases 读取正式版、包体大小和下载链接，按 5 分钟重新验证缓存。发布接口暂不可用时提供 GitHub Releases 入口。
+`npm run build` 会生成 Pagefind 文档搜索索引。首页从 GitHub Releases 读取正式版、包体大小和下载链接。接口暂不可用时，下载按钮指向发布页。
+
+## 发布官网
+
+[官网](https://lucaslus.github.io/LinDo/) 使用 GitHub Pages。`main` 上的网站改动和成功的客户端发布都会触发 [Publish website](../.github/workflows/website.yml)，重新生成下载链接和文档搜索索引。
+
+本地运行 `NEXT_PUBLIC_BASE_PATH=/LinDo npm run build:pages` 可生成相同目录结构的静态文件，产物在 `out/`。
 
 ## 界面截图
 

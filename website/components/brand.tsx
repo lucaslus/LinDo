@@ -1,5 +1,7 @@
 "use client";
 
+import { assetPath } from "@/lib/site";
+
 import clsx from "clsx";
 
 /**
@@ -25,7 +27,7 @@ export function LingduHead({
     <span className={clsx("relative inline-block shrink-0", className)} style={{ width: size, height: size }}>
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
-        src="/brand/lindo-mark.svg"
+        src={assetPath("/brand/lindo-mark.svg")}
         alt=""
         width={size}
         height={size}
@@ -39,7 +41,7 @@ export function LingduHead({
             // eslint-disable-next-line @next/next/no-img-element
             <img
               key={e}
-              src={`/brand/expressions/${e}.svg`}
+              src={assetPath(`/brand/expressions/${e}.svg`)}
               alt=""
               width={size}
               height={size}
@@ -56,7 +58,7 @@ export function LingduHead({
       ) : expression !== "none" && expression !== "theme" ? (
         // eslint-disable-next-line @next/next/no-img-element
         <img
-          src={`/brand/expressions/${expression}.svg`}
+          src={assetPath(`/brand/expressions/${expression}.svg`)}
           alt=""
           width={size}
           height={size}

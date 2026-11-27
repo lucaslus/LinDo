@@ -426,3 +426,13 @@ html.theme-fade * {
     font-feature-settings: "tnum", "cv11";
   }
 }
+
+.community-friend {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--ink-1);
+}
+
+.community-friend span { color: var(--ink-3); }
+.community-friend:hover { text-decoration: underline; text-underline-offset: 3px; }

@@ -3,13 +3,13 @@ import Link from "next/link";
 import { Footer, LastUpdated, Layout, Navbar } from "nextra-theme-docs";
 import { getPageMap } from "nextra/page-map";
 import { Search } from "nextra/components";
-import { SITE } from "@/lib/site";
+import { assetPath, SITE } from "@/lib/site";
 import "nextra-theme-docs/style.css";
 
 const logo = (
   <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontWeight: 600, fontSize: 16.5, letterSpacing: "-0.02em" }}>
     {/* eslint-disable-next-line @next/next/no-img-element */}
-    <img src="/brand/lindo-mark.svg" alt="" width={26} height={26} />
+    <img src={assetPath("/brand/lindo-mark.svg")} alt="" width={26} height={26} />
     <span>
       Lin<span style={{ color: "var(--logo-do, #e07b08)" }}>Do</span>
     </span>
@@ -40,7 +40,7 @@ export default async function DocsLayout({ children }: { children: ReactNode }) 
           </Link>
         </Navbar>
       }
-      footer={<Footer>LinDo · LINUX DO 第三方客户端</Footer>}
+      footer={<Footer><span>友情链接 · <a className="underline underline-offset-4" href={SITE.forum}>LINUX DO 社区</a></span></Footer>}
       pageMap={await getPageMap("/docs")}
       docsRepositoryBase={`${SITE.repo}/tree/main/website`}
       editLink="在 GitHub 上编辑此页"

@@ -1,0 +1,32 @@
+---
+title: Cloudflare 站点验证
+description: 在 LinDo 里完成 LINUX DO 的站点验证，处理切网后加载慢或验证后仍未刷新的情况。
+---
+
+# 遇到 Cloudflare 验证怎么办？
+
+逛 LINUX DO 时，偶尔会看到「确认您是真人」。社区里常说的「CF 盾」就是这类站点检查。Cloudflare 会先检查当前连接，有时页面会自行通过，有时需要你点一下复选框。已经登录的账号也可能遇到，尤其是在 Wi-Fi 和移动网络之间切换之后。[Cloudflare 对验证页面的说明](https://developers.cloudflare.com/cloudflare-challenges/challenge-types/challenge-pages/)
+
+## 在 LinDo 里完成验证
+
+| 你看到的界面 | 怎么操作 |
+| --- | --- |
+| Android 的列表或话题显示「去验证」 | 点「去验证」，在弹出的站点页面按提示操作。 |
+| 桌面端显示「安全校验中…」 | 先等它检查。看到「连接需安全确认 · 去验证」时，点提示打开验证页。 |
+| 刚才关掉了窗口，想再打开 | 在「我的」里找到「站点安全验证」，点进去继续。手机和桌面端都可以从这里进入。 |
+
+列表和帖子同时遇到验证时，LinDo 会共用一次验证。关掉窗口后，你仍然可以从「站点安全验证」重新打开。
+
+验证过程中尽量保持当前网络连接。复选框已经出现时，让页面走完即可。Android 如果提示「页面加载较慢」，可以继续等，页面一直空白时再点「重新加载」。
+
+## 通过以后
+
+回到刚才的列表或帖子，LinDo 会尝试恢复中断的读取。如果 Android 提示「验证已完成，连接尚未恢复」，可以重试连接，也可以先返回帖子。
+
+如果是在发帖或回复时遇到验证，回到话题看一眼刚才的内容有没有发出去，再决定是否重发。
+
+## 总是回到同一个验证页？
+
+先用同一台设备、同一网络在系统浏览器打开 [LINUX DO](https://linux.do/)。如果浏览器也反复要求验证，可以按 [Cloudflare 的排查步骤](https://developers.cloudflare.com/cloudflare-challenges/troubleshooting/challenge-solve-issues/) 检查连接和浏览器设置。
+
+如果只有 LinDo 出现问题，请在 [GitHub Issues](https://github.com/lucaslus/LinDo/issues) 留下设备、系统和 LinDo 版本，以及出问题的大致时间。写明是「点完又回到验证框」还是「已通过，但帖子加载失败」，方便我们找到对应的日志。

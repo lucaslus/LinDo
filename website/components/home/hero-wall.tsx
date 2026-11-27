@@ -1,5 +1,7 @@
 /* 全幅倾斜视觉幕墙（纯装饰背景，严格随深浅色主题切换，零廉价素材） */
 
+import { assetPath } from "@/lib/site";
+
 type ShotTile = {
   kind: "shot";
   id: string;
@@ -174,7 +176,7 @@ function MotifCard({ variant }: { variant: MotifTile["variant"] }) {
       return (
         <div className="wall-motif wall-motif-brand">
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src="/brand/lindo-mark.svg" alt="" width={40} height={40} className="wm-mascot" loading="lazy" decoding="async" />
+          <img src={assetPath("/brand/lindo-mark.svg")} alt="" width={40} height={40} className="wm-mascot" loading="lazy" decoding="async" />
           <span className="wm-wordmark">
             Lin<span style={{ color: "var(--logo-do)" }}>Do</span>
           </span>
@@ -204,7 +206,7 @@ export function HeroBackdropWall() {
                         <>
                           {/* eslint-disable-next-line @next/next/no-img-element */}
                           <img
-                            src={tile.light}
+                            src={assetPath(tile.light)}
                             alt=""
                             className="wall-tile-img wall-img-light"
                             style={{ objectPosition: tile.pos }}
@@ -212,7 +214,7 @@ export function HeroBackdropWall() {
                           />
                           {/* eslint-disable-next-line @next/next/no-img-element */}
                           <img
-                            src={tile.dark}
+                            src={assetPath(tile.dark)}
                             alt=""
                             className="wall-tile-img wall-img-dark"
                             style={{ objectPosition: tile.pos }}

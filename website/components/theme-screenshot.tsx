@@ -1,3 +1,5 @@
+import { assetPath } from "@/lib/site";
+
 type AppScreenshot = {
   light: string;
   dark: string;
@@ -43,7 +45,7 @@ export function ThemeScreenshot({ shot }: { shot: AppScreenshot }) {
   return (
     <span className="theme-shot">
       {(["light", "dark"] as const).map(theme => (
-        <img key={theme} className={`theme-shot-${theme}`} src={shot[theme]} alt={shot.alt}
+        <img key={theme} className={`theme-shot-${theme}`} src={assetPath(shot[theme])} alt={shot.alt}
           width={shot.width} height={shot.height} decoding="async" loading="lazy" />
       ))}
     </span>
