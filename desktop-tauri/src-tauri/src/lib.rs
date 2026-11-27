@@ -1,4 +1,5 @@
 pub mod bridge;
+pub(crate) mod forum_recovery;
 pub mod crypto_rsa;
 pub mod ech_desktop;
 pub mod legacy;
@@ -114,13 +115,7 @@ pub struct BootstrapPayload {
 }
 
 #[tauri::command]
-fn set_app_cursor(pointer: bool) {
-    bridge::set_app_cursor(pointer);
-}
-
-#[tauri::command]
 async fn bootstrap_state(engine: State<'_, Arc<BridgeEngine>>) -> Result<BootstrapPayload, String> {
-    bridge::enable_high_refresh_and_smooth_wheel(true);
     engine.spawn_warmup();
     let snapshot = { engine.state.lock().unwrap().clone() };
     let is_authorized = snapshot.current_user.is_some();
@@ -1538,7 +1533,7 @@ pub fn run() {
         .manage(engine)
         .setup(|app| {
             BridgeEngine::bind_app_handle(app.handle());
-            bridge::enable_high_refresh_and_smooth_wheel(false);
+            bridge::enable_high_refresh();
             if let Some(main_win) = app.get_webview_window("main") {
                 let init_appearance = {
                     app.try_state::<Arc<BridgeEngine>>()
@@ -1667,7 +1662,6 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            set_app_cursor,
             bootstrap_state,
             site_request,
             site_upload,

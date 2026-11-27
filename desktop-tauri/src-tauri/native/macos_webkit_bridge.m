@@ -445,6 +445,7 @@ static NSDictionary *lindoReadLocalMediaFile(NSString *path, NSUInteger maxBytes
 @property BOOL maskDarkState;
 @property NSString *maskMessageState;
 @property BOOL loginModeState;
+@property BOOL showingForumConnection;
 @property BOOL challengeOriginReached;
 @property BOOL challengeInteractiveRequired;
 @property BOOL userReloading;
@@ -762,7 +763,7 @@ static NSDictionary *lindoReadLocalMediaFile(NSString *path, NSUInteger maxBytes
 }
 
 - (void)reloadPage:(id)sender {
-    if (!self.loginModeState) {
+    if (!self.loginModeState && !self.showingForumConnection) {
         self.userReloading = YES;
         self.reloadEpoch += 1;
         self.challengeOriginReached = NO;
@@ -822,7 +823,7 @@ static NSDictionary *lindoReadLocalMediaFile(NSString *path, NSUInteger maxBytes
     }
 }
 - (void)setVerifyMask:(BOOL)visible dark:(BOOL)dark message:(NSString *)msg {
-    _maskVisibleState = visible;
+    _maskVisibleState = visible && !self.showingForumConnection;
     _maskDarkState = dark;
     if (msg.length > 0) {
         _maskMessageState = [msg copy];
@@ -832,6 +833,7 @@ static NSDictionary *lindoReadLocalMediaFile(NSString *path, NSUInteger maxBytes
 - (void)hide {
     _maskVisibleState = NO;
     _loginModeState = NO;
+    _showingForumConnection = NO;
     _web.alphaValue = 1.0;
     if (_maskSpinner) [_maskSpinner stopAnimation:nil];
     if (_progress) [_progress stopAnimation:nil];
@@ -1371,10 +1373,6 @@ static NSMutableSet<LindoConnectProbe *> *gActiveConnectProbes = nil;
 static id gFeatNear60Fps = nil;
 static id gFeatCustomFrameRate = nil;
 static BOOL gHighRefreshFeaturesResolved = NO;
-static id gScrollWheelMonitor = nil;
-static BOOL gSmoothWheelJsReady = NO;
-static CFAbsoluteTime gLastZeroPhaseWheelTime = 0;
-static NSInteger gSmoothDaemonBurstCount = 0;
 
 static void resolveHighRefreshFeatureRefs(void) {
     if (gHighRefreshFeaturesResolved) return;
@@ -1452,36 +1450,6 @@ static WKWebView *findFirstWKWebView(NSView *view) {
     return nil;
 }
 
-static id gInactiveHoverGuardMonitor = nil;
-static BOOL gDesiredPointerCursor = NO;
-static BOOL gHasDesiredCursor = NO;
-
-static BOOL isMouseInsideMainContentInset(NSWindow *win) {
-    if (!win || !win.contentView) return NO;
-    if ((gHost && win == gHost.panel) || (gBrowser && win == gBrowser.window)) return NO;
-    NSPoint mouseScreen = [NSEvent mouseLocation];
-    NSPoint ptInWin = [win convertPointFromScreen:mouseScreen];
-    NSRect inner = NSInsetRect(win.contentView.bounds, 6.0, 6.0);
-    return NSPointInRect(ptInWin, inner);
-}
-
-static void applyStrictTwoStateCursor(NSWindow *win, BOOL pointer) {
-    if (!NSApp.isActive || !win || !win.isKeyWindow) return;
-    if (!isMouseInsideMainContentInset(win)) return;
-    NSCursor *target = pointer ? [NSCursor pointingHandCursor] : [NSCursor arrowCursor];
-    if ([NSCursor currentCursor] != target) {
-        [target set];
-    }
-}
-
-__attribute__((visibility("default"))) void lindo_bridge_set_cursor(int pointer) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        gDesiredPointerCursor = (pointer != 0);
-        gHasDesiredCursor = YES;
-        applyStrictTwoStateCursor(NSApp.keyWindow, gDesiredPointerCursor);
-    });
-}
-
 static void unlockAllAppWebViews(void) {
     for (NSWindow *win in [NSApp windows]) {
         // Never unlock 144Hz/240Hz display updates on the hidden background network bridge panel (`gHost.panel`)!
@@ -1494,138 +1462,6 @@ static void unlockAllAppWebViews(void) {
         }
     }
     if (gBrowser && gBrowser.web) unlockHighRefreshRateForWebView(gBrowser.web);
-}
-
-static double mapDiscreteWheelLinesToPixels(double lines) {
-    if (lines == 0.0) return 0.0;
-    double mag = fabs(lines);
-    // Normalize macOS raw USB HID single-notch tiny deltas (0.1..1.0 lines) to a crisp ~54..70px glide,
-    // while preserving multi-notch hardware acceleration up to 380px per impulse.
-    double px = (mag <= 1.0) ? (52.0 + mag * 18.0) : (70.0 + (mag - 1.0) * 44.0);
-    if (px > 380.0) px = 380.0;
-    return (lines < 0.0) ? px : -px;
-}
-
-static void installHighRefreshAndSmoothWheelMonitor(void) {
-    unlockAllAppWebViews();
-    if (!gInactiveHoverGuardMonitor) {
-        // 1. Prevent WKWebView's `NSTrackingActiveAlways` tracking areas from overriding `NSCursor` or showing tooltips
-        //    while external screenshot overlays (macOS / Feishu / WeChat / Snipaste) or other apps are active (never swallowing MouseExited).
-        // 2. Inside the active main window's content area (excluding the 6px outer window-resize rim), enforce our strict
-        //    two-state cursor policy (arrow vs pointing hand) so WKWebView never gets stuck on pointing hand / I-beam / resize cursors.
-        NSEventMask hoverMask = NSEventMaskMouseMoved | NSEventMaskCursorUpdate | NSEventMaskMouseEntered | NSEventMaskMouseExited | NSEventMaskLeftMouseDragged;
-        gInactiveHoverGuardMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:hoverMask handler:^NSEvent * _Nullable(NSEvent * _Nonnull event) {
-            NSEventType etype = event.type;
-            NSWindow *win = event.window;
-            if (!NSApp.isActive || (win && !win.isKeyWindow)) {
-                if (etype == NSEventTypeMouseExited) {
-                    gDesiredPointerCursor = NO;
-                    return event;
-                }
-                return nil;
-            }
-            if (etype == NSEventTypeMouseExited) {
-                gDesiredPointerCursor = NO;
-                return event;
-            }
-            if (win && isMouseInsideMainContentInset(win)) {
-                if (etype == NSEventTypeLeftMouseDragged) {
-                    gDesiredPointerCursor = NO;
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        applyStrictTwoStateCursor(win, NO);
-                    });
-                } else if (etype == NSEventTypeCursorUpdate && gHasDesiredCursor) {
-                    BOOL wantPointer = gDesiredPointerCursor;
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        applyStrictTwoStateCursor(win, wantPointer);
-                    });
-                }
-            }
-            return event;
-        }];
-    }
-    if (gScrollWheelMonitor) return;
-
-    gScrollWheelMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskScrollWheel handler:^NSEvent * _Nullable(NSEvent * _Nonnull event) {
-        NSWindow *win = event.window;
-        if (!win) return event;
-
-        WKWebView *wv = findFirstWKWebView(win.contentView);
-        if (!wv) return event;
-        unlockHighRefreshRateForWebView(wv);
-
-        // Keep auxiliary verification / forum browser panels on standard webpage wheel behavior
-        if ((gHost && win == gHost.panel) || (gBrowser && win == gBrowser.window)) {
-            return event;
-        }
-        if (!gSmoothWheelJsReady) {
-            return event;
-        }
-
-        // Never intercept zoom/modified scroll gestures
-        NSEventModifierFlags mods = event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask;
-        if (mods & (NSEventModifierFlagCommand | NSEventModifierFlagControl | NSEventModifierFlagOption)) {
-            return event;
-        }
-
-        // Apple Magic Trackpad & Magic Mouse ALWAYS carry gesture phase or momentumPhase:
-        // pass straight through to WebKit's unlocked 144Hz C++ AsyncOverflowScrolling compositor!
-        if (event.phase != NSEventPhaseNone || event.momentumPhase != NSEventPhaseNone) {
-            return event;
-        }
-
-        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-        double dtMs = (now - gLastZeroPhaseWheelTime) * 1000.0;
-        gLastZeroPhaseWheelTime = now;
-
-        double cssDeltaX = 0.0;
-        double cssDeltaY = 0.0;
-
-        if (!event.hasPreciseScrollingDeltas) {
-            // Raw physical stepped mouse wheel (hasPreciseScrollingDeltas == NO)
-            double linesY = (double)event.scrollingDeltaY;
-            if (linesY == 0.0) linesY = (double)event.deltaY;
-            double linesX = (double)event.scrollingDeltaX;
-            if (linesX == 0.0) linesX = (double)event.deltaX;
-            if ((mods & NSEventModifierFlagShift) && linesX == 0.0 && linesY != 0.0) {
-                linesX = linesY;
-                linesY = 0.0;
-            }
-            cssDeltaY = mapDiscreteWheelLinesToPixels(linesY);
-            cssDeltaX = mapDiscreteWheelLinesToPixels(linesX);
-        } else {
-            // Pixel-mode event with zero phase: distinguish 60-144Hz smooth-scroll daemons (Mos / Mac Mouse Fix)
-            // from stepped pixel-chunk mouse drivers (e.g. Logi / gaming mice without smooth interpolation)
-            double absY = fabs((double)event.scrollingDeltaY);
-            double absX = fabs((double)event.scrollingDeltaX);
-            BOOL smallSubStep = (absY < 28.0 && absX < 28.0);
-            if (smallSubStep && dtMs < 22.0) {
-                gSmoothDaemonBurstCount++;
-            } else if (!smallSubStep || dtMs > 90.0) {
-                gSmoothDaemonBurstCount = 0;
-            }
-            if (gSmoothDaemonBurstCount >= 1 || (absY < 24.0 && absX < 24.0)) {
-                return event;
-            }
-            cssDeltaY = -(double)event.scrollingDeltaY;
-            cssDeltaX = -(double)event.scrollingDeltaX;
-        }
-
-        if (fabs(cssDeltaX) < 0.1 && fabs(cssDeltaY) < 0.1) {
-            return event;
-        }
-
-        NSPoint ptInWeb = [wv convertPoint:event.locationInWindow fromView:nil];
-        CGFloat cssX = ptInWeb.x;
-        CGFloat cssY = wv.isFlipped ? ptInWeb.y : (wv.bounds.size.height - ptInWeb.y);
-        if (cssX < 0 || cssY < 0 || cssX > wv.bounds.size.width || cssY > wv.bounds.size.height) {
-            return event;
-        }
-
-        NSString *js = [NSString stringWithFormat:@"window.__lindoSmoothWheel&&window.__lindoSmoothWheel(%.1f,%.1f,%.2f,%.2f)", cssX, cssY, cssDeltaX, cssDeltaY];
-        [wv evaluateJavaScript:js completionHandler:nil];
-        return nil;
-    }];
 }
 
 static void registerDefaultUrlSchemesForCurrentBundle(void) {
@@ -1647,13 +1483,10 @@ static void registerDefaultUrlSchemesForCurrentBundle(void) {
     });
 }
 
-__attribute__((visibility("default"))) void lindo_bridge_enable_high_refresh(int jsReady) {
+__attribute__((visibility("default"))) void lindo_bridge_enable_high_refresh(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         registerDefaultUrlSchemesForCurrentBundle();
-        if (jsReady) {
-            gSmoothWheelJsReady = YES;
-        }
-        installHighRefreshAndSmoothWheelMonitor();
+        unlockAllAppWebViews();
     });
 }
 
@@ -1721,7 +1554,7 @@ __attribute__((visibility("default"))) void lindo_bridge_command(long long reque
             gHost.cancelled = NO;
             registerDefaultUrlSchemesForCurrentBundle();
             purgeSharedStorageAuthCookies(NO);
-            installHighRefreshAndSmoothWheelMonitor();
+            unlockAllAppWebViews();
             installNetworkPathMonitorOnce();
             sendReply(callback, request, @{}, nil);
         } else if ([method isEqualToString:@"openBrowser"]) {
@@ -1735,6 +1568,8 @@ __attribute__((visibility("default"))) void lindo_bridge_command(long long reque
             [gBrowser openUrl:url dark:[p[@"dark"] boolValue]];
             sendReply(callback, request, @{}, nil);
         } else if ([method isEqualToString:@"show"]) {
+            gHost.showingForumConnection = [p[@"forumConnection"] boolValue];
+            if (gHost.showingForumConnection) gHost.maskVisibleState = NO;
             [gHost show:[p[@"dark"] boolValue] loginMode:[p[@"login"] boolValue]];
             sendReply(callback, request, @{}, nil);
         } else if ([method isEqualToString:@"hide"]) {

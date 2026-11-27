@@ -119,6 +119,32 @@ test("1. returns originLost=true immediately when WebView origin is not https://
   assert.equal(fetchCalled, false);
 });
 
+test("recovery reads the requested topic once and returns the actual response without navigating", async () => {
+  const url = "https://linux.do/t/482293/8.json?track_visit=false";
+  for (const [status, body, headers] of [
+    [200, { id: 482293, post_stream: { posts: [] } }, { "content-type": "application/json" }],
+    [403, "challenge page", { "content-type": "text/html", "cf-mitigated": "challenge" }],
+    [403, { errors: ["You need to be logged in"], error_type: "not_logged_in" }, { "content-type": "application/json" }],
+    [429, { errors: ["wait"] }, { "content-type": "application/json", "retry-after": "45" }],
+  ]) {
+    const calls = [];
+    const { res } = await runBridgeInVm({
+      url, singleRead: true, forceNoStore: true,
+      headers: { Accept: "application/json", "Discourse-Logged-In": "true" },
+    }, {
+      fetchImpl: async (target, init) => {
+        calls.push([target, init.method, init.credentials, init.cache]);
+        return makeResponse(status, body, headers);
+      },
+    });
+    assert.deepEqual(calls, [[url, "GET", "include", "no-store"]]);
+    assert.equal(res.status, status);
+    assert.equal(res.body, typeof body === "string" ? body : JSON.stringify(body));
+    assert.equal(res.challenge, headers["cf-mitigated"] ?? null);
+    assert.equal(res.retryAfter, headers["retry-after"] ?? null);
+  }
+});
+
 test("2. preserves pre-seeded DOM/window CSRF on fresh boot without false owner mismatch", async () => {
   const calls = [];
   const { res, windowObj } = await runBridgeInVm(

@@ -12,9 +12,11 @@ use crate::net_policy::{
     BridgeTimeoutSpec, CallDeadline, Cf429AdaptiveClassifier, Cf429Decision, CfClearanceAuthority,
     CleanIpProbeResult, CleanIpSettleAction, ForceRefreshOutcomeDecision,
     PriorityGate, RequestPriority, VerifyCoordinator,
-    VerifyFlightGuard, VerifyJoin, VerifyOutcome, VerifyPresentation, VerifyTicketOutcome,
+    VerificationTimeline, VerifyFlightGuard, VerifyJoin, VerifyOutcome, VerifyPresentation, VerifyTicketOutcome,
     VERIFY_PILL_DELAY_MS, VERIFY_TYPING_QUIET_GUARD_MS,
 };
+use crate::forum_recovery::{retry_forum_read, ForumReadTarget, ReadResult};
+use crate::net_policy::PendingForumConnection;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
@@ -33,6 +35,7 @@ use tokio::sync::oneshot;
 use tokio::sync::{Mutex, Notify, RwLock, Semaphore};
 
 const CF_CHALLENGE_PREFIX: &str = "<!--lindo-cf-challenge-->";
+const FORUM_CONNECTION_PENDING: &str = "论坛连接尚未恢复";
 const MAX_MEDIA_CACHE_ITEMS: usize = 192;
 const MAX_MEDIA_CACHE_SINGLE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_MEDIA_CACHE_TOTAL_BYTES: usize = 36 * 1024 * 1024;
@@ -52,14 +55,24 @@ enum OriginRecovery {
     Unavailable,
 }
 
-#[derive(Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct VerificationTimeline {
-    round: u64,
-    panel_shown: bool,
-    web_passed_at_ms: Option<u64>,
-    panel_closed_at_ms: Option<u64>,
-    connection_ready_at_ms: Option<u64>,
+struct RecoveryRead {
+    target: ForumReadTarget,
+    headers: HashMap<String, String>,
+    referrer: String,
+    session_generation: Option<u64>,
+    response: Option<Value>,
+}
+
+impl RecoveryRead {
+    fn standalone(target: ForumReadTarget) -> Self {
+        Self {
+            target,
+            headers: HashMap::from([("Accept".into(), "application/json".into())]),
+            referrer: "https://linux.do/".into(),
+            session_generation: None,
+            response: None,
+        }
+    }
 }
 
 impl VerificationTimeline {
@@ -75,7 +88,7 @@ impl VerificationTimeline {
                 let _ = app.emit("lindo://verify-pill", json!({
                     "visible": false, "round": timeline.round, "stage": "recovering",
                 }));
-                timeline.log(app, "INFO", "网页验证已通过，正在恢复连接");
+                timeline.log(app, "INFO", "网页验证已通过，正在读取论坛数据");
             },
         ).await;
         if shown {
@@ -103,7 +116,7 @@ impl VerificationTimeline {
                 self.connection_ready_at_ms = Some(now_epoch_ms());
                 ("INFO", "验证后的连接已恢复")
             }
-            OriginRecovery::Challenged => ("WARN", "恢复连接时站点再次要求验证"),
+            OriginRecovery::Challenged => ("WARN", "论坛读取仍收到站点验证，已停止自动重试"),
             OriginRecovery::Unavailable => ("WARN", "网页验证已通过，连接暂未恢复"),
         }
     }
@@ -299,7 +312,7 @@ pub(crate) const DESKTOP_HTTP_BRIDGE_TEMPLATE_JS: &str = r#"(() => new Promise((
 
             let cfHeader = r.headers.get('cf-mitigated');
             let csrfRefreshed = false;
-            if (!write && !cfHeader && (r.status === 403 || r.status === 401) && c.headers['Discourse-Logged-In'] && !c.url.includes('/session/current.json') && /not_logged_in|need to be logged in/i.test(bodyText)) {
+            if (!c.singleRead && !write && !cfHeader && (r.status === 403 || r.status === 401) && c.headers['Discourse-Logged-In'] && !c.url.includes('/session/current.json') && /not_logged_in|need to be logged in/i.test(bodyText)) {
                 if (deadlineMs - Date.now() > 1200) {
                     phase = 'guest_fallback';
                     const guestHdrs = Object.assign({}, c.headers);
@@ -416,6 +429,7 @@ pub(crate) fn build_http_bridge_script(
     force_no_store: bool,
     csrf_owner: &str,
     timeouts: BridgeTimeoutSpec,
+    single_read: bool,
 ) -> String {
     let cfg = json!({
         "url": url,
@@ -425,6 +439,7 @@ pub(crate) fn build_http_bridge_script(
         "referrer": referrer,
         "forceNoStore": force_no_store,
         "csrfOwner": csrf_owner,
+        "singleRead": single_read,
         "reqTimeoutMs": timeouts.fetch_timeout_ms,
         "csrfTimeoutMs": timeouts.csrf_timeout_ms,
         "retryTimeoutMs": timeouts.retry_fetch_timeout_ms,
@@ -519,29 +534,13 @@ extern "C" {
         callback: extern "C" fn(i64, *const c_char),
     );
     fn lindo_bridge_set_event_callback(callback: extern "C" fn(i64, *const c_char));
-    fn lindo_bridge_enable_high_refresh(js_ready: i32);
-    fn lindo_bridge_set_cursor(pointer: i32);
+    fn lindo_bridge_enable_high_refresh();
 }
 
-pub fn enable_high_refresh_and_smooth_wheel(js_ready: bool) {
+pub fn enable_high_refresh() {
     #[cfg(target_os = "macos")]
     unsafe {
-        lindo_bridge_enable_high_refresh(if js_ready { 1 } else { 0 });
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = js_ready;
-    }
-}
-
-pub fn set_app_cursor(pointer: bool) {
-    #[cfg(target_os = "macos")]
-    unsafe {
-        lindo_bridge_set_cursor(if pointer { 1 } else { 0 });
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = pointer;
+        lindo_bridge_enable_high_refresh();
     }
 }
 
@@ -746,6 +745,7 @@ pub struct DiagRuntimeSnapshot {
     pub media_cooldown_remain_ms: u64,
     pub challenge_429_streak: u32,
     pub verify_round: u64,
+    pub pending_connection_round: Option<u64>,
     pub verify_consecutive_failures: u32,
     pub verify_cooldown_remain_ms: u64,
     pub verify_ineffective_breaker: bool,
@@ -1718,9 +1718,7 @@ impl BridgeEngine {
         let _ = native_call("evaluate", json!({ "isolated": true, "script": js }), 3).await;
     }
 
-    /// Navigates the hidden shared bridge WebView back to lightweight `https://linux.do/about`
-    /// and waits for the NEW `/about` document to actually commit (guarded by `window.__lindoLeavingNonce`)
-    /// before returning so immediate POST/GET replays never match the outgoing document or blindly mark a broken page ready.
+    // Login and Connect can leave the forum origin. The normal verification flow uses a forum read.
     async fn restore_about_origin_context(&self) -> OriginRecovery {
         // Fast path: if the bridge WebView is ALREADY committed on a clean non-challenged `https://linux.do`
         // document (e.g., `/challenge` 404 HTML right after passing Turnstile), reuse it in-place (<5ms)
@@ -1828,6 +1826,180 @@ impl BridgeEngine {
         }
     }
 
+    fn mark_forum_ready(&self) {
+        self.cf_429_classifier.lock().unwrap().reset();
+        self.bg_challenge_tracker.lock().unwrap().reset();
+        {
+            let mut rt = self.inner.lock().unwrap();
+            rt.origin_ready = true;
+            rt.bootstrap_challenged = false;
+            rt.pending_interactive_challenge = false;
+            rt.last_challenge_url = None;
+            rt.fg_challenge_until = None;
+            rt.bg_challenge_until = None;
+            rt.challenge_429_streak = 0;
+            rt.cf_attention_notified = false;
+        }
+    }
+
+    fn announce_ready_connection(app: &AppHandle, round: u64, refresh_blocked: bool) {
+        let _ = app.emit(
+            "lindo://verify-pill",
+            json!({ "visible": false, "round": round, "stage": "done" }),
+        );
+        let _ = app.emit("lindo://cf-attention-needed", false);
+        let _ = app.emit(
+            "lindo://verified",
+            json!({ "refreshBlocked": refresh_blocked }),
+        );
+    }
+
+    async fn read_forum_for_recovery(
+        &self,
+        app: &AppHandle,
+        timeline: &VerificationTimeline,
+        read: &RecoveryRead,
+    ) -> (ReadResult, Value) {
+        if read
+            .session_generation
+            .is_some_and(|generation| generation != self.session_generation.load(Ordering::Acquire))
+        {
+            return (ReadResult::Unavailable, json!({ "accountChanged": true }));
+        }
+        if let Some(limited) = self
+            .inner
+            .lock()
+            .unwrap()
+            .rate_limit_response(Instant::now())
+        {
+            return (
+                ReadResult::Unavailable,
+                json!({ "status": limited.status, "body": limited.body,
+                "retryAfter": limited.rate_limited_ms.map(|ms| ms.div_ceil(1000).to_string()),
+                "contentType": "application/json", "localCooldown": true }),
+            );
+        }
+        let owner = self
+            .state
+            .lock()
+            .unwrap()
+            .current_user
+            .as_ref()
+            .map(|u| u.username.to_ascii_lowercase())
+            .unwrap_or_else(|| "__anon__".into());
+        let timeouts = compute_bridge_timeouts(true, false, false);
+        let script = build_http_bridge_script(
+            read.target.url.as_str(),
+            "GET",
+            &read.headers,
+            &None,
+            &read.referrer,
+            true,
+            &owner,
+            timeouts,
+            true,
+        );
+        let reply = native_call(
+            "evaluate",
+            json!({ "script": script }),
+            timeouts.rust_ipc_timeout_secs,
+        )
+        .await
+        .unwrap_or(Value::Null);
+        let result = read.target.classify(&reply);
+        if reply["status"] == 429 && result != ReadResult::Challenge {
+            let secs = parse_retry_after_secs(
+                reply["retryAfter"].as_str(),
+                reply["rateLimitReset"].as_str(),
+                reply["body"].as_str().unwrap_or(""),
+                (now_epoch_ms() / 1000) as i64,
+            )
+            .unwrap_or(3);
+            self.inner
+                .lock()
+                .unwrap()
+                .extend_rate_limit(Instant::now(), Duration::from_secs(secs.clamp(1, 604800)));
+        }
+        let detail = json!({ "round": timeline.round, "resource": read.target.label(),
+            "originalRequest": read.session_generation.is_some(), "result": format!("{result:?}"),
+            "httpStatus": reply["status"].as_u64(), "challengeHeader": result == ReadResult::Challenge,
+            "expectedData": result == ReadResult::Ready, "originLost": reply["originLost"] == true });
+        emit_diag(
+            app,
+            "INFO",
+            "NETWORK",
+            "ForumRead",
+            "检查论坛读取结果",
+            Some(&detail.to_string()),
+        );
+        (result, reply)
+    }
+
+    /// Only an explicit retry can show this page. The site's normal topic/feed UI owns the
+    /// interaction. Closing the panel returns to the pending state without another request.
+    async fn show_forum_confirmation(
+        &self,
+        app: &AppHandle,
+        timeline: &VerificationTimeline,
+        target: &ForumReadTarget,
+        is_dark: bool,
+    ) -> bool {
+        let nonce = self.next_nav_nonce();
+        self.stamp_leaving_nonce(&nonce).await;
+        if native_call("navigate", json!({ "url": target.page_url().as_str() }), 8)
+            .await
+            .is_err()
+            || native_call(
+                "show",
+                json!({ "dark": is_dark, "login": false, "forumConnection": true }),
+                8,
+            )
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        timeline.log(app, "INFO", "用户已打开论坛页面完成确认");
+        let script = format!(
+            r#"(() => {{
+            if (location.origin !== 'https://linux.do' || window.__lindoLeavingNonce === {}
+                || document.readyState === 'loading' || location.pathname.startsWith('/challenge')) return false;
+            return !!document.querySelector('#data-preloaded, header.d-header, #main-outlet')
+                && !document.querySelector('#challenge-running, #challenge-stage, #challenge-form');
+        }})()"#,
+            json!(nonce)
+        );
+        let deadline = Instant::now() + Duration::from_secs(180);
+        let ready = loop {
+            let status = native_call("status", json!({}), 4).await;
+            if status.as_ref().ok().and_then(|v| v["cancelled"].as_bool()) != Some(false)
+                || Instant::now() >= deadline
+            {
+                break false;
+            }
+            if native_call("evaluate", json!({ "isolated": true, "script": script }), 4)
+                .await
+                .ok()
+                .and_then(|v| v.as_bool())
+                == Some(true)
+            {
+                break true;
+            }
+            tokio::time::sleep(Duration::from_millis(350)).await;
+        };
+        let _ = native_call("hide", json!({}), 5).await;
+        timeline.log(
+            app,
+            "INFO",
+            if ready {
+                "论坛确认窗口已关闭，重试原读取"
+            } else {
+                "已退出论坛确认，保留重试入口"
+            },
+        );
+        ready
+    }
+
     /// Proactive Cloudflare precheck for cold-start, near-expiry, route changes, and background challenges:
     /// - When main window is visible and user is not in `ComposerModal`, runs `VerifyPresentation::Proactive`:
     ///   0 UI if browser auto-passes; promotes straight to native panel once `native_interactive` or rendered widget >= 3.5s
@@ -1908,11 +2080,12 @@ impl BridgeEngine {
             is_post_pass_replay,
             bypass_user_dismiss,
             false,
+            None,
         )
         .await
     }
 
-    pub async fn coordinate_cf_verification_with_force(
+    async fn coordinate_cf_verification_with_force(
         &self,
         app: &AppHandle,
         requested: VerifyPresentation,
@@ -1920,6 +2093,7 @@ impl BridgeEngine {
         is_post_pass_replay: bool,
         bypass_user_dismiss: bool,
         force_refresh: bool,
+        original: Option<&mut RecoveryRead>,
     ) -> VerifyOutcome {
         // Invariant 1: strictly Manual-only & non-sticky (clamped to false for all auto paths).
         let force_refresh = effective_force_refresh(requested, force_refresh);
@@ -1936,6 +2110,12 @@ impl BridgeEngine {
         };
 
         match join {
+            VerifyJoin::AwaitingConnection { round } => VerifyOutcome {
+                passed: false,
+                round,
+                ineffective_blocked: false,
+                cooldown_remain_ms: 0,
+            },
             VerifyJoin::RecentPass { round } => VerifyOutcome {
                 passed: true,
                 round,
@@ -1996,6 +2176,7 @@ impl BridgeEngine {
                 }
             }
             VerifyJoin::Leader {
+                reconnect,
                 round,
                 presentation,
                 escalate_notify,
@@ -2008,56 +2189,68 @@ impl BridgeEngine {
                 let _verify_guard = self.verify_lock.lock().await;
                 let mut saw_interactive_or_challenge = self.has_unresolved_challenge_hint();
                 let verifying_flag = VerifyingFlagGuard::enter(&self.inner);
-                let mut timeline = VerificationTimeline { round, ..Default::default() };
-                let disposition = self
-                    .run_unified_cf_verify(
-                        app,
-                        is_dark,
-                        &mut timeline,
-                        &presentation,
-                        &escalate_notify,
-                        &mut saw_interactive_or_challenge,
-                        force_refresh,
-                    )
-                    .await
-                    .unwrap_or(UnifiedVerifyDisposition::Failed);
-
-                if timeline.panel_closed_at_ms.is_none() {
-                    let hidden = native_call("hide", json!({}), 5).await.is_ok();
-                    if timeline.panel_shown {
-                        if hidden {
-                            timeline.panel_closed_at_ms = Some(now_epoch_ms());
+                let mut timeline = reconnect.as_ref().map(|p| p.timeline)
+                    .unwrap_or(VerificationTimeline { round, ..Default::default() });
+                let disposition = if reconnect.is_some() {
+                    let _ = app.emit("lindo://verify-pill", json!({
+                        "visible": false, "round": round, "stage": "recovering",
+                    }));
+                    timeline.log(app, "INFO", "用户重试论坛连接");
+                    UnifiedVerifyDisposition::Passed
+                } else {
+                    let disposition = self.run_unified_cf_verify(
+                        app, is_dark, &mut timeline, &presentation, &escalate_notify,
+                        &mut saw_interactive_or_challenge, force_refresh,
+                    ).await.unwrap_or(UnifiedVerifyDisposition::Failed);
+                    if timeline.panel_closed_at_ms.is_none() {
+                        let hidden = native_call("hide", json!({}), 5).await.is_ok();
+                        if timeline.panel_shown {
+                            if hidden { timeline.panel_closed_at_ms = Some(now_epoch_ms()); }
+                            timeline.log_panel_close(app);
                         }
-                        timeline.log_panel_close(app);
                     }
-                }
-                let recovery = {
-                    let _nav = self.nav_lock.write().await;
-                    self.restore_about_origin_context().await
+                    disposition
                 };
                 let web_passed = disposition == UnifiedVerifyDisposition::Passed;
-                let passed = web_passed && recovery == OriginRecovery::Ready;
+                let mut passed = false;
                 if web_passed {
+                    let mut standalone;
+                    let read = match original {
+                        Some(read) => read,
+                        None => {
+                            let target = reconnect.as_ref().map(|p| p.target.clone()).unwrap_or_else(ForumReadTarget::latest);
+                            standalone = RecoveryRead::standalone(target);
+                            &mut standalone
+                        }
+                    };
+                    let _nav = self.nav_lock.write().await;
+                    let (result, reply) = retry_forum_read(reconnect.is_some(),
+                        || self.read_forum_for_recovery(app, &timeline, read),
+                        || self.show_forum_confirmation(app, &timeline, &read.target, is_dark),
+                    ).await;
+                    passed = result.reached_forum();
+                    let recovery = match result {
+                        ReadResult::Ready | ReadResult::SiteError => OriginRecovery::Ready,
+                        ReadResult::Challenge => OriginRecovery::Challenged,
+                        ReadResult::Unavailable => OriginRecovery::Unavailable,
+                    };
+                    // Only a genuine business response is returned to the waiting caller.
+                    if passed || (result != ReadResult::Challenge && reply["status"].as_u64().is_some_and(|n| n >= 400)) {
+                        read.response = Some(reply);
+                    }
                     let (level, summary) = timeline.finish_recovery(recovery);
                     timeline.log(app, level, summary);
+                    if !passed && read.session_generation.is_none_or(|generation|
+                        generation == self.session_generation.load(Ordering::Acquire)) {
+                        self.verify_coord.lock().unwrap().defer_connection(PendingForumConnection {
+                            timeline, target: read.target.clone(),
+                        });
+                    }
                 }
-                let needs_attention = if web_passed {
-                    recovery == OriginRecovery::Challenged
-                } else {
-                    disposition == UnifiedVerifyDisposition::UserDismissed || saw_interactive_or_challenge
-                };
-                if passed {
-                    self.cf_429_classifier.lock().unwrap().reset();
-                    self.bg_challenge_tracker.lock().unwrap().reset();
-                    let mut rt = self.inner.lock().unwrap();
-                    rt.bootstrap_challenged = false;
-                    rt.pending_interactive_challenge = false;
-                    rt.last_challenge_url = None;
-                    rt.fg_challenge_until = None;
-                    rt.bg_challenge_until = None;
-                    rt.challenge_429_streak = 0;
-                    rt.cf_attention_notified = false;
-                } else if disposition == UnifiedVerifyDisposition::UserDismissed {
+                let awaiting_connection = web_passed && !passed && self.verify_coord.lock().unwrap().pending_connection().is_some();
+                let needs_attention = !web_passed &&
+                    (disposition == UnifiedVerifyDisposition::UserDismissed || saw_interactive_or_challenge);
+                if disposition == UnifiedVerifyDisposition::UserDismissed {
                     // User closed the verification window without completing:
                     // 1) Arm 180s auto-popup snooze bound to current network signature (clears on network change; foreground writes still pop).
                     // 2) Preserve PC's existing `连接需安全确认 · 去验证 ›` banner intact!
@@ -2071,23 +2264,26 @@ impl BridgeEngine {
                     self.inner.lock().unwrap().cf_attention_notified = needs_attention;
                 }
 
-                let _ = app.emit(
-                    "lindo://verify-pill",
-                    json!({ "visible": false, "round": round, "stage": if web_passed && recovery == OriginRecovery::Unavailable { "unavailable" } else { "done" } }),
-                );
-                if passed {
-                    let _ = app.emit("lindo://cf-attention-needed", false);
-                    let _ = app.emit("lindo://verified", ());
-                } else if web_passed || needs_attention {
-                    let _ = app.emit("lindo://cf-attention-needed", needs_attention);
-                }
+                let abandoned = awaiting_connection || matches!(disposition,
+                    UnifiedVerifyDisposition::Abandoned | UnifiedVerifyDisposition::UserDismissed);
+                // A follower can resume on another executor thread as soon as complete() wakes it.
+                if passed { self.mark_forum_ready(); }
                 drop(verifying_flag);
-                match disposition {
-                    UnifiedVerifyDisposition::Abandoned | UnifiedVerifyDisposition::UserDismissed => {
-                        flight_guard.abandon(Instant::now())
+                let outcome = if abandoned {
+                    flight_guard.abandon(Instant::now())
+                } else {
+                    flight_guard.complete(passed, Instant::now())
+                };
+                if passed {
+                    Self::announce_ready_connection(app, round, true);
+                } else {
+                    let stage = if awaiting_connection { "unavailable" } else { "done" };
+                    let _ = app.emit("lindo://verify-pill", json!({ "visible": false, "round": round, "stage": stage }));
+                    if web_passed || needs_attention {
+                        let _ = app.emit("lindo://cf-attention-needed", needs_attention);
                     }
-                    _ => flight_guard.complete(passed, Instant::now()),
                 }
+                outcome
             }
         }
     }
@@ -2907,6 +3103,9 @@ impl BridgeEngine {
     }
 
     async fn ensure_ready(&self, force_reload: bool) -> Result<(), String> {
+        if self.verify_coord.lock().unwrap().pending_connection().is_some() {
+            return Err(FORUM_CONNECTION_PENDING.into());
+        }
         {
             let rt = self.inner.lock().unwrap();
             if rt.verifying {
@@ -2917,6 +3116,9 @@ impl BridgeEngine {
             }
         }
         let _guard = self.bootstrap_lock.lock().await;
+        if self.verify_coord.lock().unwrap().pending_connection().is_some() {
+            return Err(FORUM_CONNECTION_PENDING.into());
+        }
         {
             let rt = self.inner.lock().unwrap();
             if rt.verifying {
@@ -3498,7 +3700,11 @@ impl BridgeEngine {
         form: Option<HashMap<String, String>>,
         headers: Option<HashMap<String, String>>,
     ) -> Result<SiteHttpResponse, String> {
-        self.request_unlocked(app, url, method, form, headers, false).await
+        let response = self.request_unlocked(app, url, method, form, headers, false).await?;
+        if response.is_challenge && self.verify_coord.lock().unwrap().pending_connection().is_some() {
+            return Err(FORUM_CONNECTION_PENDING.into());
+        }
+        Ok(response)
     }
 
     async fn request_unlocked(
@@ -3727,7 +3933,15 @@ impl BridgeEngine {
                 force_no_store,
                 &csrf_owner,
                 bridge_timeouts,
+                false,
             )
+        };
+
+        let original_read = || {
+            if is_background || expects_html || form.is_some() { return None; }
+            ForumReadTarget::from_request(&method_upper, url).map(|target| RecoveryRead {
+                target, headers: safe_headers.clone(), referrer: custom_referrer.clone(), session_generation: Some(session_gen), response: None,
+            })
         };
 
         let idempotent = !in_verification && (method_upper == "GET" || method_upper == "HEAD");
@@ -3780,6 +3994,27 @@ impl BridgeEngine {
                 if let Some(response) = self.inner.lock().unwrap().rate_limit_response(Instant::now()) {
                     return Ok(response);
                 }
+                let pending = self.verify_coord.lock().unwrap().pending_forum_read();
+                if let Some(pending) = pending {
+                    let read = original_read().ok_or(FORUM_CONNECTION_PENDING)?;
+                    let _verify = self.verify_lock.try_lock().map_err(|_| FORUM_CONNECTION_PENDING)?;
+                    let _nav = self.nav_lock.read().await;
+                    let (result, reply) = self.read_forum_for_recovery(app, &pending.timeline, &read).await;
+                    if result.reached_forum() {
+                        self.mark_forum_ready();
+                        if self.verify_coord.lock().unwrap().finish_pending_connection(pending.timeline.round, Instant::now()) {
+                            let mut timeline = pending.timeline;
+                            let (level, summary) = timeline.finish_recovery(OriginRecovery::Ready);
+                            timeline.log(app, level, summary);
+                            Self::announce_ready_connection(app, timeline.round, pending.target.url == read.target.url);
+                        }
+                        break reply;
+                    }
+                    if result != ReadResult::Challenge && reply["status"].as_u64().is_some_and(|n| n >= 400) {
+                        break reply;
+                    }
+                    return Err(FORUM_CONNECTION_PENDING.into());
+                }
                 self.ensure_ready(false).await?;
                 let (verifying_now, boot_challenged) = {
                     let rt = self.inner.lock().unwrap();
@@ -3807,19 +4042,23 @@ impl BridgeEngine {
                             Some(&format!("phase=bootstrap method={method_upper} url={url}")),
                         );
                         call_deadline.pause(Instant::now());
+                        let mut original = original_read();
                         let outcome = self
-                            .coordinate_cf_verification_ext(
-                                app,
-                                VerifyPresentation::Blocking,
-                                is_dark,
-                                false,
-                                bypass_user_dismiss,
-                            )
+                            .coordinate_cf_verification_with_force(app, VerifyPresentation::Blocking,
+                                is_dark, false, bypass_user_dismiss, false, original.as_mut())
                             .await;
                         call_deadline.resume(Instant::now());
                         verify_attempted = true;
                         if outcome.round > 0 {
                             verify_round = Some(outcome.round);
+                        }
+                        if let Some(reply) = original.and_then(|read| read.response) {
+                            if self.session_generation.load(Ordering::Acquire) != session_gen {
+                                return Err("账号会话已切换，请求已取消".into());
+                            }
+                            silent_cf_revalidated = outcome.passed;
+                            retried = true;
+                            break reply;
                         }
                         if outcome.passed {
                             silent_cf_revalidated = true;
@@ -3994,21 +4233,28 @@ impl BridgeEngine {
                         );
                         let is_dark = self.current_is_dark();
                         call_deadline.pause(Instant::now());
+                        let mut original = original_read();
                         let outcome = self
-                            .coordinate_cf_verification_ext(
-                                app,
-                                VerifyPresentation::Blocking,
-                                is_dark,
-                                false,
-                                bypass_user_dismiss,
-                            )
+                            .coordinate_cf_verification_with_force(app, VerifyPresentation::Blocking,
+                                is_dark, false, bypass_user_dismiss, false, original.as_mut())
                             .await;
                         call_deadline.resume(Instant::now());
                         verify_attempted = true;
                         if outcome.round > 0 {
                             verify_round = Some(outcome.round);
                         }
+                        if let Some(reply) = original.and_then(|read| read.response) {
+                            if self.session_generation.load(Ordering::Acquire) != session_gen {
+                                return Err("账号会话已切换，请求已取消".into());
+                            }
+                            silent_cf_revalidated = outcome.passed;
+                            retried = true;
+                            break reply;
+                        }
                         if outcome.passed {
+                            if is_write {
+                                return Err("论坛连接已恢复，请确认后重新提交".into());
+                            }
                             silent_cf_revalidated = true;
                             force_no_store_replay = true;
                             if self.session_generation.load(Ordering::Acquire) != session_gen {
@@ -4801,7 +5047,6 @@ impl BridgeEngine {
         let mut verify_round: Option<u64> = None;
         let mut verify_cooldown_ms: u64 = 0;
         let mut ineffective_clearance = false;
-        let mut silent_cf_revalidated = false;
         let mut origin_reloaded_once = false;
 
         let res: Value = loop {
@@ -4873,8 +5118,7 @@ impl BridgeEngine {
                         verify_round = Some(outcome.round);
                     }
                     if outcome.passed {
-                        silent_cf_revalidated = true;
-                        continue;
+                        return Err("论坛连接已恢复，请重新选择要上传的文件".into());
                     }
                     verify_cooldown_ms = outcome.cooldown_remain_ms;
                     ineffective_clearance = outcome.ineffective_blocked;
@@ -4932,7 +5176,6 @@ impl BridgeEngine {
                 } else {
                     Some(ct_hdr.to_string())
                 },
-                silent_cf_revalidated,
                 verify_attempted,
                 verify_round,
                 verify_cooldown_ms,
@@ -5063,6 +5306,7 @@ impl BridgeEngine {
             media_cooldown_remain_ms,
             challenge_429_streak,
             verify_round: v_snap.round,
+            pending_connection_round: v_snap.pending_connection_round,
             verify_consecutive_failures: v_snap.consecutive_failures,
             verify_cooldown_remain_ms: v_snap.cooldown_remain_ms,
             verify_ineffective_breaker: v_snap.cooldown_is_ineffective
@@ -5277,7 +5521,7 @@ impl BridgeEngine {
                 VerifyPresentation::Blocking
             };
             let outcome = self
-                .coordinate_cf_verification_with_force(app, pres, is_dark, false, false, force_refresh)
+                .coordinate_cf_verification_with_force(app, pres, is_dark, false, false, force_refresh, None)
                 .await;
             return Ok(outcome.passed);
         }
@@ -6190,7 +6434,7 @@ impl BridgeEngine {
     fn commit_authenticated_user(&self, app: &AppHandle, profile: UserProfile) {
         let logged_username = profile.username.clone();
         self.session_generation.fetch_add(1, Ordering::SeqCst);
-        self.verify_coord.lock().unwrap().reset_on_healthy_response();
+        self.verify_coord.lock().unwrap().reset_on_session_change();
         {
             let mut rt = self.inner.lock().unwrap();
             rt.last_login_at = Some(Instant::now());

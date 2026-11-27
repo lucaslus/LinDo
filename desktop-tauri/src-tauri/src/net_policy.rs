@@ -803,6 +803,7 @@ pub struct VerifyOutcome {
 pub struct VerifyHealthSnapshot {
     pub active: bool,
     pub round: u64,
+    pub pending_connection_round: Option<u64>,
     pub consecutive_failures: u32,
     pub ineffective_strikes: u32,
     pub cooldown_remain_ms: u64,
@@ -820,8 +821,26 @@ struct ActiveVerifyFlight {
     tx: watch::Sender<Option<VerifyOutcome>>,
 }
 
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerificationTimeline {
+    pub round: u64,
+    pub panel_shown: bool,
+    pub web_passed_at_ms: Option<u64>,
+    pub panel_closed_at_ms: Option<u64>,
+    pub connection_ready_at_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PendingForumConnection {
+    pub timeline: VerificationTimeline,
+    pub target: crate::forum_recovery::ForumReadTarget,
+}
+
 pub enum VerifyJoin {
+    AwaitingConnection { round: u64 },
     Leader {
+        reconnect: Option<PendingForumConnection>,
         round: u64,
         presentation: Arc<AtomicU8>,
         escalate_notify: Arc<Notify>,
@@ -841,6 +860,7 @@ pub enum VerifyJoin {
 
 #[derive(Default)]
 pub struct VerifyCoordinator {
+    pending_connection: Option<PendingForumConnection>,
     round: u64,
     active: Option<ActiveVerifyFlight>,
     consecutive_failures: u32,
@@ -859,6 +879,41 @@ pub struct VerifyCoordinator {
 impl VerifyCoordinator {
     pub fn is_active(&self) -> bool {
         self.active.is_some()
+    }
+
+    pub fn pending_connection(&self) -> Option<VerificationTimeline> {
+        self.pending_connection.as_ref().map(|p| p.timeline)
+    }
+
+    pub fn pending_forum_read(&self) -> Option<PendingForumConnection> {
+        self.pending_connection.clone()
+    }
+
+    pub fn defer_connection(&mut self, pending: PendingForumConnection) {
+        if self.active.as_ref().is_some_and(|flight| flight.round == pending.timeline.round) {
+            self.pending_connection = Some(pending);
+            self.last_passed_at = None;
+        }
+    }
+
+    pub fn finish_pending_connection(&mut self, round: u64, now: Instant) -> bool {
+        if self.active.is_some() || self.pending_connection().map(|t| t.round) != Some(round) {
+            return false;
+        }
+        self.record_pass(round, now);
+        true
+    }
+
+    fn record_pass(&mut self, round: u64, now: Instant) {
+        self.pending_connection = None;
+        self.clear_user_dismiss();
+        self.consecutive_failures = 0;
+        self.failure_counted_round = None;
+        self.cooldown_until = None;
+        self.cooldown_is_ineffective = false;
+        self.silent_backoff_until = None;
+        self.last_passed_round = round;
+        self.last_passed_at = Some(now);
     }
 
     pub fn current_round(&self) -> u64 {
@@ -947,6 +1002,12 @@ impl VerifyCoordinator {
             };
         }
 
+        if let Some(timeline) = self.pending_connection() {
+            if requested != VerifyPresentation::Manual {
+                return VerifyJoin::AwaitingConnection { round: timeline.round };
+            }
+        }
+
         // Expire stale cooldowns cleanly.
         if let Some(until) = self.cooldown_until {
             if now >= until {
@@ -999,7 +1060,9 @@ impl VerifyCoordinator {
         }
 
         // 3. Start a new authoritative round as the single leader.
-        self.round = self.round.saturating_add(1);
+        if self.pending_connection.is_none() {
+            self.round = self.round.saturating_add(1);
+        }
         let round = self.round;
         let presentation = Arc::new(AtomicU8::new(requested as u8));
         let escalate_notify = Arc::new(Notify::new());
@@ -1013,6 +1076,7 @@ impl VerifyCoordinator {
         });
 
         VerifyJoin::Leader {
+            reconnect: self.pending_connection.clone(),
             round,
             presentation,
             escalate_notify,
@@ -1033,14 +1097,7 @@ impl VerifyCoordinator {
         };
 
         if passed {
-            self.clear_user_dismiss();
-            self.consecutive_failures = 0;
-            self.failure_counted_round = None;
-            self.cooldown_until = None;
-            self.cooldown_is_ineffective = false;
-            self.silent_backoff_until = None;
-            self.last_passed_round = round;
-            self.last_passed_at = Some(now);
+            self.record_pass(round, now);
         } else if !abandoned {
             if matches!(
                 final_presentation,
@@ -1142,6 +1199,7 @@ impl VerifyCoordinator {
     }
 
     pub fn reset_on_session_change(&mut self) {
+        self.pending_connection = None;
         self.unresolved_write_challenge = false;
         self.clear_user_dismiss();
         self.reset_on_healthy_response();
@@ -1152,6 +1210,7 @@ impl VerifyCoordinator {
         VerifyHealthSnapshot {
             active: self.active.is_some(),
             round: self.round,
+            pending_connection_round: self.pending_connection().map(|t| t.round),
             consecutive_failures: self.consecutive_failures,
             ineffective_strikes: self.ineffective_strikes,
             cooldown_remain_ms: self
@@ -1723,6 +1782,110 @@ mod tests {
     }
 
     #[test]
+    fn web_pass_with_unavailable_forum_retries_only_the_connection_and_only_by_request() {
+        use VerifyPresentation::*;
+        let start = Instant::now();
+        let mut coordinator = VerifyCoordinator::default();
+        assert!(matches!(
+            coordinator.join_or_start(Manual, start, false),
+            VerifyJoin::Leader {
+                round: 1,
+                reconnect: None,
+                ..
+            }
+        ));
+        let timeline = VerificationTimeline {
+            round: 1,
+            panel_shown: true,
+            web_passed_at_ms: Some(9300),
+            panel_closed_at_ms: Some(9570),
+            connection_ready_at_ms: None,
+        };
+        coordinator.defer_connection(PendingForumConnection {
+            timeline,
+            target: crate::forum_recovery::ForumReadTarget::latest(),
+        });
+        coordinator.finish_flight(1, false, true, Manual, start + Duration::from_secs(16));
+
+        for seconds in [19, 30, 40] {
+            let now = start + Duration::from_secs(seconds);
+            for presentation in [Silent, Proactive, Blocking] {
+                assert!(matches!(
+                    coordinator.join_or_start_with_context(presentation, now, false, true, ""),
+                    VerifyJoin::AwaitingConnection { round: 1 }
+                ));
+            }
+            let VerifyJoin::Leader {
+                reconnect: Some(resumed),
+                round: 1,
+                ..
+            } = coordinator.join_or_start(Manual, now, false)
+            else {
+                panic!("retry should resume round 1")
+            };
+            assert_eq!(resumed.timeline.web_passed_at_ms, Some(9300));
+            assert_eq!(resumed.timeline.panel_closed_at_ms, Some(9570));
+            assert!(resumed.timeline.connection_ready_at_ms.is_none());
+            assert_eq!(resumed.target.label(), "feed");
+            let VerifyJoin::Follower { round: 1, rx } =
+                coordinator.join_or_start(Manual, now, false)
+            else {
+                panic!("expected one open window")
+            };
+            assert!(!coordinator.finish_pending_connection(1, now));
+            let passed = seconds == 40;
+            let outcome = coordinator.finish_flight(1, passed, !passed, Manual, now);
+            assert_eq!(outcome.passed, passed);
+            assert_eq!(rx.borrow().unwrap().passed, passed);
+            let health = coordinator.snapshot(now);
+            assert_eq!(health.consecutive_failures, 0);
+            assert_eq!(health.cooldown_remain_ms, 0);
+        }
+        let now = start + Duration::from_secs(41);
+        assert!(coordinator.pending_connection().is_none());
+        assert!(matches!(
+            coordinator.join_or_start(Blocking, now, false),
+            VerifyJoin::RecentPass { round: 1 }
+        ));
+        assert!(matches!(
+            coordinator.join_or_start(Manual, now, false),
+            VerifyJoin::Leader {
+                round: 2,
+                reconnect: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn pending_forum_connection_completes_once_or_is_discarded_on_account_change() {
+        let now = Instant::now();
+        let mut coordinator = VerifyCoordinator::default();
+        for round in 1..=2 {
+            let _ = coordinator.join_or_start(VerifyPresentation::Manual, now, false);
+            coordinator.defer_connection(PendingForumConnection {
+                timeline: VerificationTimeline {
+                    round,
+                    ..Default::default()
+                },
+                target: crate::forum_recovery::ForumReadTarget::latest(),
+            });
+            coordinator.finish_flight(round, false, true, VerifyPresentation::Manual, now);
+            coordinator.note_healthy_response(false, false);
+            assert_eq!(coordinator.pending_connection().unwrap().round, round);
+            if round == 1 {
+                assert!(!coordinator.finish_pending_connection(2, now));
+                assert!(coordinator.finish_pending_connection(1, now));
+                assert_eq!(coordinator.last_passed_round(), 1);
+            } else {
+                coordinator.reset_on_session_change();
+            }
+            assert!(!coordinator.finish_pending_connection(round, now));
+            assert!(coordinator.pending_connection().is_none());
+        }
+    }
+
+    #[test]
     fn verify_coordinator_coalesces_escalates_and_deduplicates_round_failures() {
         let t0 = Instant::now();
         let mut coord = VerifyCoordinator::default();
@@ -1733,6 +1896,7 @@ mod tests {
                 round,
                 presentation,
                 escalate_notify,
+                ..
             } => (round, presentation, escalate_notify),
             _ => panic!("expected leader"),
         };
@@ -1958,7 +2122,7 @@ mod tests {
         assert!(VerifyPresentation::Manual.allows_panel_ui());
 
         let (r1, pres1, _) = match coord.join_or_start(VerifyPresentation::Silent, t0, false) {
-            VerifyJoin::Leader { round, presentation, escalate_notify } => (round, presentation, escalate_notify),
+            VerifyJoin::Leader { round, presentation, escalate_notify, .. } => (round, presentation, escalate_notify),
             _ => panic!("expected leader"),
         };
         let _ = coord.join_or_start(VerifyPresentation::Pill, t0 + Duration::from_millis(20), false);

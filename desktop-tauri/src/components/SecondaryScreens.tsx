@@ -107,11 +107,11 @@ import {
   searchCommunity,
   searchTopicsForLinkPicker,
   sendPrivateMessage,
-  SiteError,
   toggleFollowUser,
   updateUserProfileInfo,
   uploadMediaToSite,
 } from "../lib/api";
+import { forumRecoveryAction } from "../lib/verificationStatus";
 import {
   buildUploadPlaceholder,
   extractSyncClipboardFiles,
@@ -1862,6 +1862,7 @@ export const MessagesView: React.FC<{
     return () => clearTimeout(timer);
   }, [pmActionNotice]);
 
+  const messageRecoveryAction = forumRecoveryAction(loadError);
   const msgRetrySecs = useRateLimitAutoRecovery(loadError, () => {
     if (subTab === "PM") void loadPms(pmBox);
     else if (subTab === "NOTIFICATIONS") void loadNotifications(true);
@@ -1950,7 +1951,6 @@ export const MessagesView: React.FC<{
                       onUnreadCleared();
                     } catch (err) {
                       setPmActionNotice(err instanceof Error ? err.message : "未能将通知标为已读");
-                      if (err instanceof SiteError && err.isVerification) onTriggerVerify?.();
                     }
                   }}
                   title="全部标为已读"
@@ -2594,9 +2594,6 @@ export const MessagesView: React.FC<{
                       if (tid > 0) onOpenNotificationTopic(tid, pmTitle, 1);
                       else setPmActionNotice("私信已提交审核");
                     } catch (err: any) {
-                      if (err instanceof SiteError && err.isVerification && onTriggerVerify) {
-                        onTriggerVerify();
-                      }
                       setPmFeedback(err?.message || "发送失败，内容已保留");
                     } finally {
                       setPmSending(false);
@@ -2654,7 +2651,7 @@ export const MessagesView: React.FC<{
               <button
                 type="button"
                 onClick={() => {
-                  if (loadError.includes("验证") && onTriggerVerify) {
+                  if (messageRecoveryAction && onTriggerVerify) {
                     onTriggerVerify();
                   } else {
                     markManualRetryIntent();
@@ -2668,7 +2665,7 @@ export const MessagesView: React.FC<{
                   color: "var(--publish-btn-fg)",
                 }}
               >
-                {loadError.includes("验证") ? "去验证" : "重试"}
+                {messageRecoveryAction ?? "重试"}
               </button>
             </div>
           ) : subTab === "PM" ? (
@@ -2750,15 +2747,7 @@ export const MessagesView: React.FC<{
                               );
                             } catch (err: any) {
                               setPmList(prevList);
-                              if (
-                                err instanceof SiteError &&
-                                err.isVerification &&
-                                onTriggerVerify
-                              ) {
-                                onTriggerVerify();
-                              } else {
-                                setPmActionNotice(err?.message || "操作未成功");
-                              }
+                              setPmActionNotice(err?.message || "操作未成功");
                             }
                           }}
                           className="lindo-interactive mr-2.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100"
@@ -3552,10 +3541,12 @@ export function formatSiteVerifyStatusLabel(params: {
   cfAttentionNeeded?: boolean;
   verifyActive?: boolean;
   connectionRecovering?: boolean;
+  connectionPending?: boolean;
   lastVerifiedAtMs?: number | null;
   nowMs?: number;
 }): string {
-  if (params.connectionRecovering) return "网页已通过，正在恢复连接…";
+  if (params.connectionRecovering) return "网页验证已通过，正在读取论坛数据…";
+  if (params.connectionPending) return "连接未恢复 · 重试连接";
   if (params.verifyActive) return "验证中…";
   if (params.cfAttentionNeeded) return "待验证";
   if (params.lastVerifiedAtMs != null) {
@@ -3603,6 +3594,7 @@ export const ProfileSettingsView: React.FC<{
   cfAttentionNeeded?: boolean;
   verifyActive?: boolean;
   connectionRecovering?: boolean;
+  connectionPending?: boolean;
   lastVerifiedAtMs?: number | null;
   onTriggerVerify?: () => void;
 }> = ({
@@ -3638,6 +3630,7 @@ export const ProfileSettingsView: React.FC<{
   cfAttentionNeeded = false,
   verifyActive = false,
   connectionRecovering = false,
+  connectionPending = false,
   lastVerifiedAtMs = null,
   onTriggerVerify,
 }) => {
@@ -4438,6 +4431,7 @@ export const ProfileSettingsView: React.FC<{
                 cfAttentionNeeded,
                 verifyActive,
                 connectionRecovering,
+                connectionPending,
                 lastVerifiedAtMs,
                 nowMs: verifyStatusNowMs,
               })}

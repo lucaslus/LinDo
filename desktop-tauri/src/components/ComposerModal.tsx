@@ -39,6 +39,7 @@ import {
   updateTopicMetadata,
   uploadMediaToSite,
 } from "../lib/api";
+import { forumRecoveryAction } from "../lib/verificationStatus";
 import {
   buildUploadPlaceholder,
   extractSyncClipboardFiles,
@@ -1142,6 +1143,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
             rawRef.current = next;
             return next;
           });
+          setSubmitNeedsVerification(err instanceof SiteError && err.retryReadAfterVerification);
           if (err instanceof SiteError && err.isVerification) {
             setSubmitError("安全确认未完成，图片未上传");
           } else {
@@ -1308,7 +1310,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
         onPublished({ topicId: request.topicId, post: updated });
       }
     } catch (err: any) {
-      setSubmitNeedsVerification(err instanceof SiteError && err.isVerification);
+      setSubmitNeedsVerification(err instanceof SiteError && err.retryReadAfterVerification);
       setSubmitError(err?.message || "提交未完成，编辑内容已保留");
     } finally {
       setSubmitting(false);
@@ -1458,7 +1460,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
             }
           }}
           title="上下拖拽调节回复区高度（双击恢复默认）"
-          className="group absolute inset-x-0 -top-[3px] z-30 flex h-[7px] items-center justify-center"
+          className="group absolute inset-x-0 -top-[3px] z-30 flex h-[7px] cursor-row-resize items-center justify-center"
         >
           <div
             className="h-[1px] w-full opacity-0 transition-opacity group-hover:opacity-100"
@@ -2103,7 +2105,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                     <button
                       type="button"
                       onClick={() => {
-                        if (tagsError.includes("验证")) onTriggerVerify();
+                        if (forumRecoveryAction(tagsError)) onTriggerVerify();
                         else setTagsRetryNonce((n) => n + 1);
                       }}
                       className="inline-flex items-center gap-1 rounded-full px-3.5 py-1 text-[12px] font-semibold cursor-pointer"
@@ -2113,7 +2115,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                       }}
                     >
                       <LinDoIcons.Refresh size={12.5} />
-                      <span>{tagsError.includes("验证") ? "去验证" : "重试"}</span>
+                      <span>{forumRecoveryAction(tagsError) ?? "重试"}</span>
                     </button>
                   </div>
                 ) : (
@@ -3458,7 +3460,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
         >
           {submitError}
           {rawReadFailed && <button type="button" className="ml-3 underline" onClick={() => setRawRetry((n) => n + 1)}>重新读取原帖</button>}
-          {submitNeedsVerification && <button type="button" className="ml-3 underline" onClick={onTriggerVerify}>去验证</button>}
+          {submitNeedsVerification && <button type="button" className="ml-3 underline" onClick={onTriggerVerify}>{forumRecoveryAction(submitError) ?? "去验证"}</button>}
         </div>
       )}
 

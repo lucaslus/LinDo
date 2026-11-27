@@ -53,6 +53,7 @@ import {
   setUnreadBadgeInRust,
   siteVerify,
   SiteError,
+  type InteractiveVerifyOptions,
   startBrowserOneClickAuth,
   switchSavedAccount,
   triggerInteractiveVerifyOnce,
@@ -76,7 +77,7 @@ import {
   resolvePendingFeedApply,
 } from "./lib/pendingFeedState";
 import { DESKTOP_APP_VERSION, diagLog, installGlobalDiagHooks } from "./lib/diagnostics";
-import { installSmoothWheelAndScrollOptimizer } from "./lib/smoothWheel";
+import { measureDisplayRefresh, observeScrollActivity } from "./lib/scrollActivity";
 import { discourseMessageBus } from "./lib/messageBus";
 import { SideRail } from "./components/SideRail";
 import { HomeFeedPane } from "./components/HomeFeedPane";
@@ -294,7 +295,13 @@ export const App: React.FC = () => {
   const [verification, dispatchVerification] = useReducer(verificationStatus, initialVerificationStatus);
   const cfAttentionNeeded = verification.attentionNeeded;
   const connectionRecovering = verification.stage === "recovering";
+  const connectionPending = verification.stage === "unavailable";
   const verifyActive = verification.pillVisible || verification.manualBusy;
+  const pauseTimings = cfAttentionNeeded || verification.pillVisible || verification.stage === "panel" || connectionRecovering || connectionPending;
+  useEffect(() => {
+    if (pauseTimings) pauseAndDropPendingTimings();
+    else resumeTimingsAfterVerify();
+  }, [pauseTimings]);
   const [cfAttentionDismissed, setCfAttentionDismissed] = useState(false);
   const [lastVerifiedAtMs, setLastVerifiedAtMs] = useState<number | null>(null);
   const lastFeedSyncedAtRef = useRef<number>(Date.now());
@@ -368,6 +375,9 @@ export const App: React.FC = () => {
       setMsgDetail(null);
       setPendingFeed(createEmptyPendingFeedSnapshot());
       setComposerReq(null);
+      dispatchVerification({ type: "verified" });
+      setLastVerifiedAtMs(null);
+      setCfAttentionDismissed(false);
     }
     accountOwner.current = username;
     setPlatform(boot.platform);
@@ -429,7 +439,7 @@ export const App: React.FC = () => {
         lastFeedSyncedAtRef.current = Date.now();
       } catch (err: any) {
         if (reqGen !== feedGenerationRef.current) return;
-        verificationBlocked.current.feed = err instanceof SiteError && err.isVerification;
+        verificationBlocked.current.feed = err instanceof SiteError && err.retryReadAfterVerification;
         setFeedError(err?.message || "加载动态失败，请重试");
       } finally {
         if (reqGen === feedGenerationRef.current) {
@@ -782,7 +792,7 @@ export const App: React.FC = () => {
         if (isInPlace) {
           return { error: msg };
         }
-        verificationBlocked.current.reader = err instanceof SiteError && err.isVerification;
+        verificationBlocked.current.reader = err instanceof SiteError && err.retryReadAfterVerification;
         setReaderError(msg);
       } finally {
         if (seq === topicReqSeqRef.current) {
@@ -977,7 +987,7 @@ export const App: React.FC = () => {
         if (isInPlace) {
           return { error: msg };
         }
-        verificationBlocked.current.message = err instanceof SiteError && err.isVerification;
+        verificationBlocked.current.message = err instanceof SiteError && err.retryReadAfterVerification;
         setMsgReaderError(msg);
       } finally {
         if (seq === msgReqSeqRef.current) {
@@ -1243,15 +1253,8 @@ export const App: React.FC = () => {
   // Initial bootstrap & Tauri event listeners (await listener registration BEFORE syncFromRustState so cold-start deep links never race)
   useEffect(() => {
     installGlobalDiagHooks(DESKTOP_APP_VERSION);
-    installSmoothWheelAndScrollOptimizer();
-
-    const onGlobalDragStart = (ev: DragEvent) => {
-      const target = ev.target as HTMLElement | null;
-      if (!target || !target.closest("input, textarea, [contenteditable='true']")) {
-        ev.preventDefault();
-      }
-    };
-    window.addEventListener("dragstart", onGlobalDragStart, true);
+    const stopObservingScroll = observeScrollActivity();
+    const stopMeasuringRefresh = measureDisplayRefresh();
 
     let cancelled = false;
     const unsubs: Array<() => void> = [];
@@ -1291,12 +1294,13 @@ export const App: React.FC = () => {
             }
           });
         }),
-        listen("lindo://verified", () => {
+        listen<{ refreshBlocked?: boolean } | null>("lindo://verified", ({ payload }) => {
           dispatchVerification({ type: "verified" });
           setCfAttentionDismissed(false);
           setLastVerifiedAtMs(Date.now());
           resumeTimingsAfterVerify();
-          void recoverVerifiedView.current().then(async () => {
+          const refreshView = payload?.refreshBlocked === false ? Promise.resolve() : recoverVerifiedView.current();
+          void refreshView.then(async () => {
             await drainPendingMarkReads();
             await flushTopicTimingsNow();
           }).catch(() => {});
@@ -1329,23 +1333,11 @@ export const App: React.FC = () => {
         listen<boolean>("lindo://cf-attention-needed", (ev) => {
           const needed = Boolean(ev.payload);
           dispatchVerification({ type: "attention", needed });
-          if (needed) {
-            setCfAttentionDismissed(false);
-            pauseAndDropPendingTimings();
-          } else {
-            resumeTimingsAfterVerify();
-          }
+          if (needed) setCfAttentionDismissed(false);
         }),
         listen<VerifyPillEvent>("lindo://verify-pill", ({ payload }) => {
           dispatchVerification({ type: "progress", event: payload });
-          if (payload.stage === "recovering") {
-            setLastVerifiedAtMs(Date.now());
-          } else if (payload.visible) {
-            pauseAndDropPendingTimings();
-          } else {
-            resumeTimingsAfterVerify();
-            if (payload.stage === "unavailable") setGlobalNotice("网页验证已通过，连接暂未恢复");
-          }
+          if (payload.stage === "unavailable") setGlobalNotice("网页验证已通过，论坛连接尚未恢复");
         }),
         listen<string>("lindo://auth-notice", (ev) => {
           const msg = String(ev.payload || "").trim();
@@ -1392,7 +1384,8 @@ export const App: React.FC = () => {
 
     return () => {
       cancelled = true;
-      window.removeEventListener("dragstart", onGlobalDragStart, true);
+      stopObservingScroll();
+      stopMeasuringRefresh();
       if (browserAuthWatchdogRef.current) {
         clearTimeout(browserAuthWatchdogRef.current);
         browserAuthWatchdogRef.current = null;
@@ -1895,17 +1888,17 @@ export const App: React.FC = () => {
   );
 
   const handleTriggerVerify = useCallback(
-    async (opts?: { forceRefresh?: boolean }) => {
+    async (opts?: InteractiveVerifyOptions) => {
       if (connectionRecovering) return;
       const forceRefresh = Boolean(opts?.forceRefresh);
       dispatchVerification({ type: "manual", busy: true });
       try {
-        const ok = await triggerInteractiveVerifyOnce({ manual: true, forceRefresh });
+        const ok = await triggerInteractiveVerifyOnce({ manual: true, forceRefresh, source: opts?.source });
         if (ok) {
           dispatchVerification({ type: "verified" });
           setCfAttentionDismissed(false);
           setLastVerifiedAtMs(Date.now());
-          setGlobalNotice(forceRefresh ? "安全验证已刷新" : "连接验证正常");
+          setGlobalNotice(connectionPending ? "论坛连接已恢复" : forceRefresh ? "安全验证已刷新" : "连接验证正常");
         }
       } catch {
         setGlobalNotice("连接未完成，请重试");
@@ -1913,18 +1906,18 @@ export const App: React.FC = () => {
         dispatchVerification({ type: "manual", busy: false });
       }
     },
-    [connectionRecovering]
+    [connectionRecovering, connectionPending]
   );
 
   // Entry A: Reactive verify (SideRail shield, banners, error cards) -> NEVER force-purges healthy ticket
   const handleReactiveVerify = useCallback(() => {
-    void handleTriggerVerify({ forceRefresh: false });
+    void handleTriggerVerify({ forceRefresh: false, source: "page" });
   }, [handleTriggerVerify]);
 
   // Settings resumes a pending challenge. An idle explicit check requests a fresh verification.
   const handleSettingsVerify = useCallback(() => {
-    void handleTriggerVerify({ forceRefresh: !cfAttentionNeeded });
-  }, [cfAttentionNeeded, handleTriggerVerify]);
+    void handleTriggerVerify({ forceRefresh: !cfAttentionNeeded && !connectionPending, source: "settings" });
+  }, [cfAttentionNeeded, connectionPending, handleTriggerVerify]);
 
   const handleLoadMoreTopics = useCallback(async () => {
     if (loadingMoreTopics || !hasMoreTopics || feedLoading) return;
@@ -1951,7 +1944,7 @@ export const App: React.FC = () => {
       setHasMoreTopics(res.hasMore);
     } catch (err: any) {
       if (generation !== feedGenerationRef.current) return;
-      verificationBlocked.current.more = err instanceof SiteError && err.isVerification;
+      verificationBlocked.current.more = err instanceof SiteError && err.retryReadAfterVerification;
       setLoadMoreError(err?.message || "加载更多失败");
     } finally {
       if (generation === feedGenerationRef.current) setLoadingMoreTopics(false);
@@ -2024,23 +2017,12 @@ export const App: React.FC = () => {
   // 120fps DOM-direct resizable split divider drag (ZERO React re-renders during mousemove!)
   const splitContainerRef = useRef<HTMLDivElement | null>(null);
   const leftPaneRef = useRef<HTMLDivElement | null>(null);
-  const splitHandlePillRef = useRef<HTMLDivElement | null>(null);
-  const updateSplitHandleY = (clientY: number) => {
-    const container = splitContainerRef.current;
-    const pill = splitHandlePillRef.current;
-    if (!container || !pill) return;
-    const rect = container.getBoundingClientRect();
-    if (rect.height <= 0) return;
-    const clampedY = Math.max(72, Math.min(rect.height - 72, clientY - rect.top));
-    pill.style.top = `${Math.round(clampedY)}px`;
-  };
   const startSplitDrag = (e: React.MouseEvent) => {
     if (e.button !== 0) return;
     e.preventDefault();
     const container = splitContainerRef.current;
     const leftEl = leftPaneRef.current;
     if (!container || !leftEl) return;
-    updateSplitHandleY(e.clientY);
     const startX = e.clientX;
     const rect = container.getBoundingClientRect();
     let latestFraction = preferences.splitFraction;
@@ -2052,7 +2034,6 @@ export const App: React.FC = () => {
         onUp();
         return;
       }
-      updateSplitHandleY(ev.clientY);
       if (!engaged) {
         if (Math.abs(ev.clientX - startX) < 3) return;
         engaged = true;
@@ -2254,9 +2235,10 @@ export const App: React.FC = () => {
             showFeedToggle={isWideLayout && (currentTab === "HOME" || currentTab === "MESSAGES")}
             feedCollapsed={feedCollapsed}
             cfAttentionNeeded={cfAttentionNeeded && !cfAttentionDismissed}
+            connectionPending={connectionPending}
             verifyActive={verifyActive}
             onToggleFeedCollapse={toggleFeedCollapse}
-            onTriggerVerify={handleReactiveVerify}
+            onTriggerVerify={() => { void handleTriggerVerify({ source: "sidebar" }); }}
             onSelectTab={(tab) => {
               if (tab === currentTab) {
                 setNarrowShowingReader(false);
@@ -2374,6 +2356,7 @@ export const App: React.FC = () => {
                 }}
                 cfAttentionNeeded={cfAttentionNeeded}
                 connectionRecovering={connectionRecovering}
+                connectionPending={connectionPending}
                 verifyActive={verifyActive}
                 lastVerifiedAtMs={lastVerifiedAtMs}
                 onTriggerVerify={handleSettingsVerify}
@@ -2503,7 +2486,7 @@ export const App: React.FC = () => {
                   </div>
                 </div>
 
-                {/* 分栏可拖拽分隔线与悬浮拖动按钮（跨缝 12px 热区、鼠标悬停显示并跟随 Y 轴、双击恢复默认比例） */}
+                {/* 分栏拖动热区，双击恢复默认比例 */}
                 {!feedCollapsed && (
                   <div className="relative z-30 h-full w-0 shrink-0 select-none">
                     <div
@@ -2511,13 +2494,11 @@ export const App: React.FC = () => {
                       aria-orientation="vertical"
                       aria-label="左右拖动调整栏宽，双击恢复默认比例"
                       title="左右拖动调整栏宽 · 双击恢复默认"
-                      onMouseEnter={(e) => updateSplitHandleY(e.clientY)}
-                      onMouseMove={(e) => updateSplitHandleY(e.clientY)}
                       onMouseDown={startSplitDrag}
                       onDoubleClick={() =>
                         updatePreferences({ ...preferences, splitFraction: 0.42 })
                       }
-                      className="group absolute inset-y-0 -left-[6px] w-[12px] cursor-pointer"
+                      className="group absolute inset-y-0 -left-[6px] w-[12px] cursor-col-resize"
                     >
                       <div
                         className={`pointer-events-none mx-auto h-full w-[2px] transition-opacity duration-150 ${
@@ -2528,7 +2509,6 @@ export const App: React.FC = () => {
                         style={{ backgroundColor: "var(--brand-gold)" }}
                       />
                       <div
-                        ref={splitHandlePillRef}
                         className={`absolute left-1/2 -translate-x-1/2 -translate-y-1/2 flex h-[38px] w-[18px] items-center justify-center rounded-full shadow-md transition-[opacity,border-color,background-color] duration-150 ${
                           isDraggingSplit
                             ? "pointer-events-auto opacity-100"
@@ -3139,7 +3119,7 @@ export const App: React.FC = () => {
             onMouseDown={(e) => e.preventDefault()}
             onClick={() => {
               if (verification.pillVisible) dispatchVerification({ type: "hidePill" });
-              handleReactiveVerify();
+              void handleTriggerVerify({ source: "pill" });
             }}
             title="点击展开安全确认面板"
             className="lindo-interactive group fixed bottom-5 right-5 z-[45] flex items-center gap-2 rounded-full px-3.5 py-1.5 shadow-lg transition-[background-color,color,border-color,opacity] duration-150 cursor-pointer"

@@ -1,3 +1,10 @@
+export const FORUM_CONNECTION_PENDING = "论坛连接尚未恢复";
+
+export function forumRecoveryAction(message: string | null) {
+  if (message === FORUM_CONNECTION_PENDING) return "重试连接";
+  return message && /验证|challenge/.test(message) ? "去验证" : null;
+}
+
 export type VerifyPillEvent = {
   round: number;
   visible: boolean;
@@ -38,7 +45,7 @@ export function verificationStatus(state: VerificationStatus, action: Action): V
       return { ...state, round, stage, pillVisible: visible };
     }
     case "attention":
-      if (state.stage === "recovering") return state;
+      if (state.stage === "recovering" || state.stage === "unavailable") return state;
       return { ...state, attentionNeeded: action.needed };
     case "manual":
       return { ...state, manualBusy: action.busy };

@@ -423,7 +423,6 @@ describe("SideRail shield indicator, Settings manual verify, and zero-CLS image 
     expect(css).toContain(".lindo-cooked img.lindo-img-error");
     expect(reader).toContain("lindo-reader-scroll");
 
-    expect(app).toContain('setGlobalNotice(forceRefresh ? "安全验证已刷新" : "连接验证正常")');
     expect(app).toContain("(!inMainApp || !isWideLayout)");
   });
 

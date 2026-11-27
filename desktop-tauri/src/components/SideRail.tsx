@@ -12,6 +12,7 @@ interface SideRailProps {
   showFeedToggle?: boolean;
   feedCollapsed?: boolean;
   cfAttentionNeeded?: boolean;
+  connectionPending?: boolean;
   verifyActive?: boolean;
   onSelectTab: (tab: MainTab) => void;
   onPublishClick: () => void;
@@ -29,6 +30,7 @@ export const SideRail: React.FC<SideRailProps> = ({
   showFeedToggle = false,
   feedCollapsed = false,
   cfAttentionNeeded = false,
+  connectionPending = false,
   verifyActive = false,
   onSelectTab,
   onPublishClick,
@@ -217,14 +219,14 @@ export const SideRail: React.FC<SideRailProps> = ({
             {isDark ? <LinDoIcons.Sun size={18} /> : <LinDoIcons.Moon size={18} />}
           </button>
 
-          {(cfAttentionNeeded || verifyActive) && onTriggerVerify && (
+          {(cfAttentionNeeded || verifyActive || connectionPending) && onTriggerVerify && (
             <button
               type="button"
-              data-testid="siderail-shield-verify"
+              data-testid={connectionPending ? "siderail-reconnect" : "siderail-shield-verify"}
               onMouseDown={(e) => e.preventDefault()}
               onClick={onTriggerVerify}
-              title={verifyActive ? "安全校验中…" : "需要站点安全确认 · 点击验证"}
-              aria-label={verifyActive ? "安全校验中" : "需要站点安全确认，点击验证"}
+              title={connectionPending ? "重试论坛连接" : verifyActive ? "安全校验中…" : "需要站点安全确认 · 点击验证"}
+              aria-label={connectionPending ? "重试论坛连接" : verifyActive ? "安全校验中" : "需要站点安全确认，点击验证"}
               className="lindo-no-drag lindo-interactive relative mt-1.5 flex h-9 w-9 items-center justify-center rounded-full cursor-pointer select-none"
               style={{
                 color: "var(--brand-gold)",
@@ -232,17 +234,17 @@ export const SideRail: React.FC<SideRailProps> = ({
                 border: "0.5px solid color-mix(in srgb, var(--brand-gold) 34%, transparent)",
               }}
             >
-              <LinDoIcons.ShieldCheck
+              {connectionPending ? <LinDoIcons.Refresh size={17.5} /> : <LinDoIcons.ShieldCheck
                 size={17.5}
                 className={verifyActive ? "animate-pulse" : undefined}
-              />
-              <span
+              />}
+              {!connectionPending && <span
                 className="pointer-events-none absolute top-[5px] right-[5px] h-[6.5px] w-[6.5px] rounded-full animate-pulse"
                 style={{
                   backgroundColor: "var(--brand-gold)",
                   boxShadow: "0 0 6px color-mix(in srgb, var(--brand-gold) 65%, transparent)",
                 }}
-              />
+              />}
             </button>
           )}
         </div>

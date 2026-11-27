@@ -91,7 +91,6 @@ body,
   font-synthesis: style;
   font-synthesis-weight: none;
   font-kerning: normal;
-  cursor: default;
   user-select: none;
   -webkit-user-select: none;
 }
@@ -102,15 +101,13 @@ a {
   -webkit-user-drag: none;
 }
 
-/* Global strict two-state cursor policy: default arrow everywhere non-clickable (including selectable text & inputs),
-   and pointing hand strictly on interactive targets — zero I-beam, zoom-in, or resize double-arrow cursors. */
 .lindo-selectable,
 .lindo-cooked,
 input,
 textarea {
   user-select: text;
   -webkit-user-select: text;
-  cursor: default;
+  cursor: auto;
 }
 
 a[href],

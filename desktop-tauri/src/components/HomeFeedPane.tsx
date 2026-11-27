@@ -5,6 +5,7 @@ import {
   markManualRetryIntent,
   useRateLimitAutoRecovery,
 } from "../lib/api";
+import { forumRecoveryAction } from "../lib/verificationStatus";
 import {
   formatCompactCount,
   formatRelativeTime,
@@ -498,8 +499,8 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
     }
   };
 
-  const isVerifyError = (msg: string | null) =>
-    Boolean(msg && (msg.includes("验证") || msg.includes("challenge")));
+  const feedRecoveryAction = forumRecoveryAction(errorMessage);
+  const moreRecoveryAction = forumRecoveryAction(loadMoreError);
 
   const feedRetrySecs = useRateLimitAutoRecovery(
     topics.length === 0 ? errorMessage : null,
@@ -933,7 +934,7 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
               <button
                 type="button"
                 onClick={() => {
-                  if (isVerifyError(errorMessage)) {
+                  if (feedRecoveryAction) {
                     onTriggerVerify();
                   } else if (!isAuthorized && errorMessage.includes("登录")) {
                     onOpenAuth();
@@ -948,11 +949,7 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                   color: "var(--publish-btn-fg)",
                 }}
               >
-                {isVerifyError(errorMessage)
-                  ? "去验证"
-                  : !isAuthorized && errorMessage.includes("登录")
-                    ? "去登录"
-                    : "重试"}
+                {feedRecoveryAction ?? (!isAuthorized && errorMessage.includes("登录") ? "去登录" : "重试")}
               </button>
             </div>
           ) : (
@@ -976,7 +973,7 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                   <button
                     type="button"
                     onClick={() => {
-                      if (isVerifyError(errorMessage)) {
+                      if (feedRecoveryAction) {
                         onTriggerVerify();
                       } else if (!isAuthorized && errorMessage.includes("登录")) {
                         onOpenAuth();
@@ -991,11 +988,7 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                       color: "var(--publish-btn-fg)",
                     }}
                   >
-                    {isVerifyError(errorMessage)
-                      ? "去验证"
-                      : !isAuthorized && errorMessage.includes("登录")
-                        ? "去登录"
-                        : "重试"}
+                    {feedRecoveryAction ?? (!isAuthorized && errorMessage.includes("登录") ? "去登录" : "重试")}
                   </button>
                 </div>
               )}
@@ -1189,13 +1182,13 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                 {loadMoreError ? (
                   <button
                     type="button"
-                    onClick={isVerifyError(loadMoreError) ? onTriggerVerify : onLoadMore}
+                    onClick={moreRecoveryAction ? onTriggerVerify : onLoadMore}
                     className="lindo-interactive flex items-center gap-2 rounded-full px-3.5 py-1.5 text-[12px]"
                   >
                     <MascotExpression expression="surprised" sizePx={22} />
                     <span style={{ color: "var(--ink-secondary)" }}>{loadMoreError}</span>
                     <span className="font-semibold" style={{ color: "var(--active-chip-text)" }}>
-                      {isVerifyError(loadMoreError) ? "去验证" : "重试"}
+                      {moreRecoveryAction ?? "重试"}
                     </span>
                   </button>
                 ) : isLoadingMore ? (

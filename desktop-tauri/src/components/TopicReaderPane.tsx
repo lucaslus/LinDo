@@ -45,6 +45,7 @@ import {
   useRateLimitAutoRecovery,
   voteInPoll,
 } from "../lib/api";
+import { forumRecoveryAction } from "../lib/verificationStatus";
 import {
   classifyExternalUrl,
   type ExternalUrlAssessment,
@@ -767,12 +768,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
         showTransientTailFeedback("已是最新回复");
       }
     } catch (err) {
-      if (err instanceof SiteError && err.isVerification) {
-        onTriggerVerify();
-        showTransientTailFeedback("需完成站点安全验证");
-      } else {
-        showTransientTailFeedback(err instanceof Error ? err.message : "刷新失败，请重试");
-      }
+      showTransientTailFeedback(err instanceof Error ? err.message : "刷新失败，请重试");
     } finally {
       setRefreshingTail(false);
     }
@@ -782,7 +778,6 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
     loadingMoreBottom,
     onAppendPosts,
     onRefresh,
-    onTriggerVerify,
     onUpdateDetail,
     onlyOpFilter,
     refreshingTail,
@@ -1711,6 +1706,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
     }
   };
 
+  const readerRecoveryAction = forumRecoveryAction(errorMessage);
   const readerRetrySecs = useRateLimitAutoRecovery(
     !detail || detail.posts.length === 0 ? errorMessage : null,
     onRefresh
@@ -2440,7 +2436,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
             <button
               type="button"
               onClick={() => {
-                if (errorMessage.includes("验证")) {
+                if (readerRecoveryAction) {
                   onTriggerVerify();
                 } else if (!isAuthorized && errorMessage.includes("登录")) {
                   onRequestGuestLogin(
@@ -2458,11 +2454,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                 color: "var(--publish-btn-fg)",
               }}
             >
-              {errorMessage.includes("验证")
-                ? "去验证"
-                : !isAuthorized && errorMessage.includes("登录")
-                  ? "去登录"
-                  : "重试"}
+              {readerRecoveryAction ?? (!isAuthorized && errorMessage.includes("登录") ? "去登录" : "重试")}
             </button>
           </div>
         ) : (

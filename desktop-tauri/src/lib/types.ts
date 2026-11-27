@@ -143,6 +143,7 @@ export interface DiagRuntimeSnapshot {
   mediaCooldownRemainMs: number;
   challenge429Streak: number;
   verifyRound?: number;
+  pendingConnectionRound?: number | null;
   verifyConsecutiveFailures?: number;
   verifyCooldownRemainMs?: number;
   verifyIneffectiveBreaker?: boolean;

@@ -45,6 +45,7 @@ import type {
 import { parseInternalTopicLink } from "./cooked";
 import { extractUsernameFromAvatarUrl } from "./palette";
 import { diagLog } from "./diagnostics";
+import { FORUM_CONNECTION_PENDING } from "./verificationStatus";
 import { clearForumMediaBlobCache } from "./forumMedia";
 import { registerCustomSiteEmojis } from "./markdownPreview";
 import {
@@ -54,6 +55,9 @@ import {
 } from "./screenTrack";
 
 export class SiteError extends Error {
+  get retryReadAfterVerification(): boolean {
+    return this.isVerification || this.message === FORUM_CONNECTION_PENDING;
+  }
   readonly isVerification: boolean;
   readonly isAuthRequired: boolean;
   readonly status: number;
@@ -363,6 +367,7 @@ export async function siteRequest(
       return res;
     } catch (err: any) {
       const ms = Math.round(performance.now() - t0);
+      if (err === FORUM_CONNECTION_PENDING) throw new SiteError(FORUM_CONNECTION_PENDING);
       if (!silent) {
         const errMsg = String(err?.message || err || "未知异常");
         diagLog(
@@ -374,7 +379,7 @@ export async function siteRequest(
           { method, path: diagPath, durationMs: ms, note: errMsg }
         );
       }
-      throw err;
+      throw typeof err === "string" ? new SiteError(err) : err;
     }
   })();
 
@@ -399,6 +404,7 @@ export function setApiDarkTheme(isDark: boolean): void {
 export interface InteractiveVerifyOptions {
   manual?: boolean;
   forceRefresh?: boolean;
+  source?: "settings" | "sidebar" | "page" | "pill";
 }
 
 export function triggerInteractiveVerifyOnce(
@@ -413,7 +419,8 @@ export function triggerInteractiveVerifyOnce(
     false,
     currentApiDarkTheme,
     manual,
-    forceRefresh
+    forceRefresh,
+    typeof manualOrOpts === "object" ? manualOrOpts.source : undefined
   ).finally(() => {
     inflightVerifyReplayPromise = null;
   });
@@ -424,7 +431,8 @@ export async function siteVerify(
   login: boolean,
   isDark: boolean,
   manual = true,
-  forceRefresh = false
+  forceRefresh = false,
+  source?: InteractiveVerifyOptions["source"]
 ): Promise<boolean> {
   const effectiveForceRefresh = Boolean(!login && manual && forceRefresh);
   diagLog(
@@ -434,8 +442,9 @@ export async function siteVerify(
     login
       ? "已打开内置登录窗口，等待完成登录"
       : effectiveForceRefresh
-        ? "已打开站点安全验证窗口，刷新验证票据"
-        : "已打开站点安全验证窗口，等待完成验证"
+        ? "已请求重新验证"
+        : "已请求检查站点连接",
+    source ? `source=${source}` : undefined
   );
   const ok = await invoke<boolean>("site_verify", {
     login,
@@ -630,7 +639,10 @@ export async function uploadMediaToSite(
 ): Promise<{ shortUrl: string; url: string; width: number; height: number; originalFilename: string }> {
   const t0 = performance.now();
   const approxBytes = Math.floor((dataBase64.length * 3) / 4);
-  const res = await invoke<SiteHttpResponse>("site_upload", { filename, mime, dataBase64 });
+  const res = await invoke<SiteHttpResponse>("site_upload", { filename, mime, dataBase64 }).catch(err => {
+    if (err === FORUM_CONNECTION_PENDING) throw new SiteError(FORUM_CONNECTION_PENDING);
+    throw typeof err === "string" ? new SiteError(err) : err;
+  });
   const durationMs = Math.round(performance.now() - t0);
   if (res.isChallenge) {
     diagLog(
