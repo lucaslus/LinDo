@@ -623,20 +623,39 @@ class BackgroundChallengeTracker(
     private var readWaves: Int = 0
     private var lastReadWaveAtMs: Long = 0L
     private var consecutiveWriteHits: Int = 0
+    private var telemetryHitsWithoutCf: Int = 0
     private var lastHitAtMs: Long = 0L
 
     @Synchronized
     fun onBackgroundChallenge(
         isWrite: Boolean,
         hasHealthyClearance: Boolean,
-        nowMs: Long = System.currentTimeMillis()
+        nowMs: Long = System.currentTimeMillis(),
+        isTelemetryPoll: Boolean = false
     ): BackgroundChallengeDecision {
         if (lastHitAtMs > 0L && (nowMs - lastHitAtMs) > staleResetWindowMs) {
             readWaves = 0
             lastReadWaveAtMs = 0L
             consecutiveWriteHits = 0
+            telemetryHitsWithoutCf = 0
         }
         lastHitAtMs = nowMs
+        // Telemetry polling (MessageBus / topic timings) fires automatically on a timer without user intent:
+        // 1) Never poison an incumbent cf_clearance or inflate readWaves / consecutiveWriteHits;
+        // 2) When cf_clearance is absent, trigger at most ONE prewarm per window (prevents 90s prewarm storms -> 429).
+        if (isTelemetryPoll) {
+            if (!hasHealthyClearance) {
+                telemetryHitsWithoutCf += 1
+            } else {
+                telemetryHitsWithoutCf = 0
+            }
+            return BackgroundChallengeDecision(
+                invalidateClearance = false,
+                requestPrewarm = !hasHealthyClearance && telemetryHitsWithoutCf == 1,
+                streak = readWaves + consecutiveWriteHits + telemetryHitsWithoutCf,
+                writeStreak = consecutiveWriteHits
+            )
+        }
         if (isWrite) {
             consecutiveWriteHits += 1
         } else if (lastReadWaveAtMs <= 0L || (nowMs - lastReadWaveAtMs) >= readWaveWindowMs) {
@@ -662,6 +681,7 @@ class BackgroundChallengeTracker(
 
     @Synchronized
     fun noteHealthyResponse(isWrite: Boolean) {
+        telemetryHitsWithoutCf = 0
         if (isWrite) {
             readWaves = 0
             lastReadWaveAtMs = 0L
@@ -684,6 +704,7 @@ class BackgroundChallengeTracker(
         readWaves = 0
         lastReadWaveAtMs = 0L
         consecutiveWriteHits = 0
+        telemetryHitsWithoutCf = 0
         lastHitAtMs = 0L
     }
 }
@@ -1010,6 +1031,33 @@ object ManualForceRefreshPolicy {
         }
         return kept.joinToString("; ")
     }
+
+    /**
+     * Builds an authoritative cookie-deletion `Set-Cookie` string from a Chromium `CookieManagerCompat.getCookieInfo`
+     * attribute tail by stripping any original `Expires` / `Max-Age` attributes BEFORE appending the epoch expiry,
+     * ensuring Chromium `ParsedCookie` (which lets later duplicate attributes win) never keeps a stale cookie alive.
+     */
+    fun buildExpiredSetCookieSpec(cookieName: String, rawAttrs: String): String {
+        val cleanName = cookieName.trim()
+        val preservedAttrs = rawAttrs
+            .split(';')
+            .map { it.trim() }
+            .filter { segment ->
+                if (segment.isEmpty()) return@filter false
+                val attrName = segment.substringBefore('=').trim().lowercase()
+                attrName != "expires" && attrName != "max-age"
+            }
+        val hasPath = preservedAttrs.any { it.substringBefore('=').trim().equals("path", ignoreCase = true) }
+        val hasSecure = preservedAttrs.any { it.equals("secure", ignoreCase = true) }
+        val normalizedAttrs = buildList {
+            addAll(preservedAttrs)
+            if (!hasPath) add("Path=/")
+            if (!hasSecure) add("Secure")
+            add("Max-Age=0")
+            add("Expires=Thu, 01 Jan 1970 00:00:00 GMT")
+        }
+        return "$cleanName=; ${normalizedAttrs.joinToString("; ")}"
+    }
 }
 
 object NetworkPolicyEngine {
@@ -1043,6 +1091,12 @@ object NetworkPolicyEngine {
     private var activeComposerOpenedAtMs: Long = 0L
     @Volatile
     var pendingInteractiveVerifyFromBackground: Boolean = false
+
+    @Volatile
+    var onClearVerifyUiIndicators: (() -> Unit)? = null
+
+    @Volatile
+    var onClearStaleConnectionStage: (() -> Unit)? = null
 
     fun updateVerifyAttentionNeeded(needed: Boolean) {
         runUiSafeStateWrite {
@@ -1089,9 +1143,19 @@ object NetworkPolicyEngine {
     }
 
     fun clearVerifyAttentionAndSnooze() {
+        val hadAttentionOrSnooze = verifyAttentionNeeded ||
+            synchronized(snoozeLock) { userDismissedUntilMs > 0L } ||
+            pendingInteractiveVerifyFromBackground
         clearUserDismissedVerify()
         pendingInteractiveVerifyFromBackground = false
         updateVerifyAttentionNeeded(false)
+        if (!verifyCoordinator.isActive()) {
+            if (hadAttentionOrSnooze) {
+                onClearVerifyUiIndicators?.invoke()
+            } else {
+                onClearStaleConnectionStage?.invoke()
+            }
+        }
     }
 
     fun noteUserTyping(nowMs: Long = System.currentTimeMillis(), imeComposing: Boolean = false) {

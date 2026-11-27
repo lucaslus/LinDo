@@ -486,4 +486,78 @@ class NetworkPolicyEngineTddTest {
             CookieSentinel.clearAll()
         }
     }
+
+    @Test
+    fun t13_backgroundMessageBusAndTimingsNeverPoisonHealthyCfClearanceOrTriggerPrewarmLoop(): Unit = runBlocking {
+        val prevExec = UserApiKeyAuthManager.webViewHttpExecutor
+        val prevPrewarm = UserApiKeyAuthManager.onRequestClearancePrewarm
+        val prewarmReasons = mutableListOf<String>()
+        try {
+            NetworkPolicyEngine.resetForTesting()
+            LinuxDoRepository.clearChallengeCooldown()
+            CookieSentinel.ingestRawCookieString("_t=valid_t; cf_clearance=cf_healthy_after_verify", domain = "linux.do")
+            CfClearanceAuthority.selectWinner(listOf("cf_healthy_after_verify"), verified = true)
+            assertTrue(CfClearanceAuthority.hasHealthyIncumbent())
+
+            UserApiKeyAuthManager.requireBrowserTransportOnly = true
+            UserApiKeyAuthManager.onRequestClearancePrewarm = { prewarmReasons += it }
+            UserApiKeyAuthManager.webViewHttpExecutor = { _, _, _, _ ->
+                403 to "${CF_MITIGATED_CHALLENGE_PREFIX}<!DOCTYPE html><title>Just a moment...</title>"
+            }
+
+            // Simulate repeated MessageBus & timing POST challenges right after passing verification
+            repeat(5) {
+                LinuxDoRepository.pollMessageBus("lindo_test_cid", mapOf("/latest" to -1L))
+            }
+            assertTrue(CfClearanceAuthority.hasHealthyIncumbent(), "MessageBus background 403 must NEVER poison healthy cf_clearance")
+            assertEquals("cf_healthy_after_verify", CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["cf_clearance"]?.value)
+            assertTrue(prewarmReasons.isEmpty(), "Healthy cf_clearance must suppress background prewarm loop on MessageBus 403")
+            assertFalse(NetworkPolicyEngine.backgroundChallengeTracker.hasUnresolvedWriteChallenges(), "Telemetry polls must not count as unresolved user write challenges")
+
+            // Even after repeated telemetry 403s, a single transient background GET 429 must NOT prematurely invalidate healthy cf_clearance
+            val firstReadHit = NetworkPolicyEngine.backgroundChallengeTracker.onBackgroundChallenge(
+                isWrite = false,
+                hasHealthyClearance = true,
+                nowMs = 10_000L,
+                isTelemetryPoll = false
+            )
+            assertFalse(firstReadHit.invalidateClearance, "Telemetry polls must never inflate readWaves to poison cf_clearance on 1st real read hit")
+
+            // When cf_clearance is absent, repeated 90s telemetry polls must request prewarm at most ONCE per window (no 90s prewarm storm)
+            val trackerNoCf = do_.linux.lindo.core.network.BackgroundChallengeTracker()
+            val firstNoCf = trackerNoCf.onBackgroundChallenge(isWrite = true, hasHealthyClearance = false, nowMs = 1_000L, isTelemetryPoll = true)
+            val secondNoCf = trackerNoCf.onBackgroundChallenge(isWrite = true, hasHealthyClearance = false, nowMs = 91_000L, isTelemetryPoll = true)
+            val thirdNoCf = trackerNoCf.onBackgroundChallenge(isWrite = true, hasHealthyClearance = false, nowMs = 181_000L, isTelemetryPoll = true)
+            assertTrue(firstNoCf.requestPrewarm, "1st telemetry challenge without cf_clearance may trigger 1 prewarm")
+            assertFalse(secondNoCf.requestPrewarm, "Subsequent 90s telemetry challenges must NOT storm prewarm")
+            assertFalse(thirdNoCf.requestPrewarm, "Subsequent 90s telemetry challenges must NOT storm prewarm")
+
+            // MessageBus client must also pause polling while verification coordinator is active
+            var transportHits = 0
+            val bus = do_.linux.lindo.core.network.DiscourseMessageBusClient(
+                pollTransport = { _, _ ->
+                    transportHits++
+                    200 to "[]"
+                },
+                isForegroundProvider = { true },
+                rateLimitRemainingMsProvider = { 0L },
+                shouldPauseProvider = { NetworkPolicyEngine.verifyCoordinator.isActive() }
+            )
+            val unsub = bus.subscribe("/latest", -1L) { _, _ -> }
+            bus.stop()
+            val round = (NetworkPolicyEngine.verifyCoordinator.joinOrStart(VerifyPresentation.BLOCKING) as VerifyJoin.Leader).round
+            assertEquals(18_000L, bus.pollOnceInternal())
+            assertEquals(0, transportHits, "MessageBus must not hit network while verification is active")
+            NetworkPolicyEngine.verifyCoordinator.finishFlight(round, passed = true, finalPresentation = VerifyPresentation.BLOCKING)
+            assertEquals(12_000L, bus.pollOnceInternal())
+            assertEquals(1, transportHits)
+            unsub()
+        } finally {
+            UserApiKeyAuthManager.webViewHttpExecutor = prevExec
+            UserApiKeyAuthManager.onRequestClearancePrewarm = prevPrewarm
+            UserApiKeyAuthManager.requireBrowserTransportOnly = false
+            NetworkPolicyEngine.resetForTesting()
+            CookieSentinel.clearAll()
+        }
+    }
 }

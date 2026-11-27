@@ -341,13 +341,14 @@ internal val ANDROID_HTTP_BRIDGE_TEMPLATE_JS: String = """
             }
         }
 
+        const isMessageBusPoll = targetUrl.indexOf('/message-bus/') !== -1 && targetUrl.indexOf('/poll') !== -1;
         if (!isRead && !isApiKeyRevoke) {
             const metaCsrf = document.querySelector && document.querySelector('meta[name="csrf-token"]');
             const cachedCsrf = isOtpExchange
                 ? null
                 : (window.__lindoCsrf || (!window.__lindoIgnoreDomCsrf && metaCsrf && metaCsrf.content));
-            const token = cachedCsrf || (await refreshCsrfToken(isOtpExchange));
-            if (!token) {
+            const token = cachedCsrf || (isMessageBusPoll ? null : (await refreshCsrfToken(isOtpExchange)));
+            if (!token && !isMessageBusPoll) {
                 if (csrfLastStatus > 0) {
                     const body = csrfLastBody || JSON.stringify({ errors: [cfg.csrfFallbackErr || 'CSRF token unavailable'] });
                     reportHttp(csrfLastStatus, body, csrfLastMitigated, csrfLastRetryAfter, '');
@@ -359,7 +360,9 @@ internal val ANDROID_HTTP_BRIDGE_TEMPLATE_JS: String = """
                 }
                 return;
             }
-            hdrs['X-CSRF-Token'] = token;
+            if (token) {
+                hdrs['X-CSRF-Token'] = token;
+            }
         }
         const bodyStr = cfg.formBody || '';
         const hasBody = !isRead && (bodyStr.length > 0 || method === 'POST');

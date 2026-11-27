@@ -614,5 +614,15 @@ class Wave2ParityRegressionTest {
         assertEquals("5 分钟前已验证", formatSiteVerifyStatusLabel(isVerifying = false, attentionNeeded = false, lastVerifiedAtMs = now - 5 * 60_000L, nowMs = now))
         assertEquals("刷新验证票据", formatSiteVerifyStatusLabel(isVerifying = false, attentionNeeded = false, lastVerifiedAtMs = now - 65 * 60_000L, nowMs = now))
         assertEquals("刷新验证票据", formatSiteVerifyStatusLabel(isVerifying = false, attentionNeeded = false, lastVerifiedAtMs = null, nowMs = now))
+
+        // Cookie deletion spec builder must strip original Expires/Max-Age so Chromium ParsedCookie never keeps stale cf_clearance alive
+        val rawChromiumAttrs = "domain=.linux.do; path=/; expires=Sat, 27 Nov 2027 15:05:37 GMT; max-age=31536000; secure; httponly; samesite=none; partitioned"
+        val expiredSpec = ManualForceRefreshPolicy.buildExpiredSetCookieSpec("cf_clearance", rawChromiumAttrs)
+        assertTrue(expiredSpec.startsWith("cf_clearance=; "), "Spec must clear value: $expiredSpec")
+        assertFalse(expiredSpec.contains("2027"), "Future Expires must be stripped: $expiredSpec")
+        assertFalse(expiredSpec.contains("31536000"), "Positive Max-Age must be stripped: $expiredSpec")
+        assertTrue(expiredSpec.contains("domain=.linux.do", ignoreCase = true))
+        assertTrue(expiredSpec.contains("partitioned", ignoreCase = true))
+        assertTrue(expiredSpec.endsWith("Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT"), "Epoch deletion must appear last: $expiredSpec")
     }
 }

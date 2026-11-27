@@ -1830,8 +1830,10 @@ class MainActivity : ComponentActivity() {
         return rebuildApiWebViewMutex.withLock {
             if (isFinishing || isDestroyed) return@withLock false
             if (expectedGeneration != null &&
+                !pendingTransportRecycleOnNextUse &&
                 apiWebView != null &&
                 apiWebViewReady.isCompleted &&
+                apiWebViewOriginHealthy &&
                 apiWebViewGeneration != expectedGeneration
             ) {
                 return@withLock true
@@ -1979,6 +1981,9 @@ class MainActivity : ComponentActivity() {
             it.await()
             return
         }
+        if (apiWebView != null && !pendingTransportRecycleOnNextUse && !apiWebViewReady.isCompleted) {
+            withTimeoutOrNull(8_000L) { apiWebViewReady.await() }
+        }
         val observedGen = apiWebViewGeneration
         val current = apiWebView
         if (current == null || pendingTransportRecycleOnNextUse || !apiWebViewOriginHealthy || consecutiveBridgeFailures.get() >= 1) {
@@ -1993,7 +1998,8 @@ class MainActivity : ComponentActivity() {
                     !apiWebViewOriginHealthy -> "unhealthy_origin_doc"
                     else -> "prior_bridge_failure"
                 },
-                force = forceRecycle
+                force = forceRecycle,
+                expectedGeneration = observedGen
             )
             return
         }
@@ -2365,6 +2371,9 @@ class MainActivity : ComponentActivity() {
                 if (apiWebView == null) initPersistentApiWebView()
                 apiWebView
             } ?: return@withLock false
+            if (!forceReload && !apiWebViewReady.isCompleted) {
+                withTimeoutOrNull(5_000L) { apiWebViewReady.await() }
+            }
             suspend fun documentReady(): Boolean = withContext(Dispatchers.Main) {
                 apiWebView === target && apiWebViewOriginHealthy && !apiWebViewBootstrapChallenged &&
                     apiMainDocumentCommitted && !apiMainDocumentFailed &&
@@ -2421,8 +2430,11 @@ class MainActivity : ComponentActivity() {
                         bootstrapNeedsVerification = apiWebViewBootstrapChallenged
                         null
                     }
-                    else -> executeHttpViaWebViewBridge(request.url, "GET", null, request.headers,
-                        allowSilentChallengeRetry = false, allowOriginLostRetry = false)
+                    else -> {
+                        LinuxDoRepository.clearChallengeCooldown()
+                        executeHttpViaWebViewBridge(request.url, "GET", null, request.headers,
+                            allowSilentChallengeRetry = false, allowOriginLostRetry = false)
+                    }
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -2692,6 +2704,7 @@ class MainActivity : ComponentActivity() {
             val jsConsoleWidgetReady = java.util.concurrent.atomic.AtomicBoolean(false)
             val probeWakeSignal = kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.CONFLATED)
             var staleClearancePurgedOnce = false
+            var fallbackOriginPageTried = false
             var interactiveWidgetReady = false
             var widgetFirstSeenAtMs = 0L
             var freshCfDetectedAtMs = 0L
@@ -2700,7 +2713,10 @@ class MainActivity : ComponentActivity() {
                 val compactFrameJs = buildVerificationCompactFrameJs(isDark = AppAppearance.dark)
                 runOnCookieIo {
                     val cm = MainActivity.currentWebViewCookieManager()
-                    if (previousWasChallenged) {
+                    // Never purge an incumbent cf_clearance during silent background PREWARM:
+                    // if Turnstile demands human interaction, PREWARM abandons without UI and
+                    // purging the cookie would break foreground reads into a verification loop.
+                    if (isForegroundCaller && previousWasChallenged) {
                         purgeCfCookiesInWebKit(cm)
                         staleClearancePurgedOnce = true
                     }
@@ -2885,8 +2901,10 @@ class MainActivity : ComponentActivity() {
                         }
 
                         if (originLanded.get()) {
-                            // 若旧票据已被实测 403/429 证伪，而 /challenge 未换新即直达 404，清理一次残留旧票据以无票态重探一次
-                            if (previousWasChallenged && freshCf == previousClearance && !staleClearancePurgedOnce) {
+                            val isFgNow = isForegroundCaller ||
+                                effectiveTrigger == do_.linux.lindo.core.network.SilentVerifyTrigger.FOREGROUND
+                            // 若旧票据已被实测 403/429 证伪，而 /challenge 未换新即直达 404，仅在前台验证时清理一次残留旧票据以无票态重探一次
+                            if (isFgNow && previousWasChallenged && freshCf == previousClearance && !staleClearancePurgedOnce) {
                                 staleClearancePurgedOnce = true
                                 originLanded.set(false)
                                 originLandedAtMs.set(0L)
@@ -2895,6 +2913,18 @@ class MainActivity : ComponentActivity() {
                                 purgeCfCookiesInWebKit(currentWebViewCookieManager())
                                 if (tempWv === wv && !mainFrameFailed.get()) {
                                     wv.loadUrl("https://linux.do/challenge")
+                                }
+                                return@withContext do_.linux.lindo.core.network.SilentProbeSignal.PENDING
+                            }
+                            // 当 /challenge 未被边缘 WAF 质询直达 404 且未签发 cf_clearance 时，前台请求单次切往真实页面路径触发同源路由规则或确认直通
+                            if (isFgNow && freshCf.isNullOrBlank() && !fallbackOriginPageTried) {
+                                fallbackOriginPageTried = true
+                                originLanded.set(false)
+                                originLandedAtMs.set(0L)
+                                widgetFirstSeenAtMs = 0L
+                                interactiveWidgetReady = false
+                                if (tempWv === wv && !mainFrameFailed.get()) {
+                                    wv.loadUrl(originalRead?.pageUrl() ?: "https://linux.do/")
                                 }
                                 return@withContext do_.linux.lindo.core.network.SilentProbeSignal.PENDING
                             }
@@ -2919,7 +2949,9 @@ class MainActivity : ComponentActivity() {
                         }
 
                         if (parsed?.optBoolean("ok") == true) {
-                            if (previousWasChallenged && freshCf == previousClearance && !staleClearancePurgedOnce) {
+                            val isFgNow = isForegroundCaller ||
+                                effectiveTrigger == do_.linux.lindo.core.network.SilentVerifyTrigger.FOREGROUND
+                            if (isFgNow && previousWasChallenged && freshCf == previousClearance && !staleClearancePurgedOnce) {
                                 staleClearancePurgedOnce = true
                                 originLanded.set(false)
                                 originLandedAtMs.set(0L)
@@ -3032,7 +3064,7 @@ class MainActivity : ComponentActivity() {
                             break
                         }
                         is do_.linux.lindo.core.network.SilentVerifyStep.Abandon -> {
-                            if (step.reason == "snoozed_by_user_dismiss" || step.reason == "background_requires_user") {
+                            if (step.reason == "snoozed_by_user_dismiss") {
                                 keepAttentionPillOnExit = true
                                 do_.linux.lindo.core.network.NetworkPolicyEngine.updateVerifyAttentionNeeded(true)
                                 withContext(Dispatchers.Main) {
@@ -3098,16 +3130,19 @@ class MainActivity : ComponentActivity() {
                                 abandoned = true
                                 outcome = "skipped:origin_not_challenged"
                             } else {
-                                succeeded = false
-                                outcome = "failed:passed_without_cf_clearance"
+                                // Clean origin HTML rendered without issuing cf_clearance; let checkVerifiedForumConnection
+                                // run a single real JSON read to confirm whether the API channel is now open.
+                                succeeded = true
+                                outcome = "passed:clean_origin_verified"
                             }
                         }
                     }
                 }
                 if (succeeded && !foregroundDialogPassed && !checkVerifiedForumConnection(false)) {
+                    val wasCleanOriginProbe = outcome == "passed:clean_origin_verified"
                     succeeded = false
-                    abandoned = true
-                    outcome = "abandoned:connection_not_ready"
+                    abandoned = !wasCleanOriginProbe
+                    outcome = if (wasCleanOriginProbe) "failed:passed_without_cf_clearance" else "abandoned:connection_not_ready"
                 }
                 if (succeeded) {
                     keepAttentionPillOnExit = false
@@ -3186,8 +3221,9 @@ class MainActivity : ComponentActivity() {
             return 0 to "[BRIDGE_DIAG:app_paused] skippedInBg=true bg=true fg=false gen=$apiWebViewGeneration net=${activeTransportSignature.ifBlank { "none" }}"
         }
         if (pendingTransportRecycleOnNextUse && !isFinishing && !isDestroyed) {
+            val recycleGen = apiWebViewGeneration
             do_.linux.lindo.ech.EchGatewayManager.awaitReconcileAndProxyReady()
-            rebuildApiWebView(reason = "pending_network_recycle", force = true)
+            rebuildApiWebView(reason = "pending_network_recycle", force = true, expectedGeneration = recycleGen)
         }
         if (apiWebView == null && !isFinishing && !isDestroyed) {
             withContext(Dispatchers.Main) {
@@ -3711,8 +3747,9 @@ class MainActivity : ComponentActivity() {
             return null
         }
         if (pendingTransportRecycleOnNextUse && !isFinishing && !isDestroyed) {
+            val recycleGen = apiWebViewGeneration
             do_.linux.lindo.ech.EchGatewayManager.awaitReconcileAndProxyReady()
-            rebuildApiWebView(reason = "pending_network_recycle", force = true)
+            rebuildApiWebView(reason = "pending_network_recycle", force = true, expectedGeneration = recycleGen)
         }
         if (apiWebView == null && !isFinishing && !isDestroyed) {
             withContext(Dispatchers.Main) {
@@ -3888,8 +3925,9 @@ class MainActivity : ComponentActivity() {
         }
         if (LinuxDoRepository.isRateLimitedNow()) return 429 to """{"errors":["请求较频繁，请稍后再试"]}"""
         if (pendingTransportRecycleOnNextUse && !isFinishing && !isDestroyed) {
+            val recycleGen = apiWebViewGeneration
             do_.linux.lindo.ech.EchGatewayManager.awaitReconcileAndProxyReady()
-            rebuildApiWebView(reason = "pending_network_recycle", force = true)
+            rebuildApiWebView(reason = "pending_network_recycle", force = true, expectedGeneration = recycleGen)
         }
         if (apiWebView == null && !isFinishing && !isDestroyed) {
             withContext(Dispatchers.Main) {
@@ -4594,11 +4632,10 @@ class MainActivity : ComponentActivity() {
                         val cName = firstPart.substringBefore('=').trim()
                         if (cName in cfCookieNames) {
                             val attrs = rawSetCookie.substringAfter(';', "").trim()
-                            jobs += origin to if (attrs.isNotEmpty()) {
-                                "$cName=; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; $attrs"
-                            } else {
-                                "$cName=; Max-Age=0; Path=/; Secure"
-                            }
+                            jobs += origin to do_.linux.lindo.core.network.ManualForceRefreshPolicy.buildExpiredSetCookieSpec(
+                                cookieName = cName,
+                                rawAttrs = attrs
+                            )
                         }
                     }
                 }
@@ -4723,6 +4760,7 @@ class MainActivity : ComponentActivity() {
                             lastCommittedPhysicalTransports = settledPhys
                             pendingTransportRecycleOnNextUse = true
                             do_.linux.lindo.core.network.NetworkPolicyEngine.resetOnNetworkChange()
+                            PlatformSessionRecovery.forumConnection.clearIfNotChecking()
                             LinDoDiagnosticLogger.info(
                                 DiagnosticCategory.NETWORK,
                                 "NetMonitor",
@@ -4749,6 +4787,7 @@ class MainActivity : ComponentActivity() {
                         pendingVpnRouteFlipped = true
                     }
                     do_.linux.lindo.core.network.NetworkPolicyEngine.resetOnNetworkChange()
+                    PlatformSessionRecovery.forumConnection.clearIfNotChecking()
                     val healthLine = do_.linux.lindo.core.network.NetworkPolicyEngine.buildHealthSnapshot(
                         profileName = activeWebViewProfileName,
                         webViewGeneration = apiWebViewGeneration.toInt(),
@@ -5285,6 +5324,7 @@ private fun AndroidWebLoginModal(
     var verificationNavigatingAway by remember(initialUrl, sessionNonce) { mutableStateOf(false) }
     var challengeOrigin404Reached by remember(initialUrl, sessionNonce) { mutableStateOf(false) }
     var staleClearancePurgedInModal by remember(initialUrl, sessionNonce) { mutableStateOf(false) }
+    var fallbackMainSiteTried by remember(initialUrl, sessionNonce) { mutableStateOf(false) }
     var pageProgress by remember(initialUrl, sessionNonce) { mutableStateOf(0) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var usedHandoffWebView by remember(initialUrl, sessionNonce) { mutableStateOf(false) }
@@ -5328,9 +5368,42 @@ private fun AndroidWebLoginModal(
         showVerifyChannelRepairHint = false
         verificationNavigatingAway = false
         challengeOrigin404Reached = false
+        fallbackMainSiteTried = false
+        staleClearancePurgedInModal = false
+        forceRefreshCsrfStatus = null
+        forceRefreshCsrfChallenged = false
+        forceRefreshCsrfValue = null
+        forceRefreshCsrfProbeInFlight = false
         initialLoadDispatched = false
         pageProgress = 0
         modalWebViewGeneration++
+    }
+
+    fun tryFallbackToMainSiteOnce(targetWebView: WebView?, purgeStaleFirst: Boolean): Boolean {
+        if (!isVerificationFlow || completed || fallbackMainSiteTried || targetWebView == null) return false
+        fallbackMainSiteTried = true
+        val fallbackUrl = "https://linux.do/#lindo-verify"
+        pendingUrl = fallbackUrl
+        pageLoadError = null
+        challengeOrigin404Reached = false
+        forceRefreshCsrfStatus = null
+        forceRefreshCsrfChallenged = false
+        forceRefreshCsrfValue = null
+        forceRefreshCsrfProbeInFlight = false
+        if (purgeStaleFirst) {
+            staleClearancePurgedInModal = true
+            MainActivity.activeInstance?.activityScope?.launch(Dispatchers.Main) {
+                runCatching {
+                    MainActivity.activeInstance?.purgeCfCookiesInWebKit(MainActivity.currentWebViewCookieManager())
+                }
+                if (!completed && webViewRef === targetWebView) {
+                    targetWebView.loadUrl(fallbackUrl)
+                }
+            }
+        } else {
+            targetWebView.loadUrl(fallbackUrl)
+        }
+        return true
     }
 
     fun retryPage() {
@@ -5499,9 +5572,19 @@ private fun AndroidWebLoginModal(
                         do_.linux.lindo.core.network.ForceRefreshEval.PASS_CLEAN_IP_NO_COOKIE -> {
                             completeSiteVerification(freshCsrf = forceRefreshCsrfValue)
                         }
-                        do_.linux.lindo.core.network.ForceRefreshEval.REJECT_STALE_UNCHANGED,
+                        do_.linux.lindo.core.network.ForceRefreshEval.REJECT_STALE_UNCHANGED -> {
+                            if (!tryFallbackToMainSiteOnce(targetWebView, purgeStaleFirst = true)) {
+                                pageLoadError = "站点安全校验尚未通过，请点刷新重试或稍后再试"
+                            }
+                        }
                         do_.linux.lindo.core.network.ForceRefreshEval.REJECT_CHALLENGED_OR_FAILED -> {
-                            pageLoadError = "站点安全校验尚未通过，请点刷新重试或稍后再试"
+                            if (!tryFallbackToMainSiteOnce(targetWebView, purgeStaleFirst = false)) {
+                                pageLoadError = if (forceRefreshCsrfStatus == 429 && !forceRefreshCsrfChallenged) {
+                                    "请求较频繁，请稍候片刻再试"
+                                } else {
+                                    "站点安全校验尚未通过，请点刷新重试或稍后再试"
+                                }
+                            }
                         }
                         else -> Unit
                     }
@@ -5537,9 +5620,16 @@ private fun AndroidWebLoginModal(
                         }
                         return
                     }
-                    do_.linux.lindo.core.network.ForceRefreshEval.REJECT_STALE_UNCHANGED,
+                    do_.linux.lindo.core.network.ForceRefreshEval.REJECT_STALE_UNCHANGED -> {
+                        if (!tryFallbackToMainSiteOnce(webView, purgeStaleFirst = true)) {
+                            pageLoadError = "站点安全校验尚未通过，请点刷新重试或稍后再试"
+                        }
+                        return
+                    }
                     do_.linux.lindo.core.network.ForceRefreshEval.REJECT_CHALLENGED_OR_FAILED -> {
-                        pageLoadError = "站点安全校验尚未通过，请点刷新重试或稍后再试"
+                        if (!tryFallbackToMainSiteOnce(webView, purgeStaleFirst = false)) {
+                            pageLoadError = "站点安全校验尚未通过，请点刷新重试或稍后再试"
+                        }
                         return
                     }
                     else -> Unit
@@ -5551,7 +5641,9 @@ private fun AndroidWebLoginModal(
                     previousWasChallenged = openedWasChallenged
                 )
                 if (outcome == do_.linux.lindo.core.network.VerifyTicketOutcome.STALE_UNCHALLENGED_404) {
-                    pageLoadError = "连接尚未恢复，请稍后重试"
+                    if (!tryFallbackToMainSiteOnce(webView, purgeStaleFirst = true)) {
+                        pageLoadError = "连接尚未恢复，请稍后重试"
+                    }
                     return
                 }
                 if (!latestCf.isNullOrBlank() || isPageFinished) {
@@ -5600,13 +5692,14 @@ private fun AndroidWebLoginModal(
                             val latestCfNow = resolveFreshClearanceForForceRefresh(
                                 cookieManager.getCookie("https://linux.do").orEmpty()
                             )
+                            val domCsrfReady = fallbackMainSiteTried && result.optString("csrf").isNotBlank()
                             val eval = do_.linux.lindo.core.network.ManualForceRefreshPolicy.evaluateOutcome(
                                 forceRefresh = true,
                                 freshClearance = latestCfNow,
                                 purgedStaleClearances = purgedStaleClearances,
                                 originReached = true,
                                 hasChallengeOrWidget = false,
-                                csrfProbeStatus = forceRefreshCsrfStatus,
+                                csrfProbeStatus = forceRefreshCsrfStatus ?: (if (domCsrfReady) 200 else null),
                                 csrfProbeChallenged = forceRefreshCsrfChallenged
                             )
                             when (eval) {
@@ -5620,9 +5713,19 @@ private fun AndroidWebLoginModal(
                                 do_.linux.lindo.core.network.ForceRefreshEval.PROBE_CSRF_ONCE -> {
                                     dispatchSingleForceRefreshCsrfProbe(webView)
                                 }
-                                do_.linux.lindo.core.network.ForceRefreshEval.REJECT_STALE_UNCHANGED,
+                                do_.linux.lindo.core.network.ForceRefreshEval.REJECT_STALE_UNCHANGED -> {
+                                    if (!tryFallbackToMainSiteOnce(webView, purgeStaleFirst = true)) {
+                                        pageLoadError = "站点安全校验尚未通过，请点刷新重试或稍后再试"
+                                    }
+                                }
                                 do_.linux.lindo.core.network.ForceRefreshEval.REJECT_CHALLENGED_OR_FAILED -> {
-                                    pageLoadError = "站点安全校验尚未通过，请点刷新重试或稍后再试"
+                                    if (!tryFallbackToMainSiteOnce(webView, purgeStaleFirst = false)) {
+                                        pageLoadError = if (forceRefreshCsrfStatus == 429 && !forceRefreshCsrfChallenged) {
+                                            "请求较频繁，请稍候片刻再试"
+                                        } else {
+                                            "站点安全校验尚未通过，请点刷新重试或稍后再试"
+                                        }
+                                    }
                                 }
                                 else -> Unit
                             }

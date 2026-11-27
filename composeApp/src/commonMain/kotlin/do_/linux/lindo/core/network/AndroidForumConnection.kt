@@ -16,6 +16,12 @@ internal enum class ForumConnectionStage(val label: String) {
 internal class AndroidForumRead private constructor(val url: String, val headers: Map<String, String>, val topic: Int?) {
     @Volatile var response: Pair<Int, String>? = null
 
+    fun pageUrl(): String {
+        val uri = runCatching { URI(url) }.getOrNull() ?: return "https://linux.do/"
+        val rawPath = uri.rawPath?.removeSuffix(".json")?.takeIf { it.isNotBlank() } ?: "/"
+        return "https://linux.do${if (rawPath.startsWith('/')) rawPath else "/$rawPath"}"
+    }
+
     fun reachedForum(reply: Pair<Int, String>?): Boolean {
         if (reply == null) return false
         val body = runCatching { Json.parseToJsonElement(reply.second) as? JsonObject }.getOrNull() ?: return false
@@ -79,6 +85,14 @@ internal class AndroidForumConnection {
         owner = null
         target = null
         stage = ForumConnectionStage.Idle
+    }
+
+    fun clearIfNotChecking() {
+        if (checking == null && stage != ForumConnectionStage.Idle) {
+            owner = null
+            target = null
+            stage = ForumConnectionStage.Idle
+        }
     }
 
     fun beginRequestedVerification() {

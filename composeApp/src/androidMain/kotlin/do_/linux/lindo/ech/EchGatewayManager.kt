@@ -394,8 +394,12 @@ object EchGatewayManager {
 
             override fun onLost(network: Network) {
                 synchronized(stateLock) { proxyTunnelUnreachable = false }
-                seedInitialNetworkSnapshot()
-                reconcileAsyncIfChanged()
+                reconcileExecutor.execute {
+                    runCatching {
+                        seedInitialNetworkSnapshot()
+                        reconcileInternal()
+                    }
+                }
             }
         }
         defaultCallback = dCb
@@ -407,19 +411,29 @@ object EchGatewayManager {
             .build()
         val vCb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                synchronized(stateLock) { proxyTunnelUnreachable = false }
-                seedInitialNetworkSnapshot()
+                synchronized(stateLock) {
+                    proxyTunnelUnreachable = false
+                    vpnActive = true
+                }
                 reconcileAsyncIfChanged()
             }
 
             override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
-                seedInitialNetworkSnapshot()
+                synchronized(stateLock) {
+                    if (!vpnActive) {
+                        proxyTunnelUnreachable = false
+                    }
+                    vpnActive = true
+                }
                 reconcileAsyncIfChanged()
             }
 
             override fun onLost(network: Network) {
-                synchronized(stateLock) { proxyTunnelUnreachable = false }
-                seedInitialNetworkSnapshot()
+                val stillVpn = detectVpnForApp(cm)
+                synchronized(stateLock) {
+                    proxyTunnelUnreachable = false
+                    vpnActive = stillVpn
+                }
                 reconcileAsyncIfChanged()
             }
         }
@@ -448,26 +462,46 @@ object EchGatewayManager {
     private fun seedInitialNetworkSnapshot() {
         val cm = connectivityManager ?: return
         val isVpn = detectVpnForApp(cm)
-        val nets = runCatching { cm.allNetworks }.getOrNull().orEmpty()
+        val existingSnapshot = synchronized(stateLock) { LinkedHashMap(physicalNetworks) }
+        val candidates = LinkedHashMap<Long, Network>()
+        for (net in runCatching { cm.allNetworks }.getOrNull().orEmpty()) {
+            candidates[net.networkHandle] = net
+        }
+        // Android 12+ / Samsung One UI under VPN may omit underlying NOT_VPN networks from allNetworks
+        // or transiently return null from getNetworkCapabilities(net) while physicalCallback is still live;
+        // preserve live physicalCallback entries unless explicitly disqualified or lost via pCb.onLost.
+        for (handle in existingSnapshot.keys) {
+            if (handle !in candidates) {
+                runCatching { Network.fromNetworkHandle(handle) }.getOrNull()?.let { candidates[handle] = it }
+            }
+        }
+        val refreshed = LinkedHashMap<Long, PhysicalNetInfo>()
+        for ((handle, net) in candidates) {
+            val caps = runCatching { cm.getNetworkCapabilities(net) }.getOrNull()
+            if (caps == null) {
+                existingSnapshot[handle]?.let { refreshed[handle] = it }
+                continue
+            }
+            val iface = runCatching { cm.getLinkProperties(net)?.interfaceName.orEmpty() }.getOrDefault("")
+                .ifBlank { existingSnapshot[handle]?.ifaceName.orEmpty() }
+            buildPhysicalNetInfo(handle, caps, iface)?.let { refreshed[handle] = it }
+        }
         synchronized(stateLock) {
             vpnActive = isVpn
             physicalNetworks.clear()
-        }
-        for (net in nets) {
-            val caps = runCatching { cm.getNetworkCapabilities(net) }.getOrNull() ?: continue
-            val iface = runCatching { cm.getLinkProperties(net)?.interfaceName.orEmpty() }.getOrDefault("")
-            recordPhysicalNetwork(net, caps, iface)
+            physicalNetworks.putAll(refreshed)
         }
     }
 
-    private fun recordPhysicalNetwork(network: Network, caps: NetworkCapabilities, iface: String) {
+    private fun buildPhysicalNetInfo(
+        handle: Long,
+        caps: NetworkCapabilities,
+        iface: String
+    ): PhysicalNetInfo? {
         if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) ||
             !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
         ) {
-            synchronized(stateLock) {
-                physicalNetworks.remove(network.networkHandle)
-            }
-            return
+            return null
         }
         val rank = when {
             caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> 3
@@ -475,10 +509,18 @@ object EchGatewayManager {
             caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> 1
             else -> 0
         }
-        if (rank <= 0) return
+        return if (rank > 0) PhysicalNetInfo(handle = handle, rank = rank, ifaceName = iface) else null
+    }
+
+    private fun recordPhysicalNetwork(network: Network, caps: NetworkCapabilities, iface: String) {
         val handle = network.networkHandle
+        val info = buildPhysicalNetInfo(handle, caps, iface)
         synchronized(stateLock) {
-            physicalNetworks[handle] = PhysicalNetInfo(handle = handle, rank = rank, ifaceName = iface)
+            if (info == null) {
+                physicalNetworks.remove(handle)
+            } else {
+                physicalNetworks[handle] = info
+            }
         }
     }
 

@@ -2903,12 +2903,15 @@ object LinuxDoRepository {
     private fun noteBackgroundChallenge(method: String, url: String, status: Int) {
         val now = System.currentTimeMillis()
         val isWrite = method.uppercase() !in setOf("GET", "HEAD", "OPTIONS")
+        val isTelemetryPoll = url.contains("/message-bus/", ignoreCase = true) ||
+            url.contains("/topics/timings", ignoreCase = true)
         val carriedCf = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["cf_clearance"]?.value
         val hasHealthyCf = !carriedCf.isNullOrBlank() && !CfClearanceAuthority.isChallenged(carriedCf)
         val decision = NetworkPolicyEngine.backgroundChallengeTracker.onBackgroundChallenge(
             isWrite = isWrite,
             hasHealthyClearance = hasHealthyCf,
-            nowMs = now
+            nowMs = now,
+            isTelemetryPoll = isTelemetryPoll
         )
         if (decision.invalidateClearance && !carriedCf.isNullOrBlank()) {
             CfClearanceAuthority.noteChallenged(carriedCf)
@@ -3265,15 +3268,16 @@ object LinuxDoRepository {
                     if (candidate != null && isExpectedResponse(candidate.first, candidate.second)) {
                         challenge429Streak.set(0)
                         NetworkPolicyEngine.timeoutBlackholeDetector.noteHealthyResponse()
-                        val hasUnresolvedWriteOrIneffective =
-                            NetworkPolicyEngine.backgroundChallengeTracker.hasUnresolvedWriteChallenges() ||
-                                NetworkPolicyEngine.verifyCoordinator.hasUnresolvedIneffectiveClearance()
-                        if (!hasUnresolvedWriteOrIneffective) {
+                        val hasIneffectiveBreaker =
+                            NetworkPolicyEngine.verifyCoordinator.hasUnresolvedIneffectiveClearance()
+                        if (!hasIneffectiveBreaker) {
                             NetworkPolicyEngine.verifyCoordinator.resetOnHealthyResponse()
                             CfClearanceAuthority.confirmHealthy(
                                 CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["cf_clearance"]?.value
                             )
-                            if (CfClearanceAuthority.hasHealthyIncumbent()) {
+                            if (!NetworkPolicyEngine.isProactiveVerifySnoozed() &&
+                                (CfClearanceAuthority.hasHealthyIncumbent() || isForegroundRequest)
+                            ) {
                                 NetworkPolicyEngine.clearVerifyAttentionAndSnooze()
                             }
                         }

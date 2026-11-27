@@ -52,4 +52,18 @@ object PlatformSessionRecovery {
     /** 长时间后台切回前台（>=60s）时，自动收起休眠前遗留的旧网络验证弹窗，避免拿着旧网络状态连续卡盾。 */
     var dismissStaleVerifyModalOnLongResume: (() -> Unit)? = null
     var cancelVerification: (() -> Unit)? = null
+
+    init {
+        do_.linux.lindo.core.network.NetworkPolicyEngine.onClearVerifyUiIndicators = {
+            do_.linux.lindo.core.runUiSafeStateWrite {
+                verifyPillVisible = false
+                forumConnection.clearIfNotChecking()
+            }
+        }
+        do_.linux.lindo.core.network.NetworkPolicyEngine.onClearStaleConnectionStage = {
+            do_.linux.lindo.core.runUiSafeStateWrite {
+                forumConnection.clearIfNotChecking()
+            }
+        }
+    }
 }

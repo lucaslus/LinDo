@@ -33,6 +33,10 @@ class DiscourseMessageBusClient(
     private val pollTransport: suspend (clientId: String, cursors: Map<String, Long>) -> Pair<Int, String>?,
     private val isForegroundProvider: () -> Boolean = { UserPresenceService.isForeground },
     private val rateLimitRemainingMsProvider: () -> Long = { LinuxDoRepository.getTransientRateLimitRemainingMs() },
+    private val shouldPauseProvider: () -> Boolean = {
+        LinuxDoRepository.shouldPauseForSiteVerification("https://linux.do/message-bus/poll") ||
+            NetworkPolicyEngine.verifyCoordinator.isActive()
+    },
     private val initialDelayMs: Long = 4_500L,
     private val steadyIntervalMs: Long = 12_000L,
     private val backgroundSleepMs: Long = 18_000L,
@@ -133,7 +137,7 @@ class DiscourseMessageBusClient(
      */
     internal suspend fun pollOnceInternal(): Long {
         if (handlers.isEmpty()) return steadyIntervalMs
-        if (!isForegroundProvider()) {
+        if (!isForegroundProvider() || shouldPauseProvider()) {
             return backgroundSleepMs
         }
         val globalRateLimitMs = rateLimitRemainingMsProvider()

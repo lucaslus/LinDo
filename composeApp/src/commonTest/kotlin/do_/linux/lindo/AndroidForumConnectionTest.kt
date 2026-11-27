@@ -99,4 +99,32 @@ class AndroidForumConnectionTest {
         assertFalse(old.await())
         assertEquals(ForumConnectionStage.Idle, state.stage)
     }
+
+    @Test fun pageUrlMapsJsonEndpointsToRealForumHtmlRoutesAndClearIfNotCheckingIsFlightSafe() = runBlocking {
+        assertEquals("https://linux.do/t/482293/12", original().pageUrl())
+        assertEquals("https://linux.do/latest", AndroidForumRead.latest().pageUrl())
+
+        val state = AndroidForumConnection()
+        assertFalse(state.check(1, original(), false, { 1L }, { true }) { challenge })
+        assertEquals(ForumConnectionStage.Retry, state.stage)
+
+        // When not actively checking, a healthy foreground read recovery clears stale Retry stage
+        state.clearIfNotChecking()
+        assertEquals(ForumConnectionStage.Idle, state.stage)
+
+        // While actively checking, clearIfNotChecking must not abort the in-flight check
+        val gate = CompletableDeferred<Unit>()
+        val inFlight = async(start = CoroutineStart.UNDISPATCHED) {
+            state.check(1, original(), false, { 1L }, { false }) {
+                gate.await()
+                topic
+            }
+        }
+        assertEquals(ForumConnectionStage.Checking, state.stage)
+        state.clearIfNotChecking()
+        assertEquals(ForumConnectionStage.Checking, state.stage)
+        gate.complete(Unit)
+        assertTrue(inFlight.await())
+        assertEquals(ForumConnectionStage.Idle, state.stage)
+    }
 }

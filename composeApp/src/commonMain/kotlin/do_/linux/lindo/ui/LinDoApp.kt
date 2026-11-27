@@ -4012,209 +4012,224 @@ internal fun LinDoApp(
                 }
 
                 val showSessionNotices = showVerificationStatus || verificationFeedbackNotice != null || activeExpiredUser != null
-                val sessionNotices: @Composable () -> Unit = {
-                    val inlineNoticeModifier = Modifier.fillMaxWidth()
-                        .windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal))
-                        .padding(horizontal = 16.dp, vertical = 3.dp)
+                val sessionNotices: @Composable androidx.compose.foundation.layout.BoxScope.(
+                    useWide: Boolean,
+                    viewportWidth: Dp,
+                    dockHeight: Dp
+                ) -> Unit = { useWide, viewportWidth, dockHeight ->
+                    val sysNavBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+                    val dockClearanceBottom = maxOf(dockHeight + 8.dp, sysNavBottom + FloatingNavClearance)
+                    val horizontalCutoutMod = Modifier.windowInsetsPadding(
+                        WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal)
+                    )
                     if (showVerificationStatus) {
-                        Box(
-                            modifier = if (isAndroidRuntime) inlineNoticeModifier else Modifier
-                                .fillMaxSize()
-                                .then(if (isWideLayout) Modifier else Modifier.windowInsetsPadding(WindowInsets.navigationBars))
-                                .imePadding()
-                                .padding(bottom = if (isWideLayout) 24.dp else FloatingNavClearance, end = 16.dp),
-                            contentAlignment = Alignment.BottomEnd
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .shadow(
-                                        elevation = 8.dp,
-                                        shape = CircleShape,
-                                        clip = false,
-                                        ambientColor = Color.Black.copy(alpha = 0.28f),
-                                        spotColor = Color.Black.copy(alpha = 0.38f)
-                                    )
-                                    .clip(CircleShape)
-                                    .background(palette.cardSurface.copy(alpha = 0.94f), CircleShape)
-                                    .border(0.5.dp, palette.hairline, CircleShape)
-                                    .clickable {
-
-                                        if (handleConnectionAction()) return@clickable
-                                        PlatformWebLoginHost.armOneShotForceRefresh(false)
-                                        do_.linux.lindo.core.network.NetworkPolicyEngine.clearUserDismissedVerify()
-                                        do_.linux.lindo.core.network.NetworkPolicyEngine.updateVerifyAttentionNeeded(false)
-                                        PlatformSessionRecovery.verifyPillVisible = false
-                                        delayedVerifyPill = false
-                                        val customExpand = PlatformSessionRecovery.onExpandVerifyPill
-                                        if (customExpand != null) {
-                                            customExpand()
-                                        } else if (hasEmbeddedWebLogin) {
-                                            openEmbeddedPage("https://linux.do/challenge#lindo-verify")
-                                        } else {
-                                            showSiteVerifySheet = true
-                                        }
-                                    }
-                                    .padding(horizontal = 13.dp, vertical = 7.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(7.dp)
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(7.dp)
-                                        .clip(CircleShape)
-                                        .background(palette.brandGold)
-                                )
-                                Text(
-                                    text = forumStage.label.ifEmpty { if (showVerifyAttentionPill) "需安全确认" else "安全校验中…" },
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Medium,
-                                    color = palette.inkPrimary,
-                                    maxLines = 1,
-                                    softWrap = false
-                                )
-                                Icon(
-                                    imageVector = LinDoIcons.ChevronRight,
-                                    contentDescription = if (showVerifyAttentionPill) "打开安全确认" else "展开安全校验",
-                                    modifier = Modifier.size(13.dp),
-                                    tint = palette.inkTertiary
-                                )
+                        val placeBottomStartOnAndroid = isAndroidRuntime && (useWide || mobileShowingDetail)
+                        val verifyPillAlign = if (placeBottomStartOnAndroid) Alignment.BottomStart else Alignment.BottomEnd
+                        val verifyPillMod = when {
+                            placeBottomStartOnAndroid -> {
+                                val bottomPad = if (useWide) {
+                                    dockClearanceBottom
+                                } else {
+                                    sysNavBottom + 14.dp
+                                }
+                                Modifier
+                                    .align(verifyPillAlign)
+                                    .then(horizontalCutoutMod)
+                                    .imePadding()
+                                    .padding(start = 14.dp, bottom = bottomPad)
                             }
+                            isAndroidRuntime -> Modifier
+                                .align(verifyPillAlign)
+                                .then(horizontalCutoutMod)
+                                .imePadding()
+                                .padding(end = 16.dp, bottom = dockClearanceBottom)
+                            else -> Modifier
+                                .align(verifyPillAlign)
+                                .then(if (useWide) Modifier else Modifier.windowInsetsPadding(WindowInsets.navigationBars))
+                                .imePadding()
+                                .padding(bottom = if (useWide) 24.dp else FloatingNavClearance, end = 16.dp)
+                        }
+                        Row(
+                            modifier = verifyPillMod
+                                .shadow(
+                                    elevation = 8.dp,
+                                    shape = CircleShape,
+                                    clip = false,
+                                    ambientColor = Color.Black.copy(alpha = 0.28f),
+                                    spotColor = Color.Black.copy(alpha = 0.38f)
+                                )
+                                .clip(CircleShape)
+                                .background(palette.cardSurface.copy(alpha = 0.94f), CircleShape)
+                                .border(0.5.dp, palette.hairline, CircleShape)
+                                .clickable {
+                                    if (handleConnectionAction()) return@clickable
+                                    PlatformWebLoginHost.armOneShotForceRefresh(false)
+                                    do_.linux.lindo.core.network.NetworkPolicyEngine.clearUserDismissedVerify()
+                                    do_.linux.lindo.core.network.NetworkPolicyEngine.updateVerifyAttentionNeeded(false)
+                                    PlatformSessionRecovery.verifyPillVisible = false
+                                    delayedVerifyPill = false
+                                    val customExpand = PlatformSessionRecovery.onExpandVerifyPill
+                                    if (customExpand != null) {
+                                        customExpand()
+                                    } else if (hasEmbeddedWebLogin) {
+                                        openEmbeddedPage("https://linux.do/challenge#lindo-verify")
+                                    } else {
+                                        showSiteVerifySheet = true
+                                    }
+                                }
+                                .padding(horizontal = 13.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(7.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(7.dp)
+                                    .clip(CircleShape)
+                                    .background(palette.brandGold)
+                            )
+                            Text(
+                                text = forumStage.label.ifEmpty { if (showVerifyAttentionPill) "需安全确认" else "安全校验中…" },
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = palette.inkPrimary,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                            Icon(
+                                imageVector = LinDoIcons.ChevronRight,
+                                contentDescription = if (showVerifyAttentionPill) "打开安全确认" else "展开安全校验",
+                                modifier = Modifier.size(13.dp),
+                                tint = palette.inkTertiary
+                            )
                         }
                     }
 
                     verificationFeedbackNotice?.let { noticeText ->
-                        Box(
-                            modifier = if (isAndroidRuntime) inlineNoticeModifier else Modifier
-                                .fillMaxSize()
-                                .then(if (isWideLayout) Modifier else Modifier.windowInsetsPadding(WindowInsets.navigationBars))
+                        val toastBottom = if (!isAndroidRuntime && useWide) 28.dp else dockClearanceBottom
+                        Row(
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .then(horizontalCutoutMod)
                                 .imePadding()
-                                .padding(bottom = if (isWideLayout) 28.dp else FloatingNavClearance, start = 20.dp, end = 20.dp),
-                            contentAlignment = Alignment.BottomCenter
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .shadow(
-                                        elevation = 8.dp,
-                                        shape = CircleShape,
-                                        clip = false,
-                                        ambientColor = Color.Black.copy(alpha = 0.30f),
-                                        spotColor = Color.Black.copy(alpha = 0.42f)
-                                    )
-                                    .background(palette.cardSurface, CircleShape)
-                                    .border(0.6.dp, palette.hairline, CircleShape)
-                                    .padding(horizontal = 16.dp, vertical = 9.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = noticeText,
-                                    color = palette.inkPrimary,
-                                    fontSize = 13.sp
+                                .padding(bottom = toastBottom, start = 20.dp, end = 20.dp)
+                                .shadow(
+                                    elevation = 8.dp,
+                                    shape = CircleShape,
+                                    clip = false,
+                                    ambientColor = Color.Black.copy(alpha = 0.30f),
+                                    spotColor = Color.Black.copy(alpha = 0.42f)
                                 )
-                            }
+                                .background(palette.cardSurface, CircleShape)
+                                .border(0.6.dp, palette.hairline, CircleShape)
+                                .padding(horizontal = 16.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = noticeText,
+                                color = palette.inkPrimary,
+                                fontSize = 13.sp
+                            )
                         }
                     }
 
                     if (activeExpiredUser != null) {
-                        // 轻量提示：中性底 + 细描边，主题色只用于「重新登录」文字操作；
-                        Box(
-                            modifier = if (isAndroidRuntime) inlineNoticeModifier else Modifier
-                                .fillMaxSize()
-                                .then(if (isWideLayout) Modifier else Modifier.windowInsetsPadding(WindowInsets.navigationBars))
-                                .padding(bottom = if (isWideLayout) 24.dp else FloatingNavClearance, start = 20.dp, end = 20.dp),
-                            contentAlignment = Alignment.BottomCenter
+                        // 轻量提示：中性底 + 细描边，主题色只用于「重新登录」文字操作；纯悬浮不占布局高度
+                        val expiredBottom = if (!isAndroidRuntime && useWide) 24.dp else dockClearanceBottom
+                        Row(
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .then(horizontalCutoutMod)
+                                .imePadding()
+                                .padding(bottom = expiredBottom, start = 20.dp, end = 20.dp)
+                                .shadow(
+                                    elevation = if (palette.isDark) 8.dp else 6.dp,
+                                    shape = CircleShape,
+                                    clip = false,
+                                    ambientColor = Color.Black.copy(alpha = if (palette.isDark) 0.40f else 0.10f),
+                                    spotColor = Color.Black.copy(alpha = if (palette.isDark) 0.50f else 0.14f)
+                                )
+                                .background(if (palette.isDark) palette.subtleSurface else palette.cardSurface, CircleShape)
+                                .border(0.5.dp, palette.hairline, CircleShape)
+                                .height(44.dp)
+                                .padding(start = 16.dp, end = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Row(
+                            Text(
+                                text = "登录已过期",
+                                color = palette.inkSecondary,
+                                fontSize = 13.sp,
+                                maxLines = 1
+                            )
+                            val reloginInteraction = remember { MutableInteractionSource() }
+                            val reloginHovered by reloginInteraction.collectIsHoveredAsState()
+                            val reloginPressed by reloginInteraction.collectIsPressedAsState()
+                            Box(
                                 modifier = Modifier
-                                    .shadow(
-                                        elevation = if (palette.isDark) 8.dp else 6.dp,
-                                        shape = CircleShape,
-                                        clip = false,
-                                        ambientColor = Color.Black.copy(alpha = if (palette.isDark) 0.40f else 0.10f),
-                                        spotColor = Color.Black.copy(alpha = if (palette.isDark) 0.50f else 0.14f)
+                                    .padding(start = 6.dp)
+                                    .height(36.dp)
+                                    .background(
+                                        when {
+                                            reloginPressed -> palette.brandGold.copy(alpha = 0.16f)
+                                            reloginHovered -> palette.brandGold.copy(alpha = 0.10f)
+                                            else -> Color.Transparent
+                                        },
+                                        CircleShape
                                     )
-                                    .background(if (palette.isDark) palette.subtleSurface else palette.cardSurface, CircleShape)
-                                    .border(0.5.dp, palette.hairline, CircleShape)
-                                    .height(44.dp)
-                                    .padding(start = 16.dp, end = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically
+                                    .pointerHoverIcon(PointerIcon.Hand)
+                                    .clickable(
+                                        interactionSource = reloginInteraction,
+                                        indication = null
+                                    ) {
+                                        requestGuestLogin("重新登录 LINUX DO", "登录已过期，请选择登录方式。")
+                                    }
+                                    .padding(horizontal = 10.dp),
+                                contentAlignment = Alignment.Center
                             ) {
                                 Text(
-                                    text = "登录已过期",
-                                    color = palette.inkSecondary,
+                                    text = "重新登录",
+                                    color = palette.brandGold,
                                     fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
                                     maxLines = 1
                                 )
-                                val reloginInteraction = remember { MutableInteractionSource() }
-                                val reloginHovered by reloginInteraction.collectIsHoveredAsState()
-                                val reloginPressed by reloginInteraction.collectIsPressedAsState()
-                                Box(
-                                    modifier = Modifier
-                                        .padding(start = 6.dp)
-                                        .height(36.dp)
-                                        .background(
-                                            when {
-                                                reloginPressed -> palette.brandGold.copy(alpha = 0.16f)
-                                                reloginHovered -> palette.brandGold.copy(alpha = 0.10f)
-                                                else -> Color.Transparent
-                                            },
-                                            CircleShape
-                                        )
-                                        .pointerHoverIcon(PointerIcon.Hand)
-                                        .clickable(
-                                            interactionSource = reloginInteraction,
-                                            indication = null
-                                        ) {
-                                            requestGuestLogin("重新登录 LINUX DO", "登录已过期，请选择登录方式。")
-                                        }
-                                        .padding(horizontal = 10.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = "重新登录",
-                                        color = palette.brandGold,
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        maxLines = 1
-                                    )
-                                }
-                                Box(
-                                    modifier = Modifier
-                                        .padding(start = 2.dp)
-                                        .width(0.5.dp)
-                                        .height(16.dp)
-                                        .background(palette.hairline)
-                                )
-                                val closeInteraction = remember { MutableInteractionSource() }
-                                val closeHovered by closeInteraction.collectIsHoveredAsState()
-                                val closePressed by closeInteraction.collectIsPressedAsState()
-                                Box(
-                                    modifier = Modifier
-                                        .size(36.dp)
-                                        .background(
-                                            when {
-                                                closePressed -> palette.inkTertiary.copy(alpha = 0.18f)
-                                                closeHovered -> palette.inkTertiary.copy(alpha = 0.10f)
-                                                else -> Color.Transparent
-                                            },
-                                            CircleShape
-                                        )
-                                        .pointerHoverIcon(PointerIcon.Hand)
-                                        .clickable(
-                                            interactionSource = closeInteraction,
-                                            indication = null
-                                        ) {
-                                            sessionExpiredBannerUser = null
-                                            UserApiKeyAuthManager.clearExpiredSessionNotice()
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .padding(start = 2.dp)
+                                    .width(0.5.dp)
+                                    .height(16.dp)
+                                    .background(palette.hairline)
+                            )
+                            val closeInteraction = remember { MutableInteractionSource() }
+                            val closeHovered by closeInteraction.collectIsHoveredAsState()
+                            val closePressed by closeInteraction.collectIsPressedAsState()
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .background(
+                                        when {
+                                            closePressed -> palette.inkTertiary.copy(alpha = 0.18f)
+                                            closeHovered -> palette.inkTertiary.copy(alpha = 0.10f)
+                                            else -> Color.Transparent
                                         },
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = LinDoIcons.Close,
-                                        contentDescription = "关闭提示",
-                                        modifier = Modifier.size(14.dp),
-                                        tint = palette.inkTertiary
+                                        CircleShape
                                     )
-                                }
+                                    .pointerHoverIcon(PointerIcon.Hand)
+                                    .clickable(
+                                        interactionSource = closeInteraction,
+                                        indication = null
+                                    ) {
+                                        sessionExpiredBannerUser = null
+                                        UserApiKeyAuthManager.clearExpiredSessionNotice()
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = LinDoIcons.Close,
+                                    contentDescription = "关闭提示",
+                                    modifier = Modifier.size(14.dp),
+                                    tint = palette.inkTertiary
+                                )
                             }
                         }
                     }
@@ -4250,14 +4265,7 @@ internal fun LinDoApp(
                         }
                     }
 
-                    // Session notices occupy their own space so that the feed, floor actions and navigation stay tappable.
-                    val inlineNotices = isAndroidRuntime && showSessionNotices
-                    Column(
-                        Modifier.fillMaxSize().then(
-                            if (inlineNotices) Modifier.windowInsetsPadding(WindowInsets.statusBars) else Modifier
-                        )
-                    ) {
-                        if (inlineNotices) sessionNotices()
+                    Column(Modifier.fillMaxSize()) {
                     if (!isAuthorized && !isGuestMode) {
                         Box(
                             modifier = Modifier
@@ -4914,6 +4922,9 @@ internal fun LinDoApp(
                         }
                     }
                     }
+                    if (showSessionNotices) {
+                        sessionNotices(useWideLayout, maxWidth, navigationDockHeight)
+                    }
                 }
 
                 if (showAppIconPage && appIcon != null && onApplyAppIcon != null) {
@@ -5459,8 +5470,6 @@ internal fun LinDoApp(
                         }
                     )
                 }
-
-                if (!isAndroidRuntime && showSessionNotices) sessionNotices()
 
                 if (showLogoutConfirm) LinDoConfirmDialog(
                     title = LinDoAuthCopy.CONFIRM_LOGOUT_TITLE.text,

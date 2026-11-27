@@ -355,6 +355,7 @@ class LoginQrAndFoldableSplitRegressionTest {
             }
             waitForText("这是用于验证宽屏分栏与沉浸阅读收折控制的正文内容。", substring = true)
             val reader = onAllNodes(hasScrollToIndexAction()).onLast()
+            val readerBoundsBeforeNotice = edt { reader.fetchSemanticsNode().boundsInRoot }
             var noticeOpened = false
             edt {
                 PlatformSessionRecovery.onExpandVerifyPill = { noticeOpened = true }
@@ -364,19 +365,30 @@ class LoginQrAndFoldableSplitRegressionTest {
             edt { reader.performScrollToKey("load_more_posts") }
             waitForIdle()
             edt {
+                val readerBoundsAfterNotice = reader.fetchSemanticsNode().boundsInRoot
+                assertEquals(
+                    readerBoundsBeforeNotice,
+                    readerBoundsAfterNotice,
+                    "Floating verification pill must NEVER occupy layout space or shift reader bounds"
+                )
                 val pencil = onNodeWithContentDescription("回复话题").fetchSemanticsNode().boundsInRoot
+                val floor = onNodeWithText(" / 2 楼", substring = true).fetchSemanticsNode().boundsInRoot
                 val notice = onNodeWithContentDescription("展开安全校验").fetchSemanticsNode().boundsInRoot
-                assertTrue(notice.bottom <= reader.fetchSemanticsNode().boundsInRoot.top)
+                assertTrue(notice.top > readerBoundsAfterNotice.center.y, "Verification pill must float near bottom, never in top-right header")
+                assertFalse(notice.overlaps(pencil), "Verification pill must not overlap reply button")
+                assertFalse(notice.overlaps(floor), "Verification pill must not overlap floor counter")
                 if (split) {
                     val dock = onNodeWithTag("main_navigation_bar").fetchSemanticsNode().boundsInRoot
-                    val floor = onNodeWithText(" / 2 楼", substring = true).fetchSemanticsNode().boundsInRoot
                     assertEquals(dock.center.y, pencil.center.y, 1f)
                     assertTrue(dock.right < floor.left && floor.right <= pencil.left)
+                    assertFalse(notice.overlaps(dock), "Verification pill must not overlap centered bottom navigation dock")
                 }
                 val refresh = onNodeWithContentDescription("刷新后续评论")
                 val lastReply = onAllNodesWithContentDescription("回复本楼").onLast()
                 assertTrue(refresh.fetchSemanticsNode().boundsInRoot.bottom <= pencil.top)
                 assertTrue(lastReply.fetchSemanticsNode().boundsInRoot.bottom <= pencil.top)
+                assertFalse(notice.overlaps(refresh.fetchSemanticsNode().boundsInRoot), "Verification pill must not overlap tail refresh button")
+                assertFalse(notice.overlaps(lastReply.fetchSemanticsNode().boundsInRoot), "Verification pill must not overlap floor reply action")
                 refresh.performTouchInput { click() }
             }
             waitForText("已是最新回复")
@@ -386,6 +398,46 @@ class LoginQrAndFoldableSplitRegressionTest {
             waitUntil { edt { onAllNodesWithContentDescription("发送").fetchSemanticsNodes().isEmpty() } }
             edt { onNodeWithContentDescription("展开安全校验").performTouchInput { click() } }
             assertTrue(noticeOpened)
+        }
+
+    @Test
+    fun androidMainTabsVerifyAttentionPillFloatsAboveDockWithZeroHeaderShiftAndClearsOnHealthyRead() =
+        runDesktopComposeUiTest(width = 390, height = 840) {
+            isAndroidRuntimeOverrideForTest = true
+            UserApiKeyAuthManager.onSessionAuthenticated(
+                AuthenticatedUserProfile(userId = 42, username = "lucas", displayName = "Lucas", trustLevel = 3),
+                rawCookies = "_t=valid_session_cookie"
+            )
+            setContent { LinDoApp(systemAnimationsEnabled = false) }
+            waitForText("折叠屏沉浸阅读测试主帖")
+
+            val feed = onAllNodes(hasScrollToIndexAction()).onFirst()
+            val feedBoundsBefore = edt { feed.fetchSemanticsNode().boundsInRoot }
+            val dockBounds = edt { onNodeWithTag("main_navigation_bar").fetchSemanticsNode().boundsInRoot }
+
+            edt {
+                do_.linux.lindo.core.network.NetworkPolicyEngine.updateVerifyAttentionNeeded(true)
+                PlatformSessionRecovery.verifyPillVisible = true
+            }
+            waitForText("需安全确认")
+            edt {
+                val feedBoundsDuring = feed.fetchSemanticsNode().boundsInRoot
+                assertEquals(feedBoundsBefore, feedBoundsDuring, "Home feed bounds must NEVER shift when '需安全确认' pill appears")
+                val pill = onNodeWithText("需安全确认").fetchSemanticsNode().boundsInRoot
+                assertTrue(pill.top > feedBoundsDuring.height * 0.6f, "'需安全确认' pill must float near bottom, never in top-right header")
+                assertTrue(pill.bottom <= dockBounds.top, "'需安全确认' pill on main tabs must float cleanly above bottom navigation bar")
+            }
+
+            // Healthy foreground read must clear BOTH verifyAttentionNeeded and verifyPillVisible automatically
+            kotlinx.coroutines.runBlocking {
+                LinuxDoRepository.fetchTopics(path = "/latest.json?no_definitions=true", background = false)
+            }
+            waitForTextGone("需安全确认")
+            assertFalse(do_.linux.lindo.core.network.NetworkPolicyEngine.verifyAttentionNeeded)
+            assertFalse(PlatformSessionRecovery.verifyPillVisible)
+            edt {
+                assertEquals(feedBoundsBefore, feed.fetchSemanticsNode().boundsInRoot, "Disappearing pill must cause zero layout shift")
+            }
         }
 
     @Test

@@ -236,4 +236,26 @@ class AndroidBridgeConvergenceRegressionTest {
             do_.linux.lindo.core.network.NetworkRecoveryPolicy.androidVerifying = false
         }
     }
+
+    @Test
+    fun messageBusPollBridgeScriptSkipsPreflightCsrfFetchWhenUncached() {
+        val script = AndroidWebViewBridgeContract.buildHttpBridgeScript(
+            do_.linux.lindo.core.network.AndroidHttpBridgeConfig(
+                reqId = "mb-1",
+                url = "https://linux.do/message-bus/lindo_abc/poll?dlp=t",
+                method = "POST",
+                headers = mapOf("Discourse-Background" to "true", "X-Silence-Logger" to "true"),
+                formBodyEncoded = "%2Flatest=-1",
+                preferredReferer = "https://linux.do/",
+                csrfOwnerTag = "u1",
+                initialCachedCsrf = "",
+                csrfInCooldown = false,
+                csrfFallbackErrorMsg = "CSRF unavailable",
+                timeouts = AndroidWebViewBridgeContract.computeTimeouts(isRead = false, isBackground = true)
+            )
+        )
+        assertTrue(script.contains("const isMessageBusPoll = targetUrl.indexOf('/message-bus/') !== -1 && targetUrl.indexOf('/poll') !== -1;"))
+        assertTrue(script.contains("isMessageBusPoll ? null : (await refreshCsrfToken(isOtpExchange))"))
+        assertTrue(script.contains("if (!token && !isMessageBusPoll)"))
+    }
 }
