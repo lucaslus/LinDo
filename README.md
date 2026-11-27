@@ -38,14 +38,14 @@
 ## 下载安装
 
 <!-- LINDO_DOWNLOAD_MATRIX_START -->
-当前正式版 **[v1.1.9](https://github.com/lucaslus/LinDo/releases/tag/v1.1.9)**。校验清单 `SHA256SUMS.txt` 随版本发布。
+当前正式版 **[v1.1.10](https://github.com/lucaslus/LinDo/releases/tag/v1.1.10)**。校验清单 `SHA256SUMS.txt` 随版本发布。
 
 | 平台 | 安装包 |
 | :--- | :--- |
-| **Android** | [APK · arm64](https://github.com/lucaslus/LinDo/releases/download/v1.1.9/lindo-1.1.9-build109.apk) |
-| **Windows** | [安装程序 · x64](https://github.com/lucaslus/LinDo/releases/download/v1.1.9/Lindo-1.1.9-windows-x64-setup.exe)　·　[MSI · x64](https://github.com/lucaslus/LinDo/releases/download/v1.1.9/Lindo-1.1.9-windows-x64.msi) |
-| **macOS** | [Apple Silicon DMG](https://github.com/lucaslus/LinDo/releases/download/v1.1.9/Lindo-1.1.9-macos-arm64.dmg)　·　[Intel DMG](https://github.com/lucaslus/LinDo/releases/download/v1.1.9/Lindo-1.1.9-macos-x64.dmg) |
-| **Linux** | [AppImage · x86_64](https://github.com/lucaslus/LinDo/releases/download/v1.1.9/Lindo-1.1.9-linux-x86_64.AppImage)　·　[DEB · x86_64](https://github.com/lucaslus/LinDo/releases/download/v1.1.9/Lindo-1.1.9-linux-amd64.deb)　·　[RPM · x86_64](https://github.com/lucaslus/LinDo/releases/download/v1.1.9/Lindo-1.1.9-linux-x86_64.rpm) |
+| **Android** | [APK · arm64](https://github.com/lucaslus/LinDo/releases/download/v1.1.10/lindo-1.1.10-build110.apk) |
+| **Windows** | [安装程序 · x64](https://github.com/lucaslus/LinDo/releases/download/v1.1.10/Lindo-1.1.10-windows-x64-setup.exe)　·　[MSI · x64](https://github.com/lucaslus/LinDo/releases/download/v1.1.10/Lindo-1.1.10-windows-x64.msi) |
+| **macOS** | [Apple Silicon DMG](https://github.com/lucaslus/LinDo/releases/download/v1.1.10/Lindo-1.1.10-macos-arm64.dmg)　·　[Intel DMG](https://github.com/lucaslus/LinDo/releases/download/v1.1.10/Lindo-1.1.10-macos-x64.dmg) |
+| **Linux** | [AppImage · x86_64](https://github.com/lucaslus/LinDo/releases/download/v1.1.10/Lindo-1.1.10-linux-x86_64.AppImage)　·　[DEB · x86_64](https://github.com/lucaslus/LinDo/releases/download/v1.1.10/Lindo-1.1.10-linux-amd64.deb)　·　[RPM · x86_64](https://github.com/lucaslus/LinDo/releases/download/v1.1.10/Lindo-1.1.10-linux-x86_64.rpm) |
 <!-- LINDO_DOWNLOAD_MATRIX_END -->
 
 Arch Linux / Omarchy 可用仓库内的 [`PKGBUILD`](packaging/arch/PKGBUILD) 本地构建。[分平台安装说明](https://lucaslus.github.io/LinDo/docs/install/)
