@@ -10,20 +10,14 @@ import {
   IconSplitColumns,
 } from "@/components/icons";
 import { DeviceShowcase } from "@/components/showcase";
-import type { ScreenshotKey } from "@/components/theme-screenshot";
 import { formatMiB, type ReleaseDownloads } from "@/lib/release";
 import { SITE } from "@/lib/site";
 
-export function Hero({
-  available,
-}: {
-  available: ScreenshotKey[];
-  release?: ReleaseDownloads;
-}) {
+export function Hero() {
   return (
     <section className="home-hero" aria-labelledby="home-title">
       <HeroBackdropWall />
-      <div className="hero-inner home-wrap">
+      <div className="hero-inner">
         <div className="hero-header">
           <h1 id="home-title">
             Lin<span className="brand-do">Do</span>
@@ -43,7 +37,7 @@ export function Hero({
           </div>
         </div>
 
-        <DeviceShowcase available={available} />
+        <DeviceShowcase />
       </div>
     </section>
   );

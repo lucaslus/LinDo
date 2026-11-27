@@ -10,7 +10,26 @@
   <a href="https://github.com/lucaslus/LinDo/releases">版本记录</a>
 </p>
 <p align="center">
-  <a href="https://lindo.app/#screens"><img src="website/public/shots/cover-v115.webp" alt="LinDo 的 macOS、Android 和折叠屏阅读界面" width="1120" /></a>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="website/public/shots/macos-v115-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="website/public/shots/macos-v115.webp">
+    <img src="website/public/shots/macos-v115.webp" width="31.4%" alt="macOS 窗口并排显示话题列表和 Neo 的置顶帖《请不要把互联网上的戾气带来这里！》">
+  </picture>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="website/public/shots/phone-dark-neo.webp">
+    <source media="(prefers-color-scheme: light)" srcset="website/public/shots/phone-light-neo.webp">
+    <img src="website/public/shots/phone-light-neo.webp" width="9.25%" alt="Pixel 9 竖屏阅读置顶帖">
+  </picture>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="website/public/shots/fold-dark-neo.webp">
+    <source media="(prefers-color-scheme: light)" srcset="website/public/shots/fold-light-neo.webp">
+    <img src="website/public/shots/fold-light-neo.webp" width="20%" alt="Pixel 9 Pro Fold 展开内屏，左侧是话题列表，右侧是置顶帖正文">
+  </picture>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="website/public/shots/tablet-dark-neo.webp">
+    <source media="(prefers-color-scheme: light)" srcset="website/public/shots/tablet-light-neo.webp">
+    <img src="website/public/shots/tablet-light-neo.webp" width="33.25%" alt="Pixel Tablet 横屏分栏阅读置顶帖">
+  </picture>
 </p>
 
 ## 下载安装
@@ -37,11 +56,6 @@ Arch Linux / Omarchy 可用仓库内的 [`PKGBUILD`](packaging/arch/PKGBUILD) �
 - Android 可更换启动图标。零度娘有多种表情，也可选 LINUX DO 标志，背景支持跟随系统深浅色。
 - 阅读进度和草稿保存在本机。回复可跳到引用楼层，编辑器支持 Markdown 预览。
 - Connect 显示官方周期指标。周期数据缺失时会标注当前显示的是账户累计数据。
-
-<p align="center">
-  <a href="website/public/shots/pixel9-fold-cover-v115.webp"><img src="website/public/shots/pixel9-fold-cover-v115.webp" height="285" alt="Pixel 9 Pro Fold 模拟器闭合外屏，单栏阅读社区置顶帖" /></a>
-  <a href="website/public/shots/pixel9-fold-open-v115.webp"><img src="website/public/shots/pixel9-fold-open-v115.webp" height="285" alt="同一模拟器展开内屏，LinDo 左栏为列表，右栏阅读同一篇社区置顶帖" /></a>
-</p>
 
 ## 安全与构建
 

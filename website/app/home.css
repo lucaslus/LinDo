@@ -396,6 +396,8 @@ html.dark .home .hero-wall-scrim {
 .home .hero-inner {
   position: relative;
   z-index: 2;
+  width: min(calc(100% - 28px), 1240px);
+  margin-inline: auto;
 }
 
 .home .hero-header {
@@ -443,96 +445,160 @@ html.dark .home .hero-subtitle {
   margin-top: 28px;
 }
 
-/* ───────────── 界面预览舞台（去除厚重外框，极细 1px 边缘直接展示真实窗口） ───────────── */
+/* 首页设备截图 */
 .home .hero-stage {
-  margin-top: clamp(44px, 5vw, 60px);
+  margin-top: clamp(36px, 4.2vw, 50px);
   scroll-margin-top: 84px;
 }
 
-.home .stage-controls {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin-bottom: 18px;
+.home .theme-shot {
+  display: block;
+}
+.home .theme-shot img.theme-shot-dark,
+html.dark .home .theme-shot img.theme-shot-light {
+  display: none;
+}
+html.dark .home .theme-shot img.theme-shot-dark { display: block; }
+
+.home .device-family-viewport {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--hairline-strong) transparent;
 }
 
-.home .shot-tabs {
+.home .device-family-row {
+  display: flex;
+  gap: clamp(10px, 1.1vw, 16px);
+  min-width: 736px;
+  margin: 0;
+  padding: 8px 6px 12px;
+  list-style: none;
+}
+
+.home .device-family-row > li {
+  /* Each item's share of the row follows its screenshot's aspect ratio. */
+  flex-basis: 0;
+  min-width: 0;
+}
+
+.home .device-shot-trigger {
+  display: block;
+  width: 100%;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  cursor: zoom-in;
+}
+
+.home .device-shot-trigger .theme-shot {
+  overflow: hidden;
+  border-radius: 5px;
+  box-shadow: 0 0 0 1px var(--hairline-strong), 0 3px 8px rgba(0, 0, 0, 0.12);
+}
+
+.home .device-shot-trigger img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.home .shot-lightbox {
+  position: fixed;
+  inset: 0;
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  padding: 16px;
+  border: 0;
+  background: transparent;
+}
+.home .shot-lightbox[open] {
+  display: grid;
+  place-items: center;
+}
+.home .shot-lightbox::backdrop {
+  background: rgba(10, 12, 17, 0.82);
+  backdrop-filter: blur(8px);
+}
+html:has(.shot-lightbox[open]) { overflow: hidden; }
+
+.home .shot-lightbox-inner {
+  width: min(100%, 980px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.home .shot-lightbox-bar {
+  width: min(100%, 600px);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.home .shot-lightbox-tabs {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 4px;
+  padding: 3px;
   border-radius: 999px;
-  background: var(--subtle);
-  border: 1px solid var(--hairline);
+  background: rgba(24, 28, 38, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.12);
 }
 
-.home .shot-tabs button {
-  height: 32px;
-  padding-inline: 15px;
+.home .shot-lightbox-tabs button {
+  height: 28px;
+  padding: 0 12px;
   border-radius: 999px;
-  color: var(--ink-2);
-  font-size: 13.5px;
-  font-weight: 530;
-  transition: color 150ms ease, background-color 150ms ease, box-shadow 150ms ease;
+  font-size: 12.5px;
+  font-weight: 540;
+  color: rgba(241, 245, 249, 0.74);
+  transition: background-color 140ms ease, color 140ms ease;
 }
 
-.home .shot-tabs button:hover {
-  color: var(--ink-1);
+.home .shot-lightbox-tabs button[aria-pressed="true"] {
+  background: rgba(255, 255, 255, 0.16);
+  color: #ffffff;
 }
 
-.home .shot-tabs button[aria-selected="true"] {
-  background: var(--surface);
-  color: var(--ink-1);
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.1);
+.home .shot-lightbox-close {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 540;
+  color: rgba(241, 245, 249, 0.86);
+  background: rgba(24, 28, 38, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.12);
 }
 
-html.dark .home .shot-tabs button[aria-selected="true"] {
-  background: var(--tonal);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
-}
-
-.home .theme-shot,
-.home .theme-shot-light,
-html.dark .home .theme-shot-dark {
-  display: block;
-}
-.home .theme-shot-dark,
-html.dark .home .theme-shot-light {
-  display: none;
-}
-
-.home .shot-stage {
+.home .shot-lightbox-frame {
   display: flex;
-  justify-content: center;
   align-items: center;
-  gap: clamp(14px, 3vw, 28px);
+  justify-content: center;
+  min-height: 0;
 }
 
-.home .shot-stage .theme-shot {
-  width: min(100%, 1060px);
-  border-radius: 13px;
+.home .shot-lightbox-frame .theme-shot {
+  max-width: 100%;
+  border-radius: 14px;
   overflow: hidden;
-  box-shadow: var(--shot-shadow);
-  background: var(--surface);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
 }
-.home .shot-stage-phone .theme-shot,
-.home .shot-stage-icon .theme-shot {
-  width: min(64%, 284px);
-  border-radius: 26px;
-}
-.home .shot-stage-fold .theme-shot:first-child {
-  width: min(27%, 248px);
-  border-radius: 22px;
-}
-.home .shot-stage-fold .theme-shot:last-child {
-  width: min(65%, 560px);
-  border-radius: 18px;
-}
-.home .shot-stage img {
-  width: 100%;
+
+.home .shot-lightbox-frame img {
+  display: block;
+  width: auto;
+  max-width: 100%;
   height: auto;
+  max-height: calc(100dvh - 120px);
 }
 
 .home .stage-meta {
@@ -916,9 +982,6 @@ html.dark .home .home-sections-field {
   .home .hero-stage {
     margin-top: 32px;
   }
-  .home .shot-stage .theme-shot {
-    border-radius: 10px;
-  }
   .home .home-section {
     padding-block: 42px;
   }
@@ -951,7 +1014,6 @@ html.dark .home .home-sections-field {
   .home .hero-wall-track-right {
     animation: none;
   }
-  .home .shot-tabs button,
   .home .stage-theme-btn,
   .home .home-text-link svg {
     transition: none;

@@ -39,4 +39,5 @@ website/out/
 website/public/_pagefind/
 website/next-env.d.ts
 website/tsconfig.tsbuildinfo
+website/test-results/
 website/AGENTS.md

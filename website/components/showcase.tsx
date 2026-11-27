@@ -1,109 +1,74 @@
 "use client";
 
-import { useId, useState, type KeyboardEvent } from "react";
+import { useRef, useState } from "react";
 import { IconMoon, IconSun } from "@/components/icons";
 import { originFromEvent, useThemeSwitch } from "@/components/theme";
 import { APP_SCREENSHOTS, ThemeScreenshot, type ScreenshotKey } from "@/components/theme-screenshot";
 
-const SCREENS = [
-  { id: "desktop", label: "macOS", caption: "macOS 桌面端", shots: ["desktop"] },
-  { id: "phone", label: "Android", caption: "Android 手机端", shots: ["phone"] },
-  { id: "fold", label: "折叠屏", caption: "折叠屏内外屏", shots: ["foldCover", "foldOpen"] },
-  { id: "icon", label: "启动图标", caption: "Android 启动图标", shots: ["icon"] },
-] as const;
+const DEVICES = [
+  { id: "desktop", label: "桌面端" },
+  { id: "phone", label: "手机" },
+  { id: "fold", label: "折叠屏" },
+  { id: "tablet", label: "平板" },
+] as const satisfies ReadonlyArray<{ id: ScreenshotKey; label: string }>;
 
-export function DeviceShowcase({ available }: { available: ScreenshotKey[] }) {
-  const id = useId();
-  const [active, setActive] = useState(0);
+export function DeviceShowcase() {
   const { isDark, mounted, set } = useThemeSwitch();
-  const screens = SCREENS.filter(({ shots }) => shots.every((shot) => available.includes(shot)));
-  const screen = screens[active];
-  if (!screen) return null;
-
-  function onTabKey(event: KeyboardEvent<HTMLButtonElement>, index: number) {
-    let next: number;
-    switch (event.key) {
-      case "ArrowLeft": next = (index + screens.length - 1) % screens.length; break;
-      case "ArrowRight": next = (index + 1) % screens.length; break;
-      case "Home": next = 0; break;
-      case "End": next = screens.length - 1; break;
-      default: return;
-    }
-    event.preventDefault();
-    setActive(next);
-    document.getElementById(`${id}-tab-${next}`)?.focus();
-  }
+  const [active, setActive] = useState<ScreenshotKey>("desktop");
+  const dialog = useRef<HTMLDialogElement>(null);
 
   return (
     <div id="screens" className="hero-stage">
-      {screens.length > 1 && (
-        <div className="stage-controls">
-          <div className="shot-tabs" role="tablist" aria-label="界面预览">
-            {screens.map(({ id: key, label }, index) => (
-              <button
-                key={key}
-                id={`${id}-tab-${index}`}
-                type="button"
-                role="tab"
-                aria-controls={`${id}-panel-${index}`}
-                aria-selected={index === active}
-                tabIndex={index === active ? 0 : -1}
-                onClick={() => setActive(index)}
-                onKeyDown={(event) => onTabKey(event, index)}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {screens.map(({ id: key }, index) => (
-        <div
-          key={key}
-          id={`${id}-panel-${index}`}
-          role={screens.length > 1 ? "tabpanel" : undefined}
-          aria-labelledby={screens.length > 1 ? `${id}-tab-${index}` : undefined}
-          hidden={index !== active}
-        >
-          {index === active && (
-            <div className={`shot-stage shot-stage-${screen.id}`}>
-              {screen.shots.map((shot) => (
-                <ThemeScreenshot
-                  key={shot}
-                  shot={APP_SCREENSHOTS[shot]}
-                  link
-                  priority={shot === "desktop" && index === 0}
-                />
-              ))}
-            </div>
-          )}
-        </div>
-      ))}
+      <div className="device-family-viewport">
+        <ul className="device-family-row" aria-label="各端界面">
+          {DEVICES.map(({ id, label }) => {
+            const shot = APP_SCREENSHOTS[id];
+            return (
+              <li key={id} style={{ flexGrow: shot.width / shot.height }}>
+                <button
+                  type="button"
+                  className="device-shot-trigger"
+                  aria-label={`放大${label}截图`}
+                  aria-haspopup="dialog"
+                  onClick={() => { setActive(id); dialog.current?.showModal(); }}
+                >
+                  <ThemeScreenshot shot={shot} />
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
 
       <div className="stage-meta">
-        <span>{screen.caption} · 随站点主题切换</span>
         <div className="stage-theme-switch" role="group" aria-label="切换预览主题">
-          <button
-            type="button"
-            className="stage-theme-btn stage-theme-light"
-            aria-pressed={mounted ? !isDark : undefined}
-            onClick={(e) => set("light", originFromEvent(e))}
-          >
-            <IconSun size={13} />
-            浅色
+          <button type="button" className="stage-theme-btn stage-theme-light"
+            aria-pressed={mounted ? !isDark : undefined} onClick={(e) => set("light", originFromEvent(e))}>
+            <IconSun size={13} />浅色
           </button>
-          <button
-            type="button"
-            className="stage-theme-btn stage-theme-dark"
-            aria-pressed={mounted ? isDark : undefined}
-            onClick={(e) => set("dark", originFromEvent(e))}
-          >
-            <IconMoon size={13} />
-            深色
+          <button type="button" className="stage-theme-btn stage-theme-dark"
+            aria-pressed={mounted ? isDark : undefined} onClick={(e) => set("dark", originFromEvent(e))}>
+            <IconMoon size={13} />深色
           </button>
         </div>
       </div>
+
+      <dialog ref={dialog} className="shot-lightbox" aria-label="界面大图"
+        onClick={(e) => { if (e.target === e.currentTarget) dialog.current?.close(); }}>
+        <div className="shot-lightbox-inner">
+          <div className="shot-lightbox-bar">
+            <div className="shot-lightbox-tabs" role="group" aria-label="选择设备">
+              {DEVICES.map(({ id, label }) => (
+                <button key={id} type="button" aria-pressed={active === id} onClick={() => setActive(id)}>
+                  {label}
+                </button>
+              ))}
+            </div>
+            <button type="button" className="shot-lightbox-close" onClick={() => dialog.current?.close()}>关闭</button>
+          </div>
+          <div className="shot-lightbox-frame"><ThemeScreenshot shot={APP_SCREENSHOTS[active]} /></div>
+        </div>
+      </dialog>
     </div>
   );
 }
