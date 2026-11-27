@@ -219,8 +219,6 @@ internal fun ComposerSheet(
         accountUsername?.takeIf { it.isNotBlank() }
             ?: UserApiKeyAuthManager.currentUser?.username?.takeIf { it.isNotBlank() && it != "linuxdo_user" }
     }
-    val canOpenInstantly = immediateOwner != null &&
-        (action != ComposerAction.EDIT || post?.raw != null || initialDraft?.raw != null)
 
     fun buildHydratedLocalDraft(
         owner: String,
@@ -281,8 +279,9 @@ internal fun ComposerSheet(
                         base.raw.isBlank() -> initialRaw
                         else -> base.raw.trimEnd('\n') + "\n\n" + initialRaw
                     }
-                    val targetNum = if (initialDraft != null) base.replyToPostNumber else replyToPostNumber
-                    val targetUser = if (initialDraft != null) base.replyToUsername else replyToUsername
+                    val restoreTarget = initialDraft != null || (local != null && base.raw.isNotBlank())
+                    val targetNum = if (restoreTarget) base.replyToPostNumber else replyToPostNumber
+                    val targetUser = if (restoreTarget) base.replyToUsername else replyToUsername
                     base.copy(raw = mergedRaw, replyToPostNumber = targetNum, replyToUsername = targetUser)
                 }
                 ComposerAction.EDIT -> base.copy(postNumber = seed.postNumber ?: base.postNumber)
@@ -293,8 +292,8 @@ internal fun ComposerSheet(
 
     val initialInstantPair = remember(stateKey) {
         val owner = immediateOwner
-        if (owner != null && (action != ComposerAction.EDIT || post?.raw != null || initialDraft?.raw != null)) {
-            val initSourceRaw = post?.raw ?: initialDraft?.raw.orEmpty()
+        if (owner != null && (action != ComposerAction.EDIT || post?.raw != null)) {
+            val initSourceRaw = post?.raw.orEmpty()
             val initDraft = buildHydratedLocalDraft(
                 owner = owner,
                 sourceRaw = initSourceRaw,
@@ -321,11 +320,12 @@ internal fun ComposerSheet(
         mutableStateOf<ComposerDraftSession?>(initialInstantPair?.second)
     }
     var originalRaw by remember(stateKey) {
-        mutableStateOf(if (action == ComposerAction.EDIT) (post?.raw ?: initialDraft?.raw.orEmpty()) else "")
+        mutableStateOf(if (action == ComposerAction.EDIT) post?.raw.orEmpty() else "")
     }
     var originalTitle by remember(stateKey) { mutableStateOf(topicTitle) }
     var originalCategoryId by remember(stateKey) { mutableStateOf<Int?>(initialCategoryId) }
     var originalTags by remember(stateKey) { mutableStateOf(initialTags) }
+    var checkingRemoteDraft by remember(stateKey) { mutableStateOf(true) }
     var conflictRemoteDraft by remember(stateKey) { mutableStateOf<CloudDraftItem?>(null) }
     var prepared by remember(stateKey) { mutableStateOf(initialInstantPair != null) }
     var prepareError by remember(stateKey) { mutableStateOf<String?>(null) }
@@ -494,7 +494,7 @@ internal fun ComposerSheet(
     }
 
     // 兜底保护：若组件因外部不可抗因素（如会话切换）意外卸载且未走「不保存 / 已发布」，自动补推一次后台云端草稿同步
-    val latestHasChangesForDispose by rememberUpdatedState(hasChanges)
+    val latestHasChangesForDispose by rememberUpdatedState(hasChanges && !checkingRemoteDraft && conflictRemoteDraft == null)
     val latestSessionForDispose by rememberUpdatedState(session)
     val latestDraftForDispose by rememberUpdatedState(draft)
     DisposableEffect(stateKey) {
@@ -534,6 +534,7 @@ internal fun ComposerSheet(
     }
 
     LaunchedEffect(stateKey, prepareRetry) {
+        checkingRemoteDraft = true
         val alreadyPreparedInstantly = prepared && session != null && prepareError == null
         if (!alreadyPreparedInstantly) {
             prepared = false
@@ -624,6 +625,8 @@ internal fun ComposerSheet(
             if (!prepared) {
                 prepareError = error.message ?: LinDoComposerCopy.CANNOT_OPEN_COMPOSER_RETRY.text
             }
+        } finally {
+            checkingRemoteDraft = false
         }
     }
 
@@ -644,8 +647,8 @@ internal fun ComposerSheet(
 
     // 后台云端草稿同步：本机草稿已实时加密落盘（每次按键零网络请求），云端同步退避至停笔 8s 后静默执行；
     // 即使遇到 VPN 抖动或 Cloudflare 拦截也严禁阻断编辑器「发送」按钮或主动弹出验证页（仅在实际点击发送被拦截时才提示验证）！
-    LaunchedEffect(draft, prepared, syncRetry, conflictRemoteDraft, draftSyncBlockedByVerification) {
-        if (!prepared || !hasChanges || isUntouchedTemplate || conflictRemoteDraft != null || draftSyncBlockedByVerification) return@LaunchedEffect
+    LaunchedEffect(draft, prepared, syncRetry, checkingRemoteDraft, conflictRemoteDraft, draftSyncBlockedByVerification) {
+        if (checkingRemoteDraft || !prepared || !hasChanges || isUntouchedTemplate || conflictRemoteDraft != null || draftSyncBlockedByVerification) return@LaunchedEffect
         if (draft.raw.trim().length < 5) return@LaunchedEffect
         delay(8_000L)
         if (!hasChanges || isUntouchedTemplate || conflictRemoteDraft != null || draftSyncBlockedByVerification) return@LaunchedEffect
@@ -730,8 +733,12 @@ internal fun ComposerSheet(
 
     val titleTrimmed = draft.title.trim()
     val titleRemaining = LinuxDoSiteRules.MIN_TOPIC_TITLE_LENGTH - titleTrimmed.length
+    val validateTitle = action == ComposerAction.NEW_TOPIC || (isEditingTopicOp && titleTrimmed != originalTitle.trim())
+    val validateTags = action == ComposerAction.NEW_TOPIC || (isEditingTopicOp && (
+        draft.categoryId != originalCategoryId || draft.tags != originalTags
+    ))
     val titleValidation = when {
-        !prepared || !hasTopicMetaControls -> null
+        !prepared || !validateTitle -> null
         titleTrimmed.isEmpty() -> LinDoComposerCopy.REQUIRED_TITLE_HINT.text
         titleRemaining > 0 -> LinDoComposerCopy.TITLE_CHARS_REMAINING.format(titleRemaining)
         else -> null
@@ -739,7 +746,7 @@ internal fun ComposerSheet(
     val rawTrimmed = draft.raw.trim()
     val bodyRemaining = LinuxDoSiteRules.MIN_POST_RAW_LENGTH - rawTrimmed.length
     val bodyValidation = when {
-        !prepared -> null
+        !prepared || (action == ComposerAction.EDIT && draft.raw == originalRaw) -> null
         rawTrimmed.isEmpty() -> if (action == ComposerAction.REPLY) {
             LinDoComposerCopy.REQUIRED_REPLY_HINT.text
         } else {
@@ -749,14 +756,14 @@ internal fun ComposerSheet(
         else -> null
     }
     val focusBodyInitially = remember(prepared) { !hasTopicMetaControls || draft.title.isNotBlank() }
-    val tagValidationOk = !hasTopicMetaControls || (
+    val tagValidationOk = !validateTags || (
         !tagsLoading &&
             tagChoices.requiredGroup == null &&
             tagChoices.forbiddenMessage == null
         )
     val needsVerification = submitError.isSiteVerificationError()
-    val canClickSubmit = prepared && !busy && !needsVerification && !PlatformSessionRecovery.verifying &&
-        !(hasTopicMetaControls && tagsLoading) &&
+    val canClickSubmit = prepared && conflictRemoteDraft == null && !busy && !needsVerification && !PlatformSessionRecovery.verifying &&
+        !(validateTags && tagsLoading) &&
         (action != ComposerAction.EDIT || hasChanges)
     val canSubmit = canClickSubmit && titleValidation == null && bodyValidation == null && tagValidationOk
 
@@ -986,9 +993,18 @@ internal fun ComposerSheet(
                 else -> {
                     if (action == ComposerAction.REPLY) {
                         val floor = draft.replyToPostNumber
-                        val name = replyToDisplayName?.takeIf { it.isNotBlank() }
+                        val sameFloor = floor == replyToPostNumber
+                        if (!sameFloor && initialDraft == null) {
+                            TextButton(enabled = !busy, onClick = {
+                                draft = draft.copy(replyToPostNumber = replyToPostNumber, replyToUsername = replyToUsername)
+                                session?.update(draft)
+                            }) {
+                                Text(replyToPostNumber?.let { "将当前草稿改为回复第 ${it} 楼" } ?: "将当前草稿改为回复话题")
+                            }
+                        }
+                        val name = replyToDisplayName?.takeIf { sameFloor && it.isNotBlank() }
                             ?: draft.replyToUsername?.takeIf { it.isNotBlank() }
-                        val snippet = if (floor == null) topicTitle else replyToContentSnippet.orEmpty()
+                        val snippet = if (floor == null) topicTitle else replyToContentSnippet.takeIf { sameFloor }.orEmpty()
                         if (floor != null || snippet.isNotBlank()) {
                             Box(
                                 modifier = Modifier
@@ -1034,8 +1050,8 @@ internal fun ComposerSheet(
                                                 GoogleAccountRingAvatar(
                                                     letter = name,
                                                     username = draft.replyToUsername ?: name,
-                                                    avatarUrl = replyToAvatarUrl,
-                                                    animatedAvatar = replyToAnimatedAvatar,
+                                                    avatarUrl = replyToAvatarUrl.takeIf { sameFloor },
+                                                    animatedAvatar = replyToAnimatedAvatar.takeIf { sameFloor },
                                                     avatarSize = 19.dp,
                                                     strokeWidth = 0.dp
                                                 )
@@ -1338,7 +1354,9 @@ internal fun ComposerSheet(
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Text(
-                                text = LinDoComposerCopy.CLOUD_CONFLICT_DETECTED.text,
+                                text = if (action == ComposerAction.REPLY && draft.replyToPostNumber != remote.replyToPostNumber) {
+                                    remote.replyToPostNumber?.let { "云端草稿回复第 ${it} 楼" } ?: "云端草稿回复整个话题"
+                                } else LinDoComposerCopy.CLOUD_CONFLICT_DETECTED.text,
                                 modifier = Modifier.weight(1f),
                                 color = palette.inkPrimary,
                                 fontSize = 12.5.sp,

@@ -54,7 +54,9 @@ sealed interface PostBlockNode {
         val captions: List<String> = emptyList(),
         val fullUrls: List<String> = urls,
         val linkUrls: List<String?> = emptyList(),
-        val aspectRatios: List<Float?> = emptyList()
+        val aspectRatios: List<Float?> = emptyList(),
+        val widths: List<Int?> = emptyList(),
+        val heights: List<Int?> = emptyList()
     ) : PostBlockNode
     data class Table(val rows: List<List<List<PostBlockNode>>>, val headerRows: Set<Int>) : PostBlockNode
     data class Media(val label: String, val url: String?, val kind: String) : PostBlockNode {
@@ -591,10 +593,11 @@ object DiscourseAstParser {
                     flush()
                     resolveImageDisplayAndFullUrl(node)?.let { (displayUrl, fullUrl) ->
                         val linkUrl = resolveImageLinkUrl(node, style.href)
-                        val rawW = node.attr("width").trim().removeSuffix("px").toFloatOrNull()
-                        val rawH = node.attr("height").trim().removeSuffix("px").toFloatOrNull()
-                        val aspectRatio = if (rawW != null && rawH != null && rawW >= 48f && rawH >= 48f) {
-                            (rawW / rawH).coerceIn(0.45f, 3.0f)
+                        val dims = extractImageDimensionsFromElement(node, displayUrl)
+                        val imgW = dims?.first
+                        val imgH = dims?.second
+                        val aspectRatio = if (imgW != null && imgH != null && imgW >= 48 && imgH >= 48) {
+                            (imgW.toFloat() / imgH.toFloat()).coerceIn(0.25f, 6.0f)
                         } else null
                         val prev = result.lastOrNull() as? PostBlockNode.ImageGallery
                         if (prev != null) {
@@ -602,12 +605,16 @@ object DiscourseAstParser {
                             val prevFullUrls = List(prev.urls.size) { prev.fullUrls.getOrElse(it) { prev.urls[it] } }
                             val prevLinkUrls = List(prev.urls.size) { prev.linkUrls.getOrNull(it) }
                             val prevRatios = List(prev.urls.size) { prev.aspectRatios.getOrNull(it) }
+                            val prevWidths = List(prev.urls.size) { prev.widths.getOrNull(it) }
+                            val prevHeights = List(prev.urls.size) { prev.heights.getOrNull(it) }
                             result[result.lastIndex] = PostBlockNode.ImageGallery(
                                 urls = prev.urls + displayUrl,
                                 captions = prevCaptions + node.attr("alt"),
                                 fullUrls = prevFullUrls + fullUrl,
                                 linkUrls = prevLinkUrls + linkUrl,
-                                aspectRatios = prevRatios + aspectRatio
+                                aspectRatios = prevRatios + aspectRatio,
+                                widths = prevWidths + imgW,
+                                heights = prevHeights + imgH
                             )
                         } else {
                             result += PostBlockNode.ImageGallery(
@@ -615,7 +622,9 @@ object DiscourseAstParser {
                                 captions = listOf(node.attr("alt")),
                                 fullUrls = listOf(fullUrl),
                                 linkUrls = listOf(linkUrl),
-                                aspectRatios = listOf(aspectRatio)
+                                aspectRatios = listOf(aspectRatio),
+                                widths = listOf(imgW),
+                                heights = listOf(imgH)
                             )
                         }
                     } ?: run {
@@ -716,6 +725,68 @@ object DiscourseAstParser {
     }
 
     private val imageFileExtensions = listOf(".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".svg")
+    private val inlineStyleWidthPxRegex = Regex("""(?:^|;)\s*width\s*:\s*(\d+(?:\.\d+)?)px\b""", RegexOption.IGNORE_CASE)
+    private val inlineStyleHeightPxRegex = Regex("""(?:^|;)\s*height\s*:\s*(\d+(?:\.\d+)?)px\b""", RegexOption.IGNORE_CASE)
+    private val discourseOptimizedUrlDimRegex = Regex(
+        """[_-](\d{2,5})x(\d{2,5})\.(?:png|jpe?g|webp|gif|avif)(?:[?#\s,]|$)""",
+        RegexOption.IGNORE_CASE
+    )
+    private val lightboxMetaDimRegex = Regex("""(\d{2,5})\s*[×xX]\s*(\d{2,5})""")
+
+    private fun parsePositiveImgDim(raw: String?): Int? {
+        val trimmed = raw?.trim().orEmpty()
+        if (trimmed.isEmpty() || trimmed.endsWith("%")) return null
+        val num = trimmed.removeSuffix("px").removeSuffix("PX").toFloatOrNull() ?: return null
+        val rounded = kotlin.math.round(num).toInt()
+        return rounded.takeIf { it in 1..20000 }
+    }
+
+    internal fun parseDimsFromDiscourseImageUrl(urlOrSrcset: String?): Pair<Int, Int>? {
+        val text = urlOrSrcset?.trim().orEmpty()
+        if (text.isEmpty()) return null
+        val m = discourseOptimizedUrlDimRegex.find(text) ?: return null
+        val w = m.groupValues[1].toIntOrNull() ?: return null
+        val h = m.groupValues[2].toIntOrNull() ?: return null
+        return if (w in 48..20000 && h in 48..20000) w to h else null
+    }
+
+    internal fun extractImageDimensionsFromElement(node: Element, displayUrl: String): Pair<Int, Int>? {
+        // 1. HTML width & height attributes (Discourse's exact layout size, incl. 50%/75% scaling)
+        val attrW = parsePositiveImgDim(node.attr("width"))
+        val attrH = parsePositiveImgDim(node.attr("height"))
+        if (attrW != null && attrH != null) return attrW to attrH
+
+        // 2. Inline pixel style or data-thumbnail-* / data-width/height attributes
+        val styleText = node.attr("style")
+        if (styleText.isNotBlank()) {
+            val sw = parsePositiveImgDim(inlineStyleWidthPxRegex.find(styleText)?.groupValues?.getOrNull(1))
+            val sh = parsePositiveImgDim(inlineStyleHeightPxRegex.find(styleText)?.groupValues?.getOrNull(1))
+            if (sw != null && sh != null) return sw to sh
+        }
+        val dataW = parsePositiveImgDim(node.attr("data-thumbnail-width").ifBlank { node.attr("data-width") })
+        val dataH = parsePositiveImgDim(node.attr("data-thumbnail-height").ifBlank { node.attr("data-height") })
+        if (dataW != null && dataH != null) return dataW to dataH
+
+        // 3. Discourse optimized URL suffix `_2_690x388.jpeg` in displayUrl / src / srcset
+        parseDimsFromDiscourseImageUrl(displayUrl)?.let { return it }
+        parseDimsFromDiscourseImageUrl(node.attr("src"))?.let { return it }
+        parseDimsFromDiscourseImageUrl(node.attr("srcset"))?.let { return it }
+
+        // 4. Ancestor `.lightbox-wrapper .meta .informations` (`1920×1080 245 KB`)
+        val wrapper = node.parents().firstOrNull { it.hasClass("lightbox-wrapper") || it.hasClass("lightbox") }
+        val infoText = wrapper?.selectFirst(".meta .informations")?.text().orEmpty()
+        if (infoText.isNotBlank()) {
+            val m = lightboxMetaDimRegex.find(infoText)
+            if (m != null) {
+                val mw = m.groupValues[1].toIntOrNull()
+                val mh = m.groupValues[2].toIntOrNull()
+                if (mw != null && mh != null && mw in 1..20000 && mh in 1..20000) {
+                    return mw to mh
+                }
+            }
+        }
+        return null
+    }
 
     private fun resolveImageLinkUrl(node: Element, inheritedHref: String?): String? {
         val anchor = node.parents().firstOrNull { it.normalName() == "a" }

@@ -372,6 +372,47 @@ class PreLaunchFullAppUiE2ETest {
     }
 
     @Test
+    fun wideAndroidNavigationStaysCenteredAcrossPanesAndTabs() = runDesktopComposeUiTest(width = 1024, height = 800) {
+        val previousPlatform = isAndroidRuntimeOverrideForTest
+        val previousSplit = UserApiKeyAuthManager.uiWideSplitEnabled
+        try {
+            isAndroidRuntimeOverrideForTest = true
+            UserApiKeyAuthManager.uiWideSplitEnabled = true
+            setContent { LinDoApp(systemAnimationsEnabled = false) }
+            waitForText("先逛逛")
+            onNodeWithText("先逛逛").edtClick()
+            waitForContentDescription("登录后参与回复")
+
+            fun assertCenteredNav(checkReply: Boolean) = onEdt {
+                val nav = onNodeWithTag("main_navigation_bar").fetchSemanticsNode().boundsInRoot
+                val window = onRoot().fetchSemanticsNode().boundsInRoot
+                assertEquals(window.center.x, nav.center.x, 1f)
+                assertTrue(nav.width in 300f..window.width * 0.6f)
+                if (checkReply) {
+                    val reply = onNodeWithContentDescription("登录后参与回复").fetchSemanticsNode().boundsInRoot
+                    assertEquals(reply.width, reply.height, 1f)
+                    val scrollPanes = onAllNodes(hasScrollToIndexAction()).fetchSemanticsNodes()
+                    assertTrue(scrollPanes.any { it.boundsInRoot.center.x >= window.center.x && it.boundsInRoot.bottom >= nav.bottom },
+                        "Reader content must extend behind the floating navigation")
+                    assertEquals(nav.center.y, reply.center.y, 1f)
+                    assertTrue(nav.right < reply.left, "The reply control must stay clear of the navigation")
+                }
+            }
+
+            assertCenteredNav(checkReply = true)
+            onNodeWithContentDescription("收起话题列表").edtClick()
+            waitForIdle()
+            assertCenteredNav(checkReply = true)
+            onNodeWithText("我的").edtClick()
+            waitForText("外观")
+            assertCenteredNav(checkReply = false)
+        } finally {
+            isAndroidRuntimeOverrideForTest = previousPlatform
+            UserApiKeyAuthManager.uiWideSplitEnabled = previousSplit
+        }
+    }
+
+    @Test
     fun desktopWideSplitPaneFullFeatureJourneyE2E() = runDesktopComposeUiTest(
         width = 1280,
         height = 840

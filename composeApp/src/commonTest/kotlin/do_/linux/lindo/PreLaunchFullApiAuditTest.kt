@@ -444,7 +444,7 @@ class PreLaunchFullApiAuditTest {
         authenticateTestUser(username = "lucas", userId = 42)
         val requestedUrls = CopyOnWriteArrayList<String>()
 
-        fun buildTopicListJson(ids: List<Int>, pinnedFirst: Boolean = false): String = buildJsonObject {
+        fun buildTopicListJson(ids: List<Int>, pinnedFirst: Boolean = false, moreUrl: String? = null): String = buildJsonObject {
             put(
                 "users",
                 buildJsonArray {
@@ -461,6 +461,7 @@ class PreLaunchFullApiAuditTest {
             put(
                 "topic_list",
                 buildJsonObject {
+                    if (moreUrl != null) put("more_topics_url", moreUrl)
                     put(
                         "topics",
                         buildJsonArray {
@@ -573,7 +574,7 @@ class PreLaunchFullApiAuditTest {
                     url == "https://linux.do/site.json" ->
                         200 to """{"can_create_tag":true,"categories":[{"id":4,"name":"开发调优","slug":"develop","color":"32C3C3","topic_template":"请填写复现步骤"}]}"""
                     url == "https://linux.do/latest.json?no_definitions=true" ->
-                        200 to buildTopicListJson(listOf(1001, 1002))
+                        200 to buildTopicListJson(listOf(1001, 1002), moreUrl = "/latest?page=1")
                     url == "https://linux.do/top.json?no_definitions=true&period=weekly" ->
                         200 to buildTopicListJson(listOf(2002, 2003, 2004, 2005))
                     url == "https://linux.do/top.json?no_definitions=true&period=daily" ->
@@ -582,6 +583,8 @@ class PreLaunchFullApiAuditTest {
                         200 to buildTopicListJson(listOf(1101))
                     url == "https://linux.do/unread.json?no_definitions=true" ->
                         200 to buildTopicListJson(listOf(1201))
+                    url == "https://linux.do/tags/c/develop/4/kotlin/l/top.json?no_definitions=true&period=weekly" ->
+                        200 to buildTopicListJson(listOf(1501))
                     url == "https://linux.do/c/develop/4/l/top.json?no_definitions=true&period=weekly" ->
                         200 to buildTopicListJson(listOf(1301))
                     url == "https://linux.do/tag/kotlin.json?no_definitions=true" ->
@@ -633,21 +636,28 @@ class PreLaunchFullApiAuditTest {
             assertTrue(LinuxDoRepository.canCreateTag)
             assertEquals("请填写复现步骤", LinuxDoRepository.fetchCategoryTopicTemplate(4))
 
-            assertEquals(listOf(1001, 1002), LinuxDoRepository.fetchTopics("latest.json").map { it.id })
+            val latest = LinuxDoRepository.fetchTopicsPage("latest.json")
+            assertEquals(listOf(1001, 1002), latest.topics.map { it.id })
+            assertTrue(latest.hasMore)
             assertEquals(listOf(2002, 2003, 2004, 2005), LinuxDoRepository.fetchTopics("top.json", topPeriod = "weekly").map { it.id })
             assertEquals(listOf(1101), LinuxDoRepository.fetchTopics("new.json").map { it.id })
             assertEquals(listOf(1201), LinuxDoRepository.fetchTopics("unread.json").map { it.id })
             assertEquals(listOf(1301), LinuxDoRepository.fetchTopics("top", categoryId = 4, topPeriod = "weekly").map { it.id })
             assertEquals(listOf(1401), LinuxDoRepository.fetchTopics("latest.json", tag = "kotlin").map { it.id })
 
-            // Follow cursor pagination + category/tag filtering
-            val filteredFollow = LinuxDoRepository.fetchTopics("follow", categoryId = 4, page = 0, tag = "kotlin")
-            assertEquals(listOf(3101), filteredFollow.map { it.id })
-            assertTrue(LinuxDoRepository.computeHasMoreTopics("follow", currentPage = 0, fetchedCount = filteredFollow.size))
+            assertEquals(listOf(1501), LinuxDoRepository.fetchTopics("top", categoryId = 4, tag = "kotlin", topPeriod = "weekly").map { it.id })
 
-            val nextFollow = LinuxDoRepository.fetchTopics("follow", page = 1)
-            assertEquals(listOf(3103), nextFollow.map { it.id })
-            assertFalse(LinuxDoRepository.computeHasMoreTopics("follow", currentPage = 1, fetchedCount = nextFollow.size))
+            // Follow cursor pagination + category/tag filtering
+            val emptyFilteredPage = LinuxDoRepository.fetchTopicsPage("follow", tag = "does-not-match")
+            assertTrue(emptyFilteredPage.topics.isEmpty())
+            assertTrue(emptyFilteredPage.hasMore)
+            val filteredFollow = LinuxDoRepository.fetchTopicsPage("follow", categoryId = 4, page = 0, tag = "kotlin")
+            assertEquals(listOf(3101), filteredFollow.topics.map { it.id })
+            assertTrue(filteredFollow.hasMore)
+
+            val nextFollow = LinuxDoRepository.fetchTopicsPage("follow", page = 1)
+            assertEquals(listOf(3103), nextFollow.topics.map { it.id })
+            assertFalse(nextFollow.hasMore)
 
             // Search
             val searchHits = LinuxDoRepository.searchCommunity("kotlin", page = 1)

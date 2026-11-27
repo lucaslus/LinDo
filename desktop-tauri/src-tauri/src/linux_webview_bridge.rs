@@ -15,7 +15,7 @@ const CONNECT_PROBE_LABEL: &str = "lindo-connect-probe";
 const ISOLATED_WORLD_NAME: &str = "lindo_isolated";
 
 const LINUX_ORIGIN_HTML: &str =
-    "<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body></body></html>";
+    r#"<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="lindo-bridge-document"></head><body></body></html>"#;
 
 const FORUM_ECH_PINNED_HOSTS: [&str; 17] = [
     "linux.do",
@@ -698,33 +698,6 @@ async fn delete_forum_cookie_async(wv: &WebviewWindow, ck: LinuxForumCookie) -> 
     Ok(())
 }
 
-fn clear_challenge_retry_counters_fire_and_forget(wv: &WebviewWindow) {
-    let _ = wv.with_webview(|platform_wv| {
-        use webkit2gtk::{CookieManagerExt, WebViewExt, WebsiteDataManagerExt};
-        let inner = platform_wv.inner();
-        let Some(cm) = inner
-            .website_data_manager()
-            .and_then(|dm| dm.cookie_manager())
-        else {
-            return;
-        };
-        let cm_clone = cm.clone();
-        cm.cookies("https://linux.do/", None::<&gio::Cancellable>, move |res| {
-            if let Ok(list) = res {
-                for mut sc in list {
-                    let is_counter = sc
-                        .name()
-                        .map(|n| matches!(n.as_str(), "cf_chl_rc_ni" | "cf_chl_rc_i" | "cf_chl_rc_m"))
-                        .unwrap_or(false);
-                    if is_counter {
-                        cm_clone.delete_cookie(&mut sc, None::<&gio::Cancellable>, |_| {});
-                    }
-                }
-            }
-        });
-    });
-}
-
 #[allow(deprecated)]
 fn eval_fire_and_forget_in_world(
     wv: &WebviewWindow,
@@ -1132,9 +1105,6 @@ pub async fn native_call(
                 return Err("非法跳转域名".to_string());
             }
             let target_str = parsed.as_str().to_string();
-            if target_str == "https://linux.do/about" {
-                clear_challenge_retry_counters_fire_and_forget(&wv);
-            }
             let cur_port = ACTIVE_PROXY_PORT.load(Ordering::SeqCst);
             BRIDGE_LOADING.store(true, Ordering::Relaxed);
             wv.with_webview(move |platform_wv| {

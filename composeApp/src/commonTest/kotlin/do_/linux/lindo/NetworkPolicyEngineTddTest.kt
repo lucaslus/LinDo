@@ -323,13 +323,13 @@ class NetworkPolicyEngineTddTest {
         assertTrue(SilentVerifyPolicy.isInteractiveConfirmed(interactiveBegin = false, widgetMountedDurationMs = 3_500L))
         assertTrue(SilentVerifyPolicy.isInteractiveConfirmed(interactiveBegin = true, widgetMountedDurationMs = 0L))
 
-        // 前台常规状态（无论 FOREGROUND 还是 PREWARM）确认需人工交互时直接主动弹出安全确认，不再丢弃！
+        // 前台阻塞请求可展开面板，后台预检仅提示。
         assertEquals(SilentVerifyStep.Escalate("interactive_required"), SilentVerifyPolicy.decide(fg, SilentProbeSignal.INTERACTIVE_REQUIRED, 400L, appForeground = true))
-        assertEquals(SilentVerifyStep.Escalate("interactive_required_proactive"), SilentVerifyPolicy.decide(pre, SilentProbeSignal.INTERACTIVE_REQUIRED, 400L, appForeground = true))
+        assertEquals(SilentVerifyStep.Abandon("background_requires_user"), SilentVerifyPolicy.decide(pre, SilentProbeSignal.INTERACTIVE_REQUIRED, 400L, appForeground = true))
 
         // 正在打字保护（< 2.5s）：暂缓收键盘弹大窗，返回 HoldForTyping；点击右下角提示框或主动发送写操作立即弹出
         assertEquals(
-            SilentVerifyStep.HoldForTyping,
+            SilentVerifyStep.Abandon("background_requires_user"),
             SilentVerifyPolicy.decide(pre, SilentProbeSignal.INTERACTIVE_REQUIRED, 600L, appForeground = true, isUserActivelyTyping = true)
         )
         assertEquals(
@@ -439,26 +439,16 @@ class NetworkPolicyEngineTddTest {
     }
 
     @Test
-    fun t12_twoStrikeIneffectiveClearanceSelfHeal_and_ordinaryGet200NeverWashesWriteBreaker() = runBlocking {
+    fun t12_rejectedReplayStopsOnceAndReadSuccessPreservesWriteCooldown() = runBlocking {
         val coord = NetworkPolicyEngine.verifyCoordinator
         val t0 = System.currentTimeMillis()
 
         val r1 = (coord.joinOrStart(VerifyPresentation.BLOCKING, nowMs = t0) as VerifyJoin.Leader).round
         coord.finishFlight(r1, passed = true, finalPresentation = VerifyPresentation.BLOCKING, nowMs = t0 + 1_000L)
 
-        // 1st post-verify replay challenge -> SelfHealAndRetryOnce (no 60s freeze yet!)
-        val firstDecision = coord.onPostVerifyReplayChallenged(r1, nowMs = t0 + 1_500L)
-        assertEquals(do_.linux.lindo.core.network.IneffectiveClearanceDecision.SelfHealAndRetryOnce, firstDecision)
-        assertFalse(coord.snapshot(t0 + 1_500L).cooldownIsIneffective)
-
-        // Cleanroom reset with preserveAutoHealGuard = true allows immediate re-verify while keeping 2nd-strike guard armed
-        coord.clearCooldownsForCleanReset(preserveAutoHealGuard = true)
-        val r2 = (coord.joinOrStart(VerifyPresentation.BLOCKING, nowMs = t0 + 2_000L) as VerifyJoin.Leader).round
-        coord.finishFlight(r2, passed = true, finalPresentation = VerifyPresentation.BLOCKING, nowMs = t0 + 3_000L)
-
-        // 2nd consecutive post-verify replay challenge -> trips 60s ineffective clearance breaker!
-        val secondDecision = coord.onPostVerifyReplayChallenged(r2, nowMs = t0 + 3_500L)
-        assertTrue(secondDecision is do_.linux.lindo.core.network.IneffectiveClearanceDecision.TripBreaker)
+        assertEquals(60_000L, coord.recordIneffectiveClearance(r1, nowMs = t0 + 1_500L))
+        assertEquals(58_000L, coord.recordIneffectiveClearance(r1, nowMs = t0 + 3_500L))
+        assertFalse(coord.finishFlight(r1, true, VerifyPresentation.BLOCKING, nowMs = t0 + 3_600L).passed)
         assertTrue(coord.snapshot(t0 + 3_600L).cooldownIsIneffective)
 
         // Regression for LinDoNetworkStack.kt:3190: ordinary GET 200 MUST NOT wipe out write breaker!

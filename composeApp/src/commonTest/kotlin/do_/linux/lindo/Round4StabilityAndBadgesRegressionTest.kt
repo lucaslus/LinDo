@@ -517,13 +517,13 @@ class Round4StabilityAndBadgesRegressionTest {
                 }
             }
         ) {
-            val firstPage = LinuxDoRepository.fetchTopics(path = "follow", page = 0)
-            assertEquals(3, firstPage.size)
-            assertTrue(LinuxDoRepository.computeHasMoreTopics("follow", currentPage = 0, fetchedCount = firstPage.size))
+            val firstPage = LinuxDoRepository.fetchTopicsPage(path = "follow", page = 0)
+            assertEquals(3, firstPage.topics.size)
+            assertTrue(firstPage.hasMore)
 
-            val secondPage = LinuxDoRepository.fetchTopics(path = "follow", page = 1)
-            assertEquals(1, secondPage.size)
-            assertFalse(LinuxDoRepository.computeHasMoreTopics("follow", currentPage = 1, fetchedCount = secondPage.size))
+            val secondPage = LinuxDoRepository.fetchTopicsPage(path = "follow", page = 1)
+            assertEquals(1, secondPage.topics.size)
+            assertFalse(secondPage.hasMore)
         }
     }
 

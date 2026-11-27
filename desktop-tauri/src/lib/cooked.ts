@@ -1,5 +1,6 @@
 import {
   getCachedForumMediaBlobUrl,
+  getCachedImageNaturalDimensions,
   needsSameOriginMediaBridge,
   TRANSPARENT_1PX_GIF,
 } from "./forumMedia";
@@ -509,12 +510,62 @@ function parsePositiveImgDimension(raw: string | null): number | null {
   return Number.isFinite(n) && n > 0 && n <= 20000 ? n : null;
 }
 
-function extractImageDimensions(el: HTMLImageElement): { width: number; height: number } | null {
+function parseDimsFromInlineStyle(styleText: string): { width: number; height: number } | null {
+  if (!styleText) return null;
+  const wMatch = /(?:^|;)\s*width\s*:\s*(\d+(?:\.\d+)?)px\b/i.exec(styleText);
+  const hMatch = /(?:^|;)\s*height\s*:\s*(\d+(?:\.\d+)?)px\b/i.exec(styleText);
+  if (!wMatch || !hMatch) return null;
+  const w = parsePositiveImgDimension(wMatch[1]);
+  const h = parsePositiveImgDimension(hMatch[1]);
+  return w && h ? { width: w, height: h } : null;
+}
+
+export function parseDimsFromDiscourseImageUrl(
+  urlOrSrcset: string
+): { width: number; height: number } | null {
+  if (!urlOrSrcset) return null;
+  // Matches Discourse optimized upload URLs such as `.../optimized/.../hash_2_690x388.jpeg`
+  const m = /[_-](\d{2,5})x(\d{2,5})\.(?:png|jpe?g|webp|gif|avif)(?:[?#\s,]|$)/i.exec(urlOrSrcset);
+  if (!m) return null;
+  const w = Number(m[1]);
+  const h = Number(m[2]);
+  if (w >= 48 && h >= 48 && w <= 20000 && h <= 20000) {
+    return { width: w, height: h };
+  }
+  return null;
+}
+
+function extractImageDimensions(
+  el: HTMLImageElement,
+  resolvedUrl: string
+): { width: number; height: number } | null {
+  // 1. Explicit HTML width / height attributes (Discourse's intended CSS layout size, incl. 50%/75% scaling)
   const attrW = parsePositiveImgDimension(el.getAttribute("width"));
   const attrH = parsePositiveImgDimension(el.getAttribute("height"));
   if (attrW && attrH) {
     return { width: attrW, height: attrH };
   }
+  // 2. Inline pixel style or Discourse data-thumbnail-* / data-width/height attributes
+  const styleDims = parseDimsFromInlineStyle(el.getAttribute("style") || "");
+  if (styleDims) return styleDims;
+  const dataW = parsePositiveImgDimension(
+    el.getAttribute("data-thumbnail-width") || el.getAttribute("data-width")
+  );
+  const dataH = parsePositiveImgDimension(
+    el.getAttribute("data-thumbnail-height") || el.getAttribute("data-height")
+  );
+  if (dataW && dataH) {
+    return { width: dataW, height: dataH };
+  }
+  // 3. Previously decoded natural dimensions cached in this session (exact size for external images on revisit)
+  const cachedDims = getCachedImageNaturalDimensions(resolvedUrl);
+  if (cachedDims) return cachedDims;
+  // 4. Discourse optimized URL suffix `_2_690x388.jpeg` in src or srcset
+  const urlDims =
+    parseDimsFromDiscourseImageUrl(resolvedUrl) ||
+    parseDimsFromDiscourseImageUrl(el.getAttribute("srcset") || "");
+  if (urlDims) return urlDims;
+  // 5. Lightbox wrapper `.meta .informations` (`1920×1080 245 KB`)
   const wrapper = el.closest(".lightbox-wrapper");
   const infoText = wrapper?.querySelector(".meta .informations")?.textContent || "";
   const match = /(\d{2,5})\s*[×xX]\s*(\d{2,5})/.exec(infoText);
@@ -539,7 +590,9 @@ export function isContentImageForSkeleton(el: HTMLImageElement, resolvedUrl: str
     cls.contains("user-flair") ||
     cls.contains("flair-icon") ||
     cls.contains("favicon") ||
-    cls.contains("d-icon")
+    cls.contains("d-icon") ||
+    cls.contains("onebox-avatar") ||
+    (cls.contains("thumbnail") && Boolean(el.closest("aside.onebox")))
   ) {
     return false;
   }
@@ -666,26 +719,35 @@ export function prepareCookedHtml(
       el.setAttribute("loading", "lazy");
       el.setAttribute("decoding", "async");
 
-      if (!resolvedImmediateCache && isContentImageForSkeleton(el, resolvedUrl)) {
-        el.classList.add("lindo-img-loading");
-        el.setAttribute("data-lindo-loading", "1");
-        const dims = extractImageDimensions(el);
+      if (isContentImageForSkeleton(el, resolvedUrl)) {
+        const dims = extractImageDimensions(el, resolvedUrl);
         const rawWidthAttr = (el.getAttribute("width") || "").trim();
         const curStyle = el.getAttribute("style") || "";
         const hasPercentageWidth =
           rawWidthAttr.endsWith("%") || /(?:^|;)\s*width\s*:\s*[^;]*%/i.test(curStyle);
         if (dims) {
+          const ar = Number((dims.width / dims.height).toFixed(4));
           if (hasPercentageWidth) {
-            appendInlineStyle(el, `aspect-ratio:${dims.width} / ${dims.height};`);
+            appendInlineStyle(el, `max-width:min(100%, calc(440px * ${ar}));`);
+            if (!resolvedImmediateCache) {
+              appendInlineStyle(el, `aspect-ratio:${dims.width} / ${dims.height};`);
+            }
           } else {
-            const ar = Number((dims.width / dims.height).toFixed(4));
+            el.classList.add("lindo-img-sized");
             appendInlineStyle(
               el,
-              `--lindo-img-w:${dims.width}px;--lindo-img-ar:${ar};aspect-ratio:${dims.width} / ${dims.height};`
+              resolvedImmediateCache
+                ? `--lindo-img-w:${dims.width}px;--lindo-img-ar:${ar};`
+                : `--lindo-img-w:${dims.width}px;--lindo-img-ar:${ar};aspect-ratio:${dims.width} / ${dims.height};`
             );
           }
-        } else {
-          el.classList.add("lindo-img-loading-fallback");
+        }
+        if (!resolvedImmediateCache) {
+          el.classList.add("lindo-img-loading");
+          el.setAttribute("data-lindo-loading", "1");
+          if (!dims) {
+            el.classList.add("lindo-img-loading-fallback");
+          }
         }
       }
     }

@@ -115,10 +115,9 @@ export function useRateLimitAutoRecovery(
         ? globalRateLimitUntilMs
         : Date.now() + 4000;
     const updateTick = () => {
-      const leftMs = deadline - Date.now();
+      const leftMs = Math.max(deadline, globalRateLimitUntilMs) - Date.now();
       if (leftMs <= 0) {
         setRemainSecs(0);
-        markManualRetryIntent();
         onRecoverRef.current();
         return true;
       }
@@ -236,9 +235,7 @@ export async function siteRequest(
     try {
       const res = await invoke<SiteHttpResponse>("site_request", { url, method, form, headers });
       const ms = Math.round(performance.now() - t0);
-      if (res.status >= 200 && res.status < 300 && !res.isChallenge) {
-        globalRateLimitUntilMs = 0;
-      } else if (res.status === 429 && !res.isChallenge) {
+      if (res.status === 429 && !res.isChallenge) {
         const isActionOnly429 =
           isWrite &&
           !res.diag?.isChallenge429 &&
@@ -383,11 +380,11 @@ export async function siteRequest(
 
   if (dedupeKey) {
     inflightGetRequests.set(dedupeKey, run);
-    run.finally(() => {
-      if (inflightGetRequests.get(dedupeKey) === run) {
-        inflightGetRequests.delete(dedupeKey);
-      }
-    });
+    try {
+      return await run;
+    } finally {
+      if (inflightGetRequests.get(dedupeKey) === run) inflightGetRequests.delete(dedupeKey);
+    }
   }
   return run;
 }
@@ -447,7 +444,6 @@ export async function siteVerify(
     forceRefresh: effectiveForceRefresh,
   });
   if (ok) {
-    globalRateLimitUntilMs = 0;
     shortFeedCache.clear();
     shortNotifCache = null;
   }
@@ -632,13 +628,7 @@ export async function uploadMediaToSite(
 ): Promise<{ shortUrl: string; url: string; width: number; height: number; originalFilename: string }> {
   const t0 = performance.now();
   const approxBytes = Math.floor((dataBase64.length * 3) / 4);
-  let res = await invoke<SiteHttpResponse>("site_upload", { filename, mime, dataBase64 });
-  if (res.isChallenge && !res.diag?.verifyAttempted && !(res.diag?.verifyCooldownMs ?? 0)) {
-    const passed = await triggerInteractiveVerifyOnce(false);
-    if (passed) {
-      res = await invoke<SiteHttpResponse>("site_upload", { filename, mime, dataBase64 });
-    }
-  }
+  const res = await invoke<SiteHttpResponse>("site_upload", { filename, mime, dataBase64 });
   const durationMs = Math.round(performance.now() - t0);
   if (res.isChallenge) {
     diagLog(
@@ -661,6 +651,10 @@ export async function uploadMediaToSite(
       { method: "POST", path: "/uploads.json", status: res.status, durationMs }
     );
     throw new SiteError("请先登录账号", { isAuthRequired: true, status: res.status });
+  }
+  if (res.status === 429) {
+    const wait = res.rateLimitedMs ?? 5000;
+    throw new SiteError(`上传过于频繁，请在 ${Math.ceil(wait / 1000)} 秒后重试`, { status: 429, retryAfterMs: wait });
   }
   const parsed = safeJson(res.body);
   if (res.status < 200 || res.status >= 300 || !parsed) {
@@ -756,19 +750,7 @@ async function mutateJsonOrThrow(
   form?: Record<string, string>,
   extraHeaders?: Record<string, string>
 ): Promise<any> {
-  const isBackground = extraHeaders?.["Discourse-Background"] === "true";
-  let res = await siteRequest(url, method, form, extraHeaders);
-  if (
-    !isBackground &&
-    res.isChallenge &&
-    !res.diag?.verifyAttempted &&
-    !(res.diag?.verifyCooldownMs ?? 0)
-  ) {
-    const passed = await triggerInteractiveVerifyOnce(false);
-    if (passed) {
-      res = await siteRequest(url, method, form, extraHeaders);
-    }
-  }
+  const res = await siteRequest(url, method, form, extraHeaders);
   if (res.isChallenge) {
     throw buildChallengeSiteError(res, "需要完成安全确认");
   }
@@ -792,7 +774,11 @@ async function mutateJsonOrThrow(
   if (res.status < 200 || res.status >= 300) {
     throw new SiteError(extractDiscourseError(data) || `操作未成功 (${res.status})`, { status: res.status });
   }
-  clearTopicDetailCache();
+  const error = extractDiscourseError(data);
+  if (error || data?.success === false) throw new SiteError(error || "操作未成功");
+  if (!url.startsWith("https://linux.do/drafts") && !url.startsWith("https://linux.do/notifications/")) {
+    clearTopicDetailCache();
+  }
   return data ?? {};
 }
 
@@ -1458,6 +1444,7 @@ export async function fetchTopicFeed(params: {
       if (!params.background && hasMore && lastIso) {
         followFeedCursors.set(`${cursorKeyPrefix}${page + 1}`, lastIso);
       }
+      const seenTopics = new Set<number>();
       const mapped: TopicSummary[] = postsArr
         .map((pObj: any) => {
           const tObj = pObj.topic || {};
@@ -1513,26 +1500,29 @@ export async function fetchTopicFeed(params: {
           const tagOk =
             !params.tag ||
             item.tags.some((tg) => tg.toLowerCase() === params.tag!.trim().toLowerCase());
-          return catOk && tagOk;
+          if (!catOk || !tagOk || seenTopics.has(item.id)) return false;
+          seenTopics.add(item.id);
+          return true;
         });
 
-      return { topics: mapped, hasMore };
+      return { topics: mapped, hasMore: hasMore && Boolean(lastIso) };
     }
   }
 
   // Standard Discourse topic list routes (aligned 1:1 with LinDoNetworkStack.kt lines 3153–3202)
   const sortSuffix = ["top", "new", "unread", "hot"].includes(sort) ? `/l/${sort}.json` : ".json";
   let basePath: string;
-  if (params.tag) {
-    basePath = `tag/${encodeURIComponent(params.tag.trim())}${sortSuffix}`;
-  } else if (params.categoryId) {
+  const encodedTag = params.tag?.trim() ? encodeURIComponent(params.tag.trim()) : null;
+  if (params.categoryId) {
     const cat = findCategoryMeta(params.categoryId);
     const catPrefix = !cat
       ? `c/${params.categoryId}`
       : cat.hasServerParent && cat.parentSlug && !cat.slug.includes("/")
         ? `c/${cat.parentSlug}/${cat.slug}/${cat.id}`
         : `c/${cat.slug}/${cat.id}`;
-    basePath = `${catPrefix}${sortSuffix}`;
+    basePath = encodedTag ? `tags/${catPrefix}/${encodedTag}${sortSuffix}` : `${catPrefix}${sortSuffix}`;
+  } else if (encodedTag) {
+    basePath = `tag/${encodedTag}${sortSuffix}`;
   } else {
     basePath = `${sort}.json`;
   }
@@ -1564,7 +1554,9 @@ export async function fetchTopicFeed(params: {
   const moreUrl = data?.topic_list?.more_topics_url;
   const result = {
     topics,
-    hasMore: Boolean(moreUrl) || rawTopics.length >= 15,
+    hasMore: data?.topic_list && "more_topics_url" in data.topic_list
+      ? Boolean(moreUrl)
+      : rawTopics.length >= (Number(data?.topic_list?.per_page) || 15),
   };
   if (page === 0 && topics.length > 0) {
     shortFeedCache.set(url, { ts: Date.now(), data: result });
@@ -1605,7 +1597,7 @@ function parsePollsOnPost(p: any): PostPollModel[] {
     .filter((x: PostPollModel | null): x is PostPollModel => Boolean(x));
 }
 
-function parsePostModel(
+export function parsePostModel(
   p: any,
   fallbackTopicId: number,
   authorBadgesMap?: Map<number, GrantedBadge[]>,
@@ -1623,7 +1615,9 @@ function parsePostModel(
       ? "heart"
       : null;
 
-  const boosts: PostBoostItem[] = Array.isArray(p.boosts)
+  const hasBoostsField = Array.isArray(p.boosts);
+  const hasCanBoostField = typeof p.can_boost === "boolean";
+  const boosts: PostBoostItem[] = hasBoostsField
     ? p.boosts.map((b: any) => ({
         id: Number(b.id || 0),
         username: String(b.user?.username || b.username || ""),
@@ -1756,7 +1750,9 @@ function parsePostModel(
     reactions,
     boosts,
     linkCounts,
-    canBoost: p.can_boost !== undefined ? Boolean(p.can_boost) : !Boolean(p.yours),
+    canBoost: hasCanBoostField ? Boolean(p.can_boost) : false,
+    hasBoostsField,
+    hasCanBoostField,
     polls: parsePollsOnPost(p),
     bookmarked: Boolean(p.bookmarked),
     bookmarkId: p.bookmark_id ? Number(p.bookmark_id) : null,
@@ -2411,25 +2407,24 @@ export async function fetchTopicAiSummary(topicId: number): Promise<string> {
 
   // 1. Check existing cached summary first (`GET .../t/{id}.json`)
   const firstRes = await siteRequest(endpointJson, "GET");
-  if (firstRes.isChallenge) {
-    if (!firstRes.diag?.verifyAttempted && !(firstRes.diag?.verifyCooldownMs ?? 0)) {
-      const passed = await triggerInteractiveVerifyOnce(false);
-      if (passed) {
-        return fetchTopicAiSummary(topicId);
-      }
+  function checkResponse(res: SiteHttpResponse): void {
+    if (res.isChallenge) throw buildChallengeSiteError(res, "需要完成安全确认");
+    if (res.status === 429) throw new SiteError("请求较频繁，请稍后再试", { status: 429, retryAfterMs: res.rateLimitedMs ?? undefined });
+    if (res.status === 403) throw new SiteError("当前账号等级或该话题暂不支持 AI 总结", { status: 403 });
+    if (res.status !== 404 && res.status !== 405 && (res.status < 200 || res.status >= 300)) {
+      throw new SiteError(`加载总结失败 (${res.status})`, { status: res.status });
     }
-    throw buildChallengeSiteError(firstRes, "需要完成安全确认");
   }
+  checkResponse(firstRes);
   if (firstRes.status >= 200 && firstRes.status < 300) {
     const firstJson = safeJson(firstRes.body);
     const cached = extractSummaryText(firstJson);
     if (cached) return cached;
-  } else if (firstRes.status === 403) {
-    throw new SiteError("当前账号等级或该话题暂不支持 AI 总结", { status: 403 });
   }
 
   // 2. Modern Discourse AI triggers summary generation via `POST /discourse-ai/summarization/t/{id}` when cache misses (404/405)
   const createRes = await siteRequest(endpointBare, "POST", { stream: "false" });
+  checkResponse(createRes);
   if (createRes.status >= 200 && createRes.status < 300) {
     const createJson = safeJson(createRes.body);
     const immediate = extractSummaryText(createJson);
@@ -2437,18 +2432,18 @@ export async function fetchTopicAiSummary(topicId: number): Promise<string> {
   } else if (createRes.status === 404 || createRes.status === 405) {
     // Legacy Discourse fallback (`GET ?stream=true`)
     const legacyRes = await siteRequest(`${endpointJson}?stream=true`, "GET");
+    checkResponse(legacyRes);
     if (legacyRes.status >= 200 && legacyRes.status < 300) {
       const legacyText = extractSummaryText(safeJson(legacyRes.body));
       if (legacyText) return legacyText;
     }
-  } else if (createRes.status === 403) {
-    throw new SiteError("当前账号等级或该话题暂不支持 AI 总结", { status: 403 });
   }
 
   // 3. Poll briefly if server queued background generation
   for (let i = 0; i < 6; i++) {
     await new Promise((r) => setTimeout(r, 1100));
     const pollRes = await siteRequest(endpointJson, "GET", undefined, { "Discourse-Background": "true" });
+    checkResponse(pollRes);
     if (pollRes.status >= 200 && pollRes.status < 300) {
       const polled = extractSummaryText(safeJson(pollRes.body));
       if (polled) return polled;
@@ -2467,6 +2462,68 @@ export async function togglePostReaction(postId: number, reactionId = "heart"): 
     return parsePostModel(data, Number(data.topic_id || 0));
   }
   return null;
+}
+
+/**
+ * 权威判定某楼层是否应当展示小火箭短评 (`discourse-boosts`) 入口：
+ * 仅当当前用户已登录、非本人楼层、非删除/系统小动作楼层、话题未归档、
+ * 服务端 `can_boost === true`（未达每楼上限、未被禁言、插件启用）且本人尚未发过短评时才展示。
+ */
+export function canShowPostBoostAction(params: {
+  isAuthorized: boolean;
+  isOwnPost: boolean;
+  isDeletedTombstone?: boolean;
+  isSmallAction?: boolean;
+  topicArchived?: boolean;
+  canBoost?: boolean;
+  hasMyBoost: boolean;
+}): boolean {
+  return (
+    params.isAuthorized &&
+    !params.isOwnPost &&
+    !params.isDeletedTombstone &&
+    !params.isSmallAction &&
+    !params.topicArchived &&
+    params.canBoost === true &&
+    !params.hasMyBoost
+  );
+}
+
+/**
+ * 识别发送短评时的服务端拒绝原因（如并发场景下短评恰好达到上限）：
+ * 当 `disableCanBoost = true` 时调用方应立即隐藏该楼层短评按钮与输入条，避免重复碰壁。
+ */
+export function classifyBoostSubmitFailure(err: unknown): {
+  disableCanBoost: boolean;
+  message: string;
+} {
+  const raw = String((err as any)?.message || err || "").trim();
+  const lower = raw.toLowerCase();
+  if (
+    lower.includes("maximum number of boosts") ||
+    lower.includes("post_boost_limit_reached") ||
+    lower.includes("reached the maximum") ||
+    raw.includes("短评已达上限") ||
+    raw.includes("达到上限")
+  ) {
+    return { disableCanBoost: true, message: "该楼层短评已达上限" };
+  }
+  if (
+    lower.includes("already boosted") ||
+    lower.includes("already_boosted") ||
+    raw.includes("已经发过短评") ||
+    raw.includes("已发过短评")
+  ) {
+    return { disableCanBoost: true, message: "你已发过短评" };
+  }
+  if (
+    lower.includes("cannot boost") ||
+    lower.includes("not allowed to boost") ||
+    lower.includes("can_boost")
+  ) {
+    return { disableCanBoost: true, message: "当前楼层暂不支持发短评" };
+  }
+  return { disableCanBoost: false, message: raw || "发送短评失败" };
 }
 
 /**
@@ -2580,7 +2637,13 @@ export async function togglePostBookmark(
     bookmarkable_id: String(postId),
     bookmarkable_type: "Post",
   });
-  return Number(data?.id || 1);
+  return createdBookmarkId(data);
+}
+
+function createdBookmarkId(data: any): number {
+  const id = Number(data?.id);
+  if (!(id > 0)) throw new SiteError("未收到书签编号，请刷新收藏列表确认");
+  return id;
 }
 
 export async function deleteBookmarkById(bookmarkId: number): Promise<void> {
@@ -2617,7 +2680,7 @@ export async function saveBookmarkWithDetails(params: {
   }
   const data = await mutateJsonOrThrow("https://linux.do/bookmarks.json", "POST", form);
   return {
-    id: Number(data?.id || 1),
+    id: createdBookmarkId(data),
     name: (params.name || "").trim() || null,
     reminderAt: params.reminderAt || null,
   };
@@ -3341,7 +3404,9 @@ export async function fetchCategoryAllowedTags(
 
 export async function fetchPostRawMarkdown(postId: number): Promise<string> {
   const data = await getJsonOrThrow(`https://linux.do/posts/${postId}.json`);
-  return String(data?.raw || "");
+  const raw = data?.raw ?? data?.post?.raw;
+  if (typeof raw !== "string" || !raw.trim()) throw new SiteError("无法读取原帖正文，请重新打开编辑器");
+  return raw;
 }
 
 export async function publishTopic(params: {
@@ -3377,10 +3442,9 @@ export async function publishTopic(params: {
   if (res?.action === "enqueued" || res?.pending_post) {
     return { topicId: 0, pendingReview: true };
   }
-  return {
-    topicId: Number(res?.topic_id || res?.post?.topic_id || 0),
-    pendingReview: false,
-  };
+  const topicId = Number(res?.topic_id || res?.post?.topic_id);
+  if (!(topicId > 0)) throw new SiteError("未收到发帖回执，请先查看话题列表再决定是否重发");
+  return { topicId, pendingReview: false };
 }
 
 export async function publishReply(params: {
@@ -3412,37 +3476,34 @@ export async function publishReply(params: {
     return { post: null, pendingReview: true };
   }
   const postObj = res?.post || res;
-  return {
-    post: postObj?.id ? parsePostModel(postObj, params.topicId) : null,
-    pendingReview: false,
-  };
+  if (!(Number(postObj?.id) > 0)) throw new SiteError("未收到回复回执，请先查看话题再决定是否重发");
+  return { post: parsePostModel(postObj, params.topicId), pendingReview: false };
+}
+
+export async function updateTopicMetadata(
+  topicId: number,
+  changes: { title?: string; categoryId?: number; tags?: string[] }
+): Promise<string | undefined> {
+  const form: Record<string, string> = {};
+  if (changes.title !== undefined) form.title = changes.title.trim();
+  if (changes.categoryId !== undefined) form.category_id = String(changes.categoryId);
+  if (changes.tags !== undefined) {
+    if (!changes.tags.length) form.tags = "";
+    changes.tags.forEach((tag, index) => { form[`tags[${index}]`] = tag; });
+  }
+  const res = await mutateJsonOrThrow(`https://linux.do/t/-/${topicId}.json`, "PUT", form, {
+    "X-LinDo-Referer": `https://linux.do/t/topic/${topicId}`,
+  });
+  return res?.basic_topic?.title ?? res?.title;
 }
 
 export async function updateExistingPost(params: {
   postId: number;
   topicId: number;
   raw: string;
-  title?: string;
-  categoryId?: number;
-  tags?: string[];
   editReason?: string;
-}): Promise<PostItemModel | null> {
+}): Promise<PostItemModel> {
   const topicReferer = { "X-LinDo-Referer": `https://linux.do/t/topic/${params.topicId}` };
-  if (params.title && params.topicId) {
-    const metaForm: Record<string, string> = {
-      title: params.title.trim(),
-    };
-    if (params.categoryId) metaForm.category_id = String(params.categoryId);
-    (params.tags ?? []).forEach((t, idx) => {
-      metaForm[`tags[${idx}]`] = t;
-    });
-    await mutateJsonOrThrow(
-      `https://linux.do/t/-/${params.topicId}.json`,
-      "PUT",
-      metaForm,
-      topicReferer
-    );
-  }
   const postForm: Record<string, string> = { "post[raw]": params.raw };
   if (params.editReason && params.editReason.trim()) {
     postForm["post[edit_reason]"] = params.editReason.trim();
@@ -3454,7 +3515,8 @@ export async function updateExistingPost(params: {
     topicReferer
   );
   const postObj = res?.post || res;
-  return postObj?.id ? parsePostModel(postObj, params.topicId) : null;
+  if (Number(postObj?.id) !== params.postId) throw new SiteError("未收到修改回执，请先查看原帖确认");
+  return parsePostModel(postObj, params.topicId);
 }
 
 /* ==================== 8. 私信中心、云端草稿、关注与粉丝、徽章与个人资料 ==================== */
@@ -3530,7 +3592,10 @@ export async function sendPrivateMessage(params: {
     target_recipients: targetRecipients,
     archetype: "private_message",
   });
-  return Number(res?.topic_id || res?.post?.topic_id || 0);
+  if (res?.action === "enqueued" || res?.pending_post) return 0;
+  const topicId = Number(res?.topic_id || res?.post?.topic_id);
+  if (!(topicId > 0)) throw new SiteError("未收到私信回执，请先查看已发送的私信再决定是否重发");
+  return topicId;
 }
 
 function parseCloudDraftObject(obj: any, fallbackKey = ""): CloudDraftItem | null {
@@ -3578,8 +3643,8 @@ function parseCloudDraftObject(obj: any, fallbackKey = ""): CloudDraftItem | nul
     action,
     topicId: obj?.topic_id
       ? Number(obj.topic_id)
-      : dObj.topic_id
-        ? Number(dObj.topic_id)
+      : (dObj.topicId ?? dObj.topic_id)
+        ? Number(dObj.topicId ?? dObj.topic_id)
         : draftKey.startsWith("topic_")
           ? Number(draftKey.slice(6)) || null
           : null,
@@ -3596,7 +3661,7 @@ function parseCloudDraftObject(obj: any, fallbackKey = ""): CloudDraftItem | nul
         : null,
     title: titleText,
     raw: rawText,
-    tags: Array.isArray(dObj.tags) ? dObj.tags.map((t: any) => String(t)) : [],
+    tags: Array.isArray(dObj.tags) ? dObj.tags.map((t: any) => typeof t === "string" ? t : String(t?.name ?? "")).filter(Boolean) : [],
     recipients: recipients || undefined,
     createdAt: obj?.created_at ? String(obj.created_at) : undefined,
   };
@@ -3610,25 +3675,18 @@ export async function fetchCloudDrafts(): Promise<CloudDraftItem[]> {
     .filter((x): x is CloudDraftItem => Boolean(x));
 }
 
-export async function fetchSingleCloudDraft(draftKey: string): Promise<CloudDraftItem | null> {
+export async function fetchSingleCloudDraft(draftKey: string): Promise<{ draft: CloudDraftItem | null; sequence: number }> {
   const cleanKey = draftKey.trim();
-  if (!cleanKey) return null;
   try {
-    const data = await getJsonOrThrow(
-      `https://linux.do/drafts/${encodeURIComponent(cleanKey)}.json`
-    );
-    if (!data || (!data.draft && !data.data)) return null;
-    return parseCloudDraftObject(
-      {
-        draft_key: cleanKey,
-        draft: data.draft,
-        data: data.data,
-        sequence: data.draft_sequence ?? data.sequence ?? 0,
-      },
-      cleanKey
-    );
-  } catch {
-    return null;
+    const data = await getJsonOrThrow(`https://linux.do/drafts/${encodeURIComponent(cleanKey)}.json`, true);
+    const sequence = Number(data?.draft_sequence ?? data?.sequence ?? 0);
+    const draft = data?.draft || data?.data
+      ? parseCloudDraftObject({ ...data, draft_key: cleanKey, sequence })
+      : null;
+    return { draft, sequence };
+  } catch (error) {
+    if (error instanceof SiteError && error.status === 404) return { draft: null, sequence: 0 };
+    throw error;
   }
 }
 

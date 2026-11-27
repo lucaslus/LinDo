@@ -633,6 +633,16 @@ class Round3BugFixesRegressionTest {
             assertEquals("来自网页端的草稿内容", emptySession.current.raw)
             assertEquals(11, emptySession.savedSequence)
             assertTrue(emptySession.existsOnServer)
+
+            val floorReply = ComposerDraftSession(ComposerDraft(
+                owner = "another-owner", key = "topic_42", action = ComposerAction.REPLY,
+                topicId = 42, replyToPostNumber = 3, replyToUsername = "alice"
+            ))
+            val remote = assertNotNull(floorReply.prepareWithRemote())
+            assertEquals(3, floorReply.current.replyToPostNumber)
+            val restored = floorReply.acceptRemoteDraft(remote)
+            assertNull(restored.replyToPostNumber)
+            assertNull(restored.replyToUsername)
         }
 
         // 2. Local edited draft vs differing remote draft surfaces conflict without overwriting local or stamping sequence prematurely

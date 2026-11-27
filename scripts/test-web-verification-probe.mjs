@@ -4,10 +4,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 const source=readFileSync(new URL('../composeApp/src/commonMain/kotlin/do_/linux/lindo/core/network/WebVerificationProbe.kt',import.meta.url),'utf8').split('= """')[1].split('""".trimIndent()')[0];
 const flush=()=>new Promise(r=>setImmediate(r));
-function page({preload,legacy=false,challenge=false,csrf=true,body='',title='',pathname='/',response,origin='https://linux.do'}={}) {
+function page({preload,legacy=false,challenge=false,csrf=true,body='',height=0,title='',pathname='/',response,origin='https://linux.do'}={}) {
  let calls=0;
  let lastUrl='';
- const context=vm.createContext({location:{origin,pathname},document:{title,readyState:'complete',body:{innerText:body},
+ const context=vm.createContext({location:{origin,pathname},document:{title,readyState:'complete',body:{innerText:body,children:body?[{}]:[],scrollHeight:height},
   querySelector:s=>s.includes('csrf-token')?(csrf?{}:null):(challenge?{}:null),
   getElementById:()=>preload?{textContent:legacy?'':JSON.stringify(preload),dataset:{preloaded:JSON.stringify(preload)}}:null},
   AbortController,setTimeout:()=>1,clearTimeout:()=>{},fetch:async(u)=>{calls++;lastUrl=u;return response || {ok:true,headers:{get:()=>null},json:async()=>({topic_list:{topics:[]}})};}});
@@ -52,4 +52,10 @@ test('Cloudflare broken error page ("Something went wrong" / "error code: 1034")
  assert.equal(p1.poll().cfErrorPage,true);assert.equal(p1.calls,0);
  const p2=page({csrf:false,body:'error code: 1034'});
  assert.equal(p2.poll().cfErrorPage,true);assert.equal(p2.calls,0);
+});
+
+test('a textual waiting page stays noninteractive and issues no request',()=> {
+ const p=page({title:'Just a moment',body:'Please wait',height:160});
+ assert.deepEqual(p.poll(),{challenge:true,widget:false,stageDom:true,interactive:false});
+ assert.equal(p.calls,0);
 });

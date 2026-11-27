@@ -245,13 +245,7 @@ impl UpstreamPool {
                     })
                     .await;
                     match probe_res {
-                        Ok(Ok(resp)) if !is_edge_restricted_403(&resp) => {
-                            return Ok(resp.map(|b| b.boxed()));
-                        }
-                        Ok(Ok(_)) => {
-                            self.evict_h2_sender(host);
-                            self.rotate_sticky_on_failure().await;
-                        }
+                        Ok(Ok(resp)) => return Ok(resp.map(|b| b.boxed())),
                         Ok(Err(_)) => {
                             self.evict_h2_sender(host);
                         }
@@ -264,17 +258,7 @@ impl UpstreamPool {
                     self.evict_h2_sender(host);
                 }
             }
-            let first = self
-                .connect_and_send(host, Request::from_parts(parts.clone(), empty_req_body()))
-                .await?;
-            if is_edge_restricted_403(&first) {
-                self.evict_h2_sender(host);
-                self.rotate_sticky_on_failure().await;
-                return self
-                    .connect_and_send(host, Request::from_parts(parts, empty_req_body()))
-                    .await;
-            }
-            return Ok(first);
+            return self.connect_and_send(host, Request::from_parts(parts, empty_req_body())).await;
         }
 
         let mut boxed_req = req.map(|b| b.boxed());
@@ -1087,18 +1071,6 @@ fn build_chromium_connector_builder(
     let _ = builder.set_alpn_protos(b"\x02h2\x08http/1.1");
 
     Ok(builder)
-}
-
-fn is_edge_restricted_403<B>(resp: &Response<B>) -> bool {
-    if resp.status() != http::StatusCode::FORBIDDEN {
-        return false;
-    }
-    resp.headers()
-        .get(http::header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.trim().parse::<usize>().ok())
-        .map(|len| (1..=64).contains(&len))
-        .unwrap_or(false)
 }
 
 fn strip_default_https_port(host: &str) -> &str {

@@ -52,6 +52,7 @@ import {
   setApiDarkTheme,
   setUnreadBadgeInRust,
   siteVerify,
+  SiteError,
   startBrowserOneClickAuth,
   switchSavedAccount,
   triggerInteractiveVerifyOnce,
@@ -110,13 +111,19 @@ const DEFAULT_PREFS: UserPreferences = {
   echRoutingMode: "smart_auto",
 };
 
-function mergePostPreservingBadges(
+export function mergePostPreservingBadges(
   existing: PostItemModel | undefined,
   next: PostItemModel
 ): PostItemModel {
   if (!existing) return next;
+  const preserveBoosts = next.hasBoostsField === false;
+  const preserveCanBoost = next.hasCanBoostField === false;
   return {
     ...next,
+    boosts: preserveBoosts ? existing.boosts : next.boosts,
+    canBoost: preserveCanBoost ? existing.canBoost : next.canBoost,
+    hasBoostsField: preserveBoosts ? existing.hasBoostsField : next.hasBoostsField,
+    hasCanBoostField: preserveCanBoost ? existing.hasCanBoostField : next.hasCanBoostField,
     authorBadges:
       next.authorBadges && next.authorBadges.length > 0
         ? next.authorBadges
@@ -187,6 +194,7 @@ export const App: React.FC = () => {
   const [hasMoreTopics, setHasMoreTopics] = useState(true);
   const [feedLoading, setFeedLoading] = useState(false);
   const [loadingMoreTopics, setLoadingMoreTopics] = useState(false);
+  const verificationBlocked = useRef({ feed: false, more: false, reader: false, message: false });
   const [feedError, setFeedError] = useState<string | null>(null);
   const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const [pendingFeed, setPendingFeed] = useState<PendingFeedSnapshot<TopicSummary>>(() =>
@@ -264,14 +272,10 @@ export const App: React.FC = () => {
   const lastTopicClickMsRef = useRef(0);
   const activeSummaryRef = useRef<TopicSummary | null>(null);
   activeSummaryRef.current = activeSummary;
-  const readerErrorRef = useRef<string | null>(null);
-  readerErrorRef.current = readerError;
   const targetFloorRef = useRef<number | null>(null);
   targetFloorRef.current = targetFloor;
   const msgSummaryRef = useRef<TopicSummary | null>(null);
   msgSummaryRef.current = msgSummary;
-  const msgReaderErrorRef = useRef<string | null>(null);
-  msgReaderErrorRef.current = msgReaderError;
   const msgTargetFloorRef = useRef<number | null>(null);
   msgTargetFloorRef.current = msgTargetFloor;
   const [inspectedUsername, setInspectedUsername] = useState<string | null>(null);
@@ -345,8 +349,23 @@ export const App: React.FC = () => {
     return () => clearTimeout(t);
   }, [globalNotice]);
 
+  const accountOwner = useRef<string | null | undefined>(undefined);
   const syncFromRustState = useCallback(async () => {
     const boot = await bootstrapApp();
+    const username = boot.state.currentUser?.username ?? null;
+    if (accountOwner.current !== undefined && accountOwner.current !== username) {
+      ++feedGenerationRef.current;
+      ++topicReqSeqRef.current;
+      ++msgReqSeqRef.current;
+      setTopics([]);
+      setActiveSummary(null);
+      setActiveDetail(null);
+      setMsgSummary(null);
+      setMsgDetail(null);
+      setPendingFeed(createEmptyPendingFeedSnapshot());
+      setComposerReq(null);
+    }
+    accountOwner.current = username;
     setPlatform(boot.platform);
     document.documentElement.dataset.platform = boot.platform;
     setIsAuthorized(boot.isAuthorized);
@@ -377,6 +396,7 @@ export const App: React.FC = () => {
       silent?: boolean;
     }) => {
       const reqGen = ++feedGenerationRef.current;
+      setLoadingMoreTopics(false);
       const sort = opts?.sort ?? currentSort;
       const period = opts?.period ?? topPeriod;
       const catId = opts?.categoryId !== undefined ? opts.categoryId : selectedCategoryId;
@@ -405,6 +425,7 @@ export const App: React.FC = () => {
         lastFeedSyncedAtRef.current = Date.now();
       } catch (err: any) {
         if (reqGen !== feedGenerationRef.current) return;
+        verificationBlocked.current.feed = err instanceof SiteError && err.isVerification;
         setFeedError(err?.message || "加载动态失败，请重试");
       } finally {
         if (reqGen === feedGenerationRef.current) {
@@ -431,26 +452,13 @@ export const App: React.FC = () => {
             : msgSummaryRef.current?.id === req.topicId
               ? msgSummaryRef.current
               : null;
-        const opPost = matchDetail?.posts.find((p) => p.postNumber === 1);
-        const fallbackUsername =
-          opPost?.username ||
-          matchDetail?.opUsername ||
-          (matchSummary?.originalPoster.avatarTemplate ? matchSummary.originalPoster.username : "");
-        const fallbackDisplayName =
-          opPost?.displayName ||
-          matchDetail?.opDisplayName ||
-          matchSummary?.originalPoster.name ||
-          fallbackUsername;
-        const fallbackAvatar =
-          opPost?.avatarTemplate ||
-          matchDetail?.opAvatarTemplate ||
-          matchSummary?.originalPoster.avatarTemplate ||
-          "";
-        const fallbackAnim =
-          opPost?.animatedAvatar ??
-          matchDetail?.opAnimatedAvatar ??
-          matchSummary?.originalPoster.animatedAvatar ??
-          null;
+        const floor = req.replyToPostNumber ?? req.postNumber ?? 1;
+        const target = matchDetail?.posts.find((post) => post.postNumber === floor);
+        const poster = floor === 1 ? matchSummary?.originalPoster : undefined;
+        const fallbackUsername = target?.username ?? poster?.username;
+        const fallbackDisplayName = target?.displayName ?? poster?.name;
+        const fallbackAvatar = target?.avatarTemplate ?? poster?.avatarTemplate;
+        const fallbackAnim = target?.animatedAvatar ?? poster?.animatedAvatar;
         enriched = {
           ...req,
           topicTitle:
@@ -478,15 +486,12 @@ export const App: React.FC = () => {
         return {
           ...prev,
           topicTitle: enriched.topicTitle ?? prev.topicTitle,
-          replyToPostNumber: enriched.replyToPostNumber ?? prev.replyToPostNumber,
-          replyToUsername: enriched.replyToUsername ?? prev.replyToUsername,
-          replyToDisplayName: enriched.replyToDisplayName ?? prev.replyToDisplayName,
-          replyToAvatarTemplate: enriched.replyToAvatarTemplate ?? prev.replyToAvatarTemplate,
-          replyToAnimatedAvatar:
-            enriched.replyToAnimatedAvatar !== undefined
-              ? enriched.replyToAnimatedAvatar
-              : prev.replyToAnimatedAvatar,
-          replyToSnippet: enriched.replyToSnippet ?? prev.replyToSnippet,
+          replyToPostNumber: enriched.replyToPostNumber,
+          replyToUsername: enriched.replyToUsername,
+          replyToDisplayName: enriched.replyToDisplayName,
+          replyToAvatarTemplate: enriched.replyToAvatarTemplate,
+          replyToAnimatedAvatar: enriched.replyToAnimatedAvatar,
+          replyToSnippet: enriched.replyToSnippet,
         };
       }
       setComposerAppendQuote(null);
@@ -773,6 +778,7 @@ export const App: React.FC = () => {
         if (isInPlace) {
           return { error: msg };
         }
+        verificationBlocked.current.reader = err instanceof SiteError && err.isVerification;
         setReaderError(msg);
       } finally {
         if (seq === topicReqSeqRef.current) {
@@ -967,6 +973,7 @@ export const App: React.FC = () => {
         if (isInPlace) {
           return { error: msg };
         }
+        verificationBlocked.current.message = err instanceof SiteError && err.isVerification;
         setMsgReaderError(msg);
       } finally {
         if (seq === msgReqSeqRef.current) {
@@ -977,11 +984,6 @@ export const App: React.FC = () => {
     },
     [msgDetail?.id, msgSummary?.id, currentTab, isWideLayout, msgReaderError, msgOnlyOp, msgSummaryFilter]
   );
-
-  const openTopicRef = useRef(openTopic);
-  openTopicRef.current = openTopic;
-  const openMessageTopicRef = useRef(openMessageTopic);
-  openMessageTopicRef.current = openMessageTopic;
 
   const makeSummaryById = useCallback(
     (topicId: number, fallbackTitle: string, postNumber?: number): TopicSummary => {
@@ -1217,8 +1219,21 @@ export const App: React.FC = () => {
   syncFromRustStateRef.current = syncFromRustState;
   const loadFeedRef = useRef(loadFeed);
   loadFeedRef.current = loadFeed;
-  const isGuestModeRef = useRef(isGuestMode);
-  isGuestModeRef.current = isGuestMode;
+  const recoverVerifiedView = useRef<() => Promise<void>>(async () => {});
+  recoverVerifiedView.current = async () => {
+    if (!isAuthorized && !isGuestMode) return;
+    const readerVisible = isWideLayout || narrowShowingReader;
+    const blocked = verificationBlocked.current;
+    if (isWideLayout && currentTab === "MESSAGES" && blocked.message && msgSummary && msgReaderError && !msgReaderLoading) {
+      await openMessageTopic(msgSummary, { floor: msgTargetFloor, inPlace: true, onlyOp: msgOnlyOp, summary: msgSummaryFilter, forceRefresh: true });
+    } else if (currentTab === "HOME" && blocked.reader && activeSummary && readerError && !readerLoading && readerVisible) {
+      await openTopic(activeSummary, { floor: targetFloor, inPlace: true, onlyOp: onlyOpFilter, summary: summaryFilter, forceRefresh: true, trackVisit: false });
+    } else if (currentTab === "HOME" && blocked.feed && feedError && !feedLoading && (isWideLayout || !narrowShowingReader)) {
+      await loadFeed({ silent: true });
+    } else if (currentTab === "HOME" && blocked.more && loadMoreError && (isWideLayout || !narrowShowingReader)) {
+      await handleLoadMoreTopics();
+    }
+  };
   const bootRanRef = useRef(false);
 
   // Initial bootstrap & Tauri event listeners (await listener registration BEFORE syncFromRustState so cold-start deep links never race)
@@ -1269,7 +1284,6 @@ export const App: React.FC = () => {
               fetchSiteCategories(true)
                 .then(setCategories)
                 .catch(() => {});
-              loadFeedRef.current({ silent: true });
             }
           });
         }),
@@ -1278,35 +1292,10 @@ export const App: React.FC = () => {
           setCfAttentionDismissed(false);
           setLastVerifiedAtMs(Date.now());
           resumeTimingsAfterVerify();
-          void drainPendingMarkReads();
-          void flushTopicTimingsNow();
-          const hadReaderErr = Boolean(readerErrorRef.current);
-          const curSummary = activeSummaryRef.current;
-          const curFloor = targetFloorRef.current;
-          const hadMsgErr = Boolean(msgReaderErrorRef.current);
-          const curMsgSummary = msgSummaryRef.current;
-          const curMsgFloor = msgTargetFloorRef.current;
-          setFeedError(null);
-          setLoadMoreError(null);
-          setReaderError(null);
-          setMsgReaderError(null);
-          syncFromRustStateRef.current().then((b) => {
-            fetchSiteCategories()
-              .then(setCategories)
-              .catch(() => {});
-            if (b.isAuthorized || isGuestModeRef.current) {
-              loadFeedRef.current({ silent: true });
-              if (hadReaderErr && curSummary) {
-                void openTopicRef.current(curSummary, { floor: curFloor, forceRefresh: true });
-              }
-              if (hadMsgErr && curMsgSummary) {
-                void openMessageTopicRef.current(curMsgSummary, {
-                  floor: curMsgFloor,
-                  forceRefresh: true,
-                });
-              }
-            }
-          });
+          void recoverVerifiedView.current().then(async () => {
+            await drainPendingMarkReads();
+            await flushTopicTimingsNow();
+          }).catch(() => {});
         }),
         listen<{ level?: string; category?: string; tag?: string; summary?: string; detail?: string }>(
           "lindo://diag-event",
@@ -1485,11 +1474,11 @@ export const App: React.FC = () => {
     return () => clearTimeout(timer);
   }, [bootstrapped, inMainApp, isAuthorized]);
 
-  // Reload feed when in main app and filter/sort changes
+  // The current username is part of the follow feed URL.
   useEffect(() => {
     if (!bootstrapped || !inMainApp) return;
     loadFeed();
-  }, [bootstrapped, inMainApp, currentSort, topPeriod, selectedCategoryId, selectedTag]);
+  }, [bootstrapped, inMainApp, loadFeed]);
 
   // Calmly auto-open first regular topic on wide screen HOME without firing cold-start visit-tracking burst
   useEffect(() => {
@@ -1670,6 +1659,7 @@ export const App: React.FC = () => {
       return;
     }
     feedGenerationRef.current += 1;
+    setLoadingMoreTopics(false);
     setTopics(decision.nextTopics);
     if (decision.resetPageToZero) {
       setFeedPage(0);
@@ -1818,14 +1808,13 @@ export const App: React.FC = () => {
         fetchSiteCategories(true)
           .then(setCategories)
           .catch(() => {});
-        loadFeed();
       } else {
         setAuthStatusHint("登录尚未完成，请重试。");
       }
     } catch {
       setAuthStatusHint("暂时无法打开登录，请重试或使用浏览器授权。");
     }
-  }, [isDark, syncFromRustState, loadFeed]);
+  }, [isDark, syncFromRustState]);
 
   const handleAddAccountWebLogin = useCallback(async () => {
     setGuestPrompt(null);
@@ -1843,12 +1832,11 @@ export const App: React.FC = () => {
         fetchSiteCategories(true)
           .then(setCategories)
           .catch(() => {});
-        loadFeed();
       }
     } catch {
       setGlobalNotice("添加账号未完成，请重试");
     }
-  }, [isDark, syncFromRustState, loadFeed]);
+  }, [isDark, syncFromRustState]);
 
   const handleBrowserOneClickAuth = useCallback(async () => {
     setGuestPrompt(null);
@@ -1888,15 +1876,10 @@ export const App: React.FC = () => {
       try {
         const ok = await switchSavedAccount(uname);
         if (ok) {
-          setActiveSummary(null);
-          setActiveDetail(null);
-          setMsgSummary(null);
-          setMsgDetail(null);
           await syncFromRustState();
           fetchSiteCategories(true)
             .then(setCategories)
             .catch(() => {});
-          loadFeed();
           setGlobalNotice(`已切换至 @${uname}`);
         } else if (isAuthorized) {
           setAuthStatusHint(`@${uname} 登录已过期，请重新登录`);
@@ -1910,7 +1893,7 @@ export const App: React.FC = () => {
         setSwitchingBusy(false);
       }
     },
-    [isAuthorized, requestGuestLogin, syncFromRustState, loadFeed]
+    [isAuthorized, requestGuestLogin, syncFromRustState]
   );
 
   const handleTriggerVerify = useCallback(
@@ -1923,20 +1906,6 @@ export const App: React.FC = () => {
           setCfAttentionNeeded(false);
           setCfAttentionDismissed(false);
           setLastVerifiedAtMs(Date.now());
-          setFeedError(null);
-          setLoadMoreError(null);
-          setReaderError(null);
-          setMsgReaderError(null);
-          fetchSiteCategories(true)
-            .then(setCategories)
-            .catch(() => {});
-          loadFeed();
-          if (activeSummary) {
-            openTopic(activeSummary, { floor: targetFloor, forceRefresh: true });
-          }
-          if (msgSummary) {
-            openMessageTopic(msgSummary, { floor: msgTargetFloor, forceRefresh: true });
-          }
           setGlobalNotice(forceRefresh ? "安全验证已刷新" : "连接验证正常");
         }
       } catch {
@@ -1945,15 +1914,7 @@ export const App: React.FC = () => {
         setManualVerifyBusy(false);
       }
     },
-    [
-      loadFeed,
-      activeSummary,
-      openTopic,
-      targetFloor,
-      msgSummary,
-      openMessageTopic,
-      msgTargetFloor,
-    ]
+    []
   );
 
   // Entry A: Reactive verify (SideRail shield, banners, error cards) -> NEVER force-purges healthy ticket
@@ -1970,6 +1931,7 @@ export const App: React.FC = () => {
     if (loadingMoreTopics || !hasMoreTopics || feedLoading) return;
     setLoadingMoreTopics(true);
     setLoadMoreError(null);
+    const generation = feedGenerationRef.current;
     const nextPage = feedPage + 1;
     try {
       const res = await fetchTopicFeed({
@@ -1980,17 +1942,20 @@ export const App: React.FC = () => {
         topPeriod,
         username: currentUser?.username,
       });
+      if (generation !== feedGenerationRef.current) return;
       setTopics((prev) => {
         const existing = new Set(prev.map((t) => t.id));
         const unique = res.topics.filter((t) => !existing.has(t.id));
         return [...prev, ...unique];
       });
       setFeedPage(nextPage);
-      setHasMoreTopics(res.hasMore && res.topics.length > 0);
+      setHasMoreTopics(res.hasMore);
     } catch (err: any) {
+      if (generation !== feedGenerationRef.current) return;
+      verificationBlocked.current.more = err instanceof SiteError && err.isVerification;
       setLoadMoreError(err?.message || "加载更多失败");
     } finally {
-      setLoadingMoreTopics(false);
+      if (generation === feedGenerationRef.current) setLoadingMoreTopics(false);
     }
   }, [
     loadingMoreTopics,
@@ -2211,6 +2176,12 @@ export const App: React.FC = () => {
 
   const renderComposerInstance = (): React.ReactNode => {
     if (!composerReq) return null;
+    const legacyKey = `reply_${composerReq.topicId}`;
+    const legacy = drafts[legacyKey];
+    const replyKey = legacy && (legacy.replyToPostNumber ?? null) === (composerReq.replyToPostNumber ?? null)
+      ? legacyKey : `${legacyKey}_${composerReq.replyToPostNumber ?? 0}`;
+    const draftKey = composerReq.draftKeyOverride ?? (composerReq.action === "NEW_TOPIC"
+      ? "new_topic" : composerReq.action === "EDIT" ? `edit_${composerReq.postId}` : replyKey);
     return (
       <ComposerModal
         key={`${composerReq.action}_${composerReq.topicId || 0}_${composerReq.postId || 0}`}
@@ -2219,15 +2190,19 @@ export const App: React.FC = () => {
         presentation="modal"
         appendQuote={composerAppendQuote}
         exitGuardRef={composerExitGuardRef}
-        savedDraft={
-          composerReq.draftKeyOverride
-            ? drafts[composerReq.draftKeyOverride]
-            : composerReq.action === "NEW_TOPIC"
-              ? drafts["new_topic"]
-              : composerReq.action === "REPLY" && composerReq.topicId
-                ? drafts[`reply_${composerReq.topicId}`]
-                : undefined
-        }
+        localDraftKey={draftKey}
+        savedDraft={drafts[draftKey]}
+        onTopicEdited={(topicId, changes) => {
+          const category = categories.find((c) => c.id === changes.categoryId);
+          const patch = category ? { ...changes, categoryName: category.displayName, categoryColorHex: category.colorHex } : changes;
+          const apply = <T extends TopicSummary | TopicDetailModel>(topic: T | null) =>
+            topic?.id === topicId ? { ...topic, ...patch } : topic;
+          setActiveSummary(apply);
+          setMsgSummary(apply);
+          setActiveDetail(apply);
+          setMsgDetail(apply);
+          setTopics((current) => current.map((topic) => topic.id === topicId ? { ...topic, ...patch } : topic));
+        }}
         onClose={() => {
           setComposerReq(null);
           setComposerAppendQuote(null);
@@ -2245,32 +2220,31 @@ export const App: React.FC = () => {
           if (act === "NEW_TOPIC" && topicId) {
             loadFeed();
             openTopicById(topicId, "新发布话题", 1, true);
-          } else if (post && activeDetail && activeDetail.id === topicId) {
-            setActiveDetail((prev) => {
-              if (!prev) return prev;
-              const map = new Map(prev.posts.map((p) => [p.id, p]));
-              map.set(post.id, post);
+          } else if (post && topicId) {
+            const update = (prev: TopicDetailModel | null) => {
+              if (prev?.id !== topicId) return prev;
+              const posts = new Map(prev.posts.map((p) => [p.id, p]));
+              const newReply = act === "REPLY" && !prev.streamIds.includes(post.id) && !posts.has(post.id);
+              posts.set(post.id, mergePostPreservingBadges(posts.get(post.id), post));
               return {
                 ...prev,
-                postsCount: act === "REPLY" ? prev.postsCount + 1 : prev.postsCount,
-                posts: Array.from(map.values()).sort((a, b) => a.postNumber - b.postNumber),
+                postsCount: prev.postsCount + Number(newReply),
+                highestPostNumber: Math.max(prev.highestPostNumber ?? 0, post.postNumber),
+                streamIds: newReply ? [...prev.streamIds, post.id] : prev.streamIds,
+                posts: Array.from(posts.values()).sort((a, b) => a.postNumber - b.postNumber),
               };
-            });
-            setTargetFloor(post.postNumber);
-            setTargetJumpNonce((n) => n + 1);
-          } else if (post && msgDetail && msgDetail.id === topicId) {
-            setMsgDetail((prev) => {
-              if (!prev) return prev;
-              const map = new Map(prev.posts.map((p) => [p.id, p]));
-              map.set(post.id, post);
-              return {
-                ...prev,
-                postsCount: act === "REPLY" ? prev.postsCount + 1 : prev.postsCount,
-                posts: Array.from(map.values()).sort((a, b) => a.postNumber - b.postNumber),
-              };
-            });
-            setMsgTargetFloor(post.postNumber);
-            setMsgJumpNonce((n) => n + 1);
+            };
+            if (currentTab === "MESSAGES" && msgDetail?.id === topicId) {
+              setMsgDetail(update);
+              setMsgTargetFloor(post.postNumber);
+              setMsgJumpNonce((n) => n + 1);
+            } else if (activeDetail?.id === topicId) {
+              setActiveDetail(update);
+              setTargetFloor(post.postNumber);
+              setTargetJumpNonce((n) => n + 1);
+            }
+          } else if (act === "EDIT" && !post) {
+            return;
           } else if (currentTab === "MESSAGES" && msgSummary) {
             openMessageTopic(msgSummary, { forceRefresh: true });
           } else if (activeSummary) {
@@ -2481,6 +2455,7 @@ export const App: React.FC = () => {
                   >
                   {currentTab === "MESSAGES" ? (
                     <MessagesView
+                      key={currentUser?.username ?? "guest"}
                       isAuthorized={isAuthorized}
                       isDark={isDark}
                       currentUser={currentUser}
@@ -2752,6 +2727,7 @@ export const App: React.FC = () => {
               </>
             ) : currentTab === "MESSAGES" ? (
               <MessagesView
+                key={currentUser?.username ?? "guest"}
                 isAuthorized={isAuthorized}
                 isDark={isDark}
                 currentUser={currentUser}
@@ -2910,7 +2886,7 @@ export const App: React.FC = () => {
                 onSelectCategory={handleSelectHomeCategory}
                 onSelectTag={setSelectedTag}
                 onSelectTopic={(t, resumeFloor) => openTopic(t, { floor: resumeFloor ?? null })}
-                onRefresh={() => loadFeed()}
+                onRefresh={() => { markManualRetryIntent(); void loadFeed(); }}
                 onApplyPendingNew={applyPendingNewTopicsNow}
                 onLoadMore={handleLoadMoreTopics}
                 onToggleCompact={() =>
@@ -3036,7 +3012,6 @@ export const App: React.FC = () => {
             fetchSiteCategories(true)
               .then(setCategories)
               .catch(() => {});
-            loadFeed();
           }}
           onClose={() => {
             setShowQrLoginModal(false);

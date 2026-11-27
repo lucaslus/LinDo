@@ -296,4 +296,13 @@ class TurnstileAndQrLoginTest {
         assertTrue(redacted.contains("k=<REDACTED>"))
         assertTrue(redacted.contains("o=<REDACTED>"))
     }
+
+    @Test
+    fun webVerificationProbeIncludesClosedShadowStageDomDetectionWithoutMonkeyPatching() {
+        val script = do_.linux.lindo.core.network.webVerificationProbeScript()
+        assertTrue(script.contains("stageDom:hasStageDom"), "Probe must emit stageDom for closed-ShadowRoot Turnstile pages")
+        assertTrue(script.contains(".main-wrapper,.main-content,#challenge-body-text,.zone-name-title"))
+        assertTrue(script.contains("document.body.scrollHeight >= 120"))
+        assertFalse(script.contains("attachShadow"), "Must never monkey-patch Element.prototype.attachShadow")
+    }
 }

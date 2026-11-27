@@ -561,9 +561,7 @@ describe("App.tsx login unification, narrow-screen guard & Phase 3 copy regressi
     expect(readerSrc).toContain('title="发送短评"');
     expect(readerSrc).toContain('title="收起短评"');
     expect(readerSrc).toContain('title="删除短评"');
-    expect(readerSrc).toContain('title={myBoost ? "查看我的短评" : "发短评"}');
-    expect(readerSrc).toContain('"登录后发短评"');
-    expect(readerSrc).toContain('"给帖子发一条简短回应"');
+    expect(readerSrc).toContain('title="发短评"');
     expect(secondarySrc).toContain('return "给你的帖子发了短评"');
 
     expect(readerSrc).not.toContain("助力…");

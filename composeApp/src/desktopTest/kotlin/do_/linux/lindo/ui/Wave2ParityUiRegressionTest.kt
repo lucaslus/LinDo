@@ -956,6 +956,7 @@ class Wave2ParityUiRegressionTest {
             assertEquals(listOf(true), capturedForceRefreshFlags.toList(), "Settings 站点安全验证 must arm one-shot forceRefresh = true")
             assertTrue(!PlatformWebLoginHost.peekOneShotForceRefreshForTest(), "One-shot forceRefresh must be consumed & cleared immediately")
             assertTrue(onDismissCallback != null, "Embedded verification modal must wire onDismiss")
+            val oldSuccess = onVerifiedCallback
             edt { onDismissCallback?.invoke() }
             waitUntil(timeoutMillis = 5_000L) { NetworkPolicyEngine.isProactiveVerifySnoozed() }
             assertTrue(NetworkPolicyEngine.isProactiveVerifySnoozed(), "Cancelling forceRefresh must arm dismiss snooze")
@@ -985,8 +986,15 @@ class Wave2ParityUiRegressionTest {
             assertEquals(listOf(true), capturedForceRefreshFlags.toList(), "Settings 站点安全验证 must arm one-shot forceRefresh = true again")
             assertTrue(!PlatformWebLoginHost.peekOneShotForceRefreshForTest(), "One-shot forceRefresh must be consumed & cleared immediately")
             assertTrue(onVerifiedCallback != null, "Embedded verification modal must open for human verification")
+            val joinedResults = mutableListOf<VerificationDialogResult>()
+            edt {
+                PlatformSessionRecovery.openEmbeddedVerifyModal?.invoke { joinedResults.add(it) }
+                oldSuccess?.invoke()
+                assertTrue(joinedResults.isEmpty(), "A callback from the dismissed window must not finish the current one")
+            }
             edt { onVerifiedCallback?.invoke() }
             waitForText("安全验证已刷新")
+            assertEquals(listOf(VerificationDialogResult.Passed), joinedResults)
             waitForText("刚刚已验证")
             assertTrue(!NetworkPolicyEngine.verifyAttentionNeeded, "Verify attention flag must clear after verification")
 

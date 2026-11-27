@@ -33,6 +33,8 @@ object AppAppearance {
         ?: when { legacy < .885f -> .95f; legacy < .96f -> 1f; else -> 1.12f }
 }
 
+enum class VerificationDialogResult { Passed, Dismissed, Expired, Unavailable }
+
 /** Native browser adapters provide capabilities, never a different product design. */
 object PlatformSessionRecovery {
     var loginSession: (suspend () -> Boolean)? = null
@@ -41,9 +43,11 @@ object PlatformSessionRecovery {
     var verifying by mutableStateOf(false)
     var verifyPillVisible by mutableStateOf(false)
     var onExpandVerifyPill: (() -> Unit)? = null
-    /** 打开应用内验证面板（置于任何加载遮罩之上），并在用户通过或关闭后以 true/false 回调。 */
-    var openEmbeddedVerifyModal: (((Boolean) -> Unit) -> Unit)? = null
+    /** Register a waiter on the visible dialog. Its owner detaches on timeout or cancellation. */
+    var openEmbeddedVerifyModal: (((VerificationDialogResult) -> Unit) -> (() -> Unit))? = null
     /** 平台静默过盾成功：UI 自动重试当前因站点验证失败的视图。 */
     var onSilentVerifyPassed: (() -> Unit)? = null
+    /** 长时间后台切回前台（>=60s）时，自动收起休眠前遗留的旧网络验证弹窗，避免拿着旧网络状态连续卡盾。 */
+    var dismissStaleVerifyModalOnLongResume: (() -> Unit)? = null
     var cancelVerification: (() -> Unit)? = null
 }

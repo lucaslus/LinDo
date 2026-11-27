@@ -386,14 +386,51 @@ class Wave2ParityRegressionTest {
             <p>表情 <img class="emoji" src="https://linux.do/images/emoji/twemoji/smile.png" width="20" height="20" alt=":smile:"></p>
             <p><img src="https://linux.do/uploads/hero.png" width="690" height="388" alt="封面图"></p>
             <p><img src="https://linux.do/uploads/tiny.png" width="24" height="24" alt="小图标"></p>
+            <p><img src="https://linux.do/uploads/default/optimized/4X/a/b/c/abc_2_500x300.jpeg" alt="优化图"></p>
+            <div class="lightbox-wrapper"><a class="lightbox" href="https://linux.do/uploads/full.png"><img src="https://linux.do/uploads/full.png" alt="灯箱图"><div class="meta"><span class="informations">1080×2400 320 KB</span></div></a></div>
         """.trimIndent()
         val nodes = DiscourseAstParser.parseCookedHtml(html)
         val gallery = nodes.filterIsInstance<do_.linux.lindo.core.render.PostBlockNode.ImageGallery>().single()
-        assertEquals(2, gallery.urls.size, "Emoji must stay inline and NOT enter ImageGallery")
+        assertEquals(4, gallery.urls.size, "Emoji must stay inline and NOT enter ImageGallery")
         val heroRatio = gallery.aspectRatios[0]
         assertNotNull(heroRatio)
         assertTrue(heroRatio in 1.75f..1.80f, "Expected ~1.778 for 690x388, got $heroRatio")
+        assertEquals(690, gallery.widths[0])
+        assertEquals(388, gallery.heights[0])
         assertEquals(null, gallery.aspectRatios[1], "Tiny <48px images should not reserve large hero aspect ratio")
+        // Optimized URL `_2_500x300.jpeg` extraction
+        assertEquals(500, gallery.widths[2])
+        assertEquals(300, gallery.heights[2])
+        // Lightbox `.meta .informations` extraction (`1080×2400`)
+        assertEquals(1080, gallery.widths[3])
+        assertEquals(2400, gallery.heights[3])
+        val portraitRatio = gallery.aspectRatios[3]
+        assertNotNull(portraitRatio)
+        assertTrue(portraitRatio in 0.44f..0.46f, "Expected ~0.45 for 1080x2400, got $portraitRatio")
+    }
+
+    @Test
+    fun unifiedImageBoxSizeMatchesDesktopCssFormulaAcrossPortraitSmallWideAndLandscape() {
+        // 1. Portrait 1080x2400 (ar=0.45) on 360dp phone -> capped at 360dp height, width shrinks to 162dp (NOT 360x360 square!)
+        val portrait = do_.linux.lindo.ui.computeUnifiedImageBoxSize(360f, 1080, 2400, 0.45f, 360f)
+        assertNotNull(portrait)
+        assertTrue(portrait.widthDp in 161f..163f, "Portrait width expected ~162dp, got ${portrait.widthDp}")
+        assertTrue(portrait.heightDp in 359f..360.1f, "Portrait height expected 360dp, got ${portrait.heightDp}")
+
+        // 2. Small image 200x120 -> preserves 200x120dp instead of stretching to 360dp full width!
+        val small = do_.linux.lindo.ui.computeUnifiedImageBoxSize(360f, 200, 120, 200f / 120f, 360f)
+        assertNotNull(small)
+        assertTrue(small.widthDp in 199.5f..200.5f, "Small width expected 200dp, got ${small.widthDp}")
+        assertTrue(small.heightDp in 119.5f..120.5f, "Small height expected 120dp, got ${small.heightDp}")
+
+        // 3. Wide banner 1200x180 -> 360x54dp instead of forcing min 120dp height!
+        val banner = do_.linux.lindo.ui.computeUnifiedImageBoxSize(360f, 1200, 180, 1200f / 180f, 360f)
+        assertNotNull(banner)
+        assertTrue(banner.widthDp in 359.5f..360.5f)
+        assertTrue(banner.heightDp in 53.5f..54.5f, "Wide banner height expected 54dp, got ${banner.heightDp}")
+
+        // 4. Unknown image (all null) -> returns null for fallback placeholder
+        assertEquals(null, do_.linux.lindo.ui.computeUnifiedImageBoxSize(360f, null, null, null, 360f))
     }
 
     @Test

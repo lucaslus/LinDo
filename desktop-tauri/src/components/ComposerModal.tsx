@@ -36,6 +36,7 @@ import {
   searchUsersForMention,
   SiteError,
   updateExistingPost,
+  updateTopicMetadata,
   uploadMediaToSite,
 } from "../lib/api";
 import {
@@ -58,11 +59,13 @@ interface ComposerModalProps {
   request: ComposerLaunchRequest;
   categories: CategoryMeta[];
   savedDraft?: LocalDraftRecord;
+  localDraftKey?: string;
   presentation?: "modal" | "drawer";
   onTogglePresentation?: () => void;
   appendQuote?: { text: string; nonce: number } | null;
   exitGuardRef?: React.MutableRefObject<((proceed: () => void) => void) | null>;
   onClose: () => void;
+  onTopicEdited: (topicId: number, changes: { title?: string; categoryId?: number; tags?: string[] }) => void;
   onPublished: (result: {
     topicId?: number;
     post?: PostItemModel | null;
@@ -179,12 +182,14 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
   request,
   categories,
   savedDraft,
+  localDraftKey,
   presentation = "modal",
   onTogglePresentation,
   appendQuote,
   exitGuardRef,
   onClose,
   onPublished,
+  onTopicEdited,
   onTriggerVerify,
 }) => {
   const isDrawer = presentation === "drawer";
@@ -198,11 +203,12 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
   const hasMetaControls = isNewTopic || isEditingOp;
 
   const draftKey = useMemo(() => {
+    if (localDraftKey) return localDraftKey;
     if (request.draftKeyOverride) return request.draftKeyOverride;
     if (request.action === "NEW_TOPIC") return "new_topic";
     if (request.action === "EDIT") return `edit_${request.postId || 0}`;
     return `reply_${request.topicId || 0}`;
-  }, [request]);
+  }, [request, localDraftKey]);
 
   // Filter strictly to postable categories (aligned 1:1 with ComposerPickers.kt!)
   const postableTopCategories = useMemo(() => {
@@ -219,6 +225,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
   const defaultCatId = useMemo(() => {
     const candidate = savedDraft?.categoryId ?? request.initialCategoryId;
     if (candidate) {
+      if (isEditingOp) return candidate;
       const found = categories.find((c) => c.id === candidate && c.canCreateTopic !== false);
       if (found) return found.id;
     }
@@ -228,7 +235,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
       postableTopCategories[0]?.id ??
       4
     );
-  }, [savedDraft?.categoryId, request.initialCategoryId, categories, postableTopCategories]);
+  }, [savedDraft?.categoryId, request.initialCategoryId, categories, postableTopCategories, isEditingOp]);
 
   const [categoryId, setCategoryId] = useState<number>(defaultCatId);
   const [focusedParentId, setFocusedParentId] = useState<number>(() => {
@@ -337,16 +344,23 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
   } | null>(null);
   const [draftSavedAt, setDraftSavedAt] = useState<number | null>(null);
   const [cloudSyncedAt, setCloudSyncedAt] = useState<number | null>(null);
+  const [cloudReady, setCloudReady] = useState(false);
+  const cloudSave = useRef<Promise<void>>(Promise.resolve());
+  const [cloudSequence, setCloudSequence] = useState(savedDraft?.sequence ?? 0);
+  const [submitNeedsVerification, setSubmitNeedsVerification] = useState(false);
+  const [rawRetry, setRawRetry] = useState(0);
+  const [rawReadFailed, setRawReadFailed] = useState(false);
   const cloudDraftSeqRef = useRef<number>(savedDraft?.sequence ?? 0);
+  const originalMeta = useRef({ title: request.initialTitle ?? "", categoryId: request.initialCategoryId, tags: request.initialTags ?? [] });
   const [editReason, setEditReason] = useState<string>("");
   const [inlineSuggest, setInlineSuggest] = useState<
     | { kind: "MENTION"; query: string; startIdx: number; endIdx: number; items: MentionUserCandidate[]; active: number }
     | { kind: "EMOJI"; query: string; startIdx: number; endIdx: number; items: Array<{ code: string; label: string }>; active: number }
     | null
   >(null);
-  const [loadingRawEdit, setLoadingRawEdit] = useState(
-    request.action === "EDIT" && !request.initialRaw
-  );
+  const restoringEdit = request.action === "EDIT" && Boolean(request.draftKeyOverride || savedDraft);
+  const needsOriginal = request.action === "EDIT" && (restoringEdit || !request.initialRaw);
+  const [loadingRawEdit, setLoadingRawEdit] = useState(needsOriginal);
 
   const titleInputRef = useRef<HTMLInputElement | null>(null);
   const bodyTextareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -355,6 +369,8 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
   const previewContainerRef = useRef<HTMLDivElement | null>(null);
   const rawRef = useRef<string>(raw);
   rawRef.current = raw;
+  const liveMeta = useRef({ title, categoryId, tags });
+  liveMeta.current = { title, categoryId, tags };
   const uploadSeqRef = useRef<number>(0);
   const createdBlobUrlsRef = useRef<string[]>([]);
   const lastAppendedNonceRef = useRef<number>(0);
@@ -440,17 +456,26 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
 
   // Load raw markdown when editing a post
   useEffect(() => {
-    if (request.action === "EDIT" && request.postId && !request.initialRaw) {
+    if (needsOriginal && request.postId) {
+      setSubmitError(null);
       setLoadingRawEdit(true);
+      let alive = true;
       fetchPostRawMarkdown(request.postId)
         .then((loadedRaw) => {
+          if (!alive) return;
+          setRawReadFailed(false);
           setOriginalEditRaw(loadedRaw);
-          setRaw(loadedRaw);
+          if (!restoringEdit) setRaw(loadedRaw);
         })
-        .catch((err: any) => setSubmitError(err?.message || "无法读取原帖内容"))
-        .finally(() => setLoadingRawEdit(false));
+        .catch((err: any) => {
+          if (!alive) return;
+          setRawReadFailed(true);
+          setSubmitError(err?.message || "无法读取原帖内容，请重新打开编辑器");
+        })
+        .finally(() => { if (alive) setLoadingRawEdit(false); });
+      return () => { alive = false; };
     }
-  }, [request]);
+  }, [needsOriginal, restoringEdit, request.postId, rawRetry]);
 
   // Apply category topic_template automatically when switching categories on a new topic if raw is blank or still equals previous template
   useEffect(() => {
@@ -587,27 +612,28 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
 
   // Fetch remote cloud draft on open and detect conflicts vs local draft (`P1-4`)
   useEffect(() => {
-    if (!cloudDraftKey) return;
+    setCloudReady(false);
+    setCloudDraftConflict(null);
+    if (!cloudDraftKey || request.action === "EDIT") return;
     let alive = true;
     fetchSingleCloudDraft(cloudDraftKey)
-      .then((remote) => {
-        if (!alive || !remote) return;
-        // Never collide cross-action drafts (e.g. a REPLY draft on topic T when opening EDIT on a post in T)
-        if (remote.action !== request.action) return;
-        if (
-          request.action === "EDIT" &&
-          (!remote.postId || !request.postId || remote.postId !== request.postId)
-        ) {
+      .then(({ draft: remote, sequence }) => {
+        if (!alive) return;
+        cloudDraftSeqRef.current = sequence;
+        if (!remote) {
+          setCloudReady(true);
           return;
         }
-        cloudDraftSeqRef.current = Math.max(cloudDraftSeqRef.current, remote.sequence);
+        if (remote.action !== request.action) return;
+        if (request.action === "REPLY" && (remote.replyToPostNumber ?? null) !== (request.replyToPostNumber ?? null)) return;
+        setCloudReady(true);
         const curRaw = rawRef.current.trim();
-        const curTitle = (savedDraft?.title ?? request.initialTitle ?? "").trim();
+        const curTitle = liveMeta.current.title.trim();
         const remoteRaw = remote.raw.trim();
         const remoteTitle = remote.title.trim();
         if (!remoteRaw && !remoteTitle) return;
 
-        if (!curRaw && !curTitle && request.action !== "EDIT") {
+        if (!curRaw && !curTitle && !liveMeta.current.tags.length && liveMeta.current.categoryId === defaultCatId) {
           // Local is empty -> silently hydrate cloud draft & preserve real sequence
           if (remote.title && isNewTopic) setTitle(remote.title);
           if (remote.raw) {
@@ -620,7 +646,11 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
         }
 
         const differs =
-          remoteRaw !== curRaw || (isNewTopic && Boolean(remoteTitle) && remoteTitle !== curTitle);
+          remoteRaw !== curRaw || (isNewTopic && (
+            remoteTitle !== curTitle ||
+            (remote.categoryId != null && remote.categoryId !== liveMeta.current.categoryId) ||
+            remote.tags.join(",") !== liveMeta.current.tags.join(",")
+          ));
         if (differs) {
           setCloudDraftConflict(remote);
         }
@@ -631,11 +661,11 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
     };
     // Run once on composer launch for this draft key
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cloudDraftKey]);
+  }, [cloudDraftKey, request.replyToPostNumber]);
 
   // Persist local draft quietly on edit (preserving real server sequence!)
   useEffect(() => {
-    if (request.action === "EDIT") return;
+    if (request.action === "EDIT" || submitting) return;
     if (!title.trim() && !raw.trim() && tags.length === 0) return;
     const timer = setTimeout(() => {
       saveLocalDraftInRust({
@@ -655,13 +685,14 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
         .catch(() => {});
     }, 450);
     return () => clearTimeout(timer);
-  }, [draftKey, request, categoryId, title, raw, tags]);
+  }, [draftKey, request, categoryId, title, raw, tags, submitting, cloudSequence]);
 
   // Best-effort bidirectional Discourse cloud draft sync (debounced 2.8s, strictly non-blocking)
   useEffect(() => {
     if (request.action === "EDIT") return;
     if (!title.trim() && !raw.trim()) return;
-    if (!cloudDraftKey) return;
+    if (!cloudDraftKey || !cloudReady || cloudDraftConflict || submitting) return;
+    let active = true;
     const timer = setTimeout(() => {
       const payload =
         request.action === "NEW_TOPIC"
@@ -683,34 +714,18 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               composerTime: Date.now() - composerOpenedAtRef.current,
               typingTime: firstTypedAtRef.current ? Date.now() - firstTypedAtRef.current : 0,
             };
-      saveCloudDraft({
-        draftKey: cloudDraftKey,
-        sequence: cloudDraftSeqRef.current,
-        data: payload,
-      })
-        .then((nextSeq) => {
-          cloudDraftSeqRef.current = nextSeq;
+      cloudSave.current = cloudSave.current.then(async () => {
+        if (!active) return;
+        const nextSeq = await saveCloudDraft({ draftKey: cloudDraftKey, sequence: cloudDraftSeqRef.current, data: payload });
+        cloudDraftSeqRef.current = nextSeq;
+        if (active) {
+          setCloudSequence(nextSeq);
           setCloudSyncedAt(Date.now());
-          saveLocalDraftInRust({
-            key: draftKey,
-            action: request.action,
-            topicId: request.topicId ?? null,
-            postId: request.postId ?? null,
-            replyToPostNumber: request.replyToPostNumber ?? null,
-            categoryId,
-            title,
-            raw,
-            tags,
-            sequence: nextSeq,
-            updatedAt: Date.now(),
-          }).catch(() => {});
-        })
-        .catch(() => {
-          // silent fallback: local Rust draft is always authoritative
-        });
+        }
+      }).catch(() => {});
     }, 2800);
-    return () => clearTimeout(timer);
-  }, [cloudDraftKey, draftKey, request, categoryId, title, raw, tags]);
+    return () => { active = false; clearTimeout(timer); };
+  }, [cloudDraftKey, cloudReady, cloudDraftConflict, request, categoryId, title, raw, tags, submitting]);
 
   // Live inline `@` mention fetch when user types `@term` directly in the editor
   useEffect(() => {
@@ -756,7 +771,11 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
   // Validation computations (displayed ONLY after submitAttempted === true)
   const titleTrimmed = title.trim();
   const titleRemaining = MIN_TITLE_LEN - Array.from(titleTrimmed).length;
-  const titleErrorMsg = !hasMetaControls
+  const validateTitle = isNewTopic || (isEditingOp && titleTrimmed !== originalMeta.current.title.trim());
+  const validateTags = isNewTopic || (isEditingOp && (
+    categoryId !== originalMeta.current.categoryId || tags.join(",") !== originalMeta.current.tags.join(",")
+  ));
+  const titleErrorMsg = !validateTitle
     ? null
     : titleTrimmed.length === 0
       ? "请填写标题"
@@ -765,7 +784,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
         : null;
 
   const tagErrorMsg =
-    !hasMetaControls || tagsLoading
+    !validateTags || tagsLoading
       ? null
       : tagChoices.forbiddenMessage
         ? tagChoices.forbiddenMessage
@@ -776,7 +795,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
   const bodyTrimmed = raw.trim();
   const bodyRemaining = MIN_BODY_LEN - Array.from(bodyTrimmed).length;
   const bodyErrorMsg =
-    bodyTrimmed.length === 0
+    request.action === "EDIT" && raw === originalEditRaw ? null : bodyTrimmed.length === 0
       ? request.action === "REPLY"
         ? "请填写回复"
         : "请填写正文"
@@ -1229,12 +1248,14 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
   const executePublish = async () => {
     setSubmitting(true);
     setSubmitError(null);
+    setSubmitNeedsVerification(false);
     const now = Date.now();
     const composerOpenDurationMs = Math.max(1000, now - composerOpenedAtRef.current);
     const typingDurationMs = firstTypedAtRef.current
       ? Math.max(800, Math.min(composerOpenDurationMs, now - firstTypedAtRef.current))
       : Math.max(800, Math.min(composerOpenDurationMs, raw.length * 45));
     try {
+      await cloudSave.current;
       if (request.action === "NEW_TOPIC") {
         const res = await publishTopic({
           title,
@@ -1261,31 +1282,41 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
           pendingReview: res.pendingReview,
         });
       } else if (request.action === "EDIT" && request.postId && request.topicId) {
-        const updated = await updateExistingPost({
+        if (isEditingOp) {
+          const before = originalMeta.current;
+          const changes: { title?: string; categoryId?: number; tags?: string[] } = {};
+          if (title.trim() !== before.title.trim()) changes.title = title.trim();
+          if (categoryId !== before.categoryId && before.categoryId != null) changes.categoryId = categoryId;
+          if (tags.join(",") !== before.tags.join(",")) changes.tags = tags;
+          if (Object.keys(changes).length) {
+            const serverTitle = await updateTopicMetadata(request.topicId, changes);
+            if (serverTitle && changes.title !== undefined) {
+              changes.title = serverTitle;
+              setTitle(serverTitle);
+            }
+            originalMeta.current = { title: changes.title ?? title, categoryId, tags };
+            onTopicEdited(request.topicId, changes);
+          }
+        }
+        const updated = raw !== originalEditRaw ? await updateExistingPost({
           postId: request.postId,
           topicId: request.topicId,
           raw,
-          title: isEditingOp ? title : undefined,
-          categoryId: isEditingOp ? categoryId : undefined,
-          tags: isEditingOp ? tags : undefined,
           editReason: editReason.trim() || undefined,
-        });
+        }) : null;
+        if (restoringEdit) await deleteLocalDraftInRust(draftKey).catch(() => {});
         onPublished({ topicId: request.topicId, post: updated });
       }
     } catch (err: any) {
-      if (
-        !(err instanceof SiteError && err.isVerification) ||
-        (err.message && (err.message.includes("冷却") || err.message.includes("拦截")))
-      ) {
-        setSubmitError(err?.message || "提交未完成，内容已保留在本地");
-      }
+      setSubmitNeedsVerification(err instanceof SiteError && err.isVerification);
+      setSubmitError(err?.message || "提交未完成，编辑内容已保留");
     } finally {
       setSubmitting(false);
     }
   };
 
   const handleAttemptSubmit = async () => {
-    if (submitting || uploading || loadingRawEdit || tagsLoading) return;
+    if (cloudDraftConflict || submitting || uploading || rawReadFailed || loadingRawEdit || (validateTags && tagsLoading)) return;
     if (titleErrorMsg || tagErrorMsg || bodyErrorMsg) {
       setSubmitAttempted(true);
       if (titleErrorMsg) {
@@ -1378,88 +1409,33 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               : "回复"
             : "回复话题";
 
-  const [fallbackTopicContext, setFallbackTopicContext] = useState<{
-    topicId: number;
-    title: string;
-    username: string;
-    displayName?: string;
-    avatarTemplate: string;
-    animatedAvatar?: string | null;
-  } | null>(() => {
-    if (!request.topicId || request.action === "NEW_TOPIC") return null;
-    const cached = getCachedTopicDetail(request.topicId);
-    if (!cached) return null;
-    const opFloor = cached.posts.find((p) => p.postNumber === 1);
-    return {
-      topicId: cached.id,
-      title: cached.title,
-      username: opFloor?.username || cached.opUsername || "",
-      displayName: opFloor?.displayName || cached.opDisplayName,
-      avatarTemplate: opFloor?.avatarTemplate || cached.opAvatarTemplate || "",
-      animatedAvatar: opFloor?.animatedAvatar ?? cached.opAnimatedAvatar ?? null,
-    };
-  });
-
+  const contextFloor = request.replyToPostNumber ?? request.postNumber ?? 1;
+  const [contextDetail, setContextDetail] = useState(() =>
+    request.topicId ? getCachedTopicDetail(request.topicId) : null
+  );
   useEffect(() => {
     const tid = request.topicId;
     if (!tid || request.action === "NEW_TOPIC") return;
     if (request.replyToUsername && request.replyToAvatarTemplate && request.topicTitle) return;
     const cached = getCachedTopicDetail(tid);
-    if (cached) {
-      const opFloor = cached.posts.find((p) => p.postNumber === 1);
-      setFallbackTopicContext({
-        topicId: cached.id,
-        title: cached.title,
-        username: opFloor?.username || cached.opUsername || "",
-        displayName: opFloor?.displayName || cached.opDisplayName,
-        avatarTemplate: opFloor?.avatarTemplate || cached.opAvatarTemplate || "",
-        animatedAvatar: opFloor?.animatedAvatar ?? cached.opAnimatedAvatar ?? null,
-      });
+    if (cached?.posts.some((p) => p.postNumber === contextFloor)) {
+      setContextDetail(cached);
       return;
     }
     let cancelled = false;
-    fetchTopicDetail(tid, { trackVisit: false })
-      .then((det) => {
-        if (cancelled) return;
-        const opFloor = det.posts.find((p) => p.postNumber === 1);
-        const targetPost = request.replyToPostNumber
-          ? det.posts.find((p) => p.postNumber === request.replyToPostNumber)
-          : null;
-        const chosen = targetPost || opFloor;
-        setFallbackTopicContext({
-          topicId: det.id,
-          title: det.title,
-          username: chosen?.username || det.opUsername || "",
-          displayName: chosen?.displayName || det.opDisplayName,
-          avatarTemplate: chosen?.avatarTemplate || det.opAvatarTemplate || "",
-          animatedAvatar: chosen?.animatedAvatar ?? det.opAnimatedAvatar ?? null,
-        });
-      })
+    fetchTopicDetail(tid, { targetPostNumber: contextFloor, trackVisit: false })
+      .then((detail) => { if (!cancelled) setContextDetail(detail); })
       .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    request.action,
-    request.topicId,
-    request.replyToPostNumber,
-    request.replyToUsername,
-    request.replyToAvatarTemplate,
-    request.topicTitle,
-  ]);
+    return () => { cancelled = true; };
+  }, [request.topicId, request.action, request.replyToUsername, request.replyToAvatarTemplate, request.topicTitle, contextFloor]);
 
-  const ctxForTopic =
-    fallbackTopicContext && fallbackTopicContext.topicId === request.topicId
-      ? fallbackTopicContext
-      : null;
-  const effectiveTopicTitle = request.topicTitle || ctxForTopic?.title || "";
-  const effectiveReplyUsername = request.replyToUsername || ctxForTopic?.username || "";
-  const effectiveReplyDisplayName = request.replyToDisplayName || ctxForTopic?.displayName;
-  const effectiveAvatarTemplate = request.replyToAvatarTemplate || ctxForTopic?.avatarTemplate || "";
-  const effectiveAnimatedAvatar =
-    request.replyToAnimatedAvatar !== undefined
-      ? request.replyToAnimatedAvatar
-      : ctxForTopic?.animatedAvatar ?? null;
+  const detail = contextDetail?.id === request.topicId ? contextDetail : null;
+  const author = detail?.posts.find((post) => post.postNumber === contextFloor);
+  const effectiveTopicTitle = request.topicTitle || detail?.title || "";
+  const effectiveReplyUsername = request.replyToUsername || author?.username || "";
+  const effectiveReplyDisplayName = request.replyToDisplayName || author?.displayName;
+  const effectiveAvatarTemplate = request.replyToAvatarTemplate || author?.avatarTemplate || "";
+  const effectiveAnimatedAvatar = request.replyToAnimatedAvatar ?? author?.animatedAvatar ?? null;
 
   const actionLabel =
     request.action === "NEW_TOPIC" ? "发布" : request.action === "EDIT" ? "保存" : "发送";
@@ -1601,7 +1577,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
 
           <button
             type="button"
-            disabled={submitting || uploading || loadingRawEdit}
+            disabled={Boolean(cloudDraftConflict) || submitting || uploading || rawReadFailed || loadingRawEdit}
             onClick={handleAttemptSubmit}
             className="ml-0.5 rounded-full px-4 py-1 text-[13px] font-semibold transition-opacity hover:opacity-90 cursor-pointer disabled:opacity-45"
             style={{
@@ -3420,15 +3396,13 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
             <button
               type="button"
               onClick={() => {
-                if (cloudDraftConflict.title && isNewTopic) setTitle(cloudDraftConflict.title);
-                if (cloudDraftConflict.raw) {
-                  rawRef.current = cloudDraftConflict.raw;
-                  setRaw(cloudDraftConflict.raw);
-                }
+                if (isNewTopic) setTitle(cloudDraftConflict.title);
+                rawRef.current = cloudDraftConflict.raw;
+                setRaw(cloudDraftConflict.raw);
                 if (cloudDraftConflict.categoryId && isNewTopic) {
                   setCategoryId(cloudDraftConflict.categoryId);
                 }
-                if (cloudDraftConflict.tags.length > 0 && isNewTopic) {
+                if (isNewTopic) {
                   setTags(cloudDraftConflict.tags);
                 }
                 cloudDraftSeqRef.current = Math.max(
@@ -3472,6 +3446,8 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
           }}
         >
           {submitError}
+          {rawReadFailed && <button type="button" className="ml-3 underline" onClick={() => setRawRetry((n) => n + 1)}>重新读取原帖</button>}
+          {submitNeedsVerification && <button type="button" className="ml-3 underline" onClick={onTriggerVerify}>去验证</button>}
         </div>
       )}
 
@@ -3508,6 +3484,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
             {viewMode !== "PREVIEW" && (
               <textarea
                 ref={bodyTextareaRef}
+                readOnly={rawReadFailed || submitting}
                 value={raw}
                 onChange={(e) => {
                   if (firstTypedAtRef.current === null) {
@@ -3986,8 +3963,8 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               pendingProceedRef.current = null;
               setShowExitConfirm(false);
               deleteLocalDraftInRust(draftKey).catch(() => {});
-              if (cloudDraftKey) {
-                deleteCloudDraft(cloudDraftKey, cloudDraftSeqRef.current).catch(() => {});
+              if (cloudDraftKey && cloudReady) {
+                void cloudSave.current.then(() => deleteCloudDraft(cloudDraftKey, cloudDraftSeqRef.current)).catch(() => {});
               }
               onClose();
               after?.();

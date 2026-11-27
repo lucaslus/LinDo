@@ -11,9 +11,9 @@ use crate::net_policy::{
     transient_backoff_ms, AdaptiveTokenBucket, AttemptBudget, BackgroundChallengeTracker,
     BridgeTimeoutSpec, CallDeadline, Cf429AdaptiveClassifier, Cf429Decision, CfClearanceAuthority,
     CleanIpProbeResult, CleanIpSettleAction, ForceRefreshOutcomeDecision,
-    IneffectiveClearanceDecision, PriorityGate, RequestPriority, VerifyCoordinator,
+    PriorityGate, RequestPriority, VerifyCoordinator,
     VerifyFlightGuard, VerifyJoin, VerifyOutcome, VerifyPresentation, VerifyTicketOutcome,
-    VERIFY_PILL_DELAY_MS, VERIFY_PROACTIVE_WIDGET_PROMOTE_MS, VERIFY_TYPING_QUIET_GUARD_MS,
+    VERIFY_PILL_DELAY_MS, VERIFY_TYPING_QUIET_GUARD_MS,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -320,6 +320,21 @@ pub(crate) const DESKTOP_HTTP_BRIDGE_TEMPLATE_JS: &str = r#"(() => new Promise((
     })();
 }))()"#;
 
+fn discourse_form_entries(form: &HashMap<String, String>) -> Vec<(String, &str)> {
+    let mut pairs: Vec<_> = form.iter().map(|(key, value)| {
+        if let Some((base, index)) = key.strip_suffix(']').and_then(|k| k.split_once('[')) {
+            if matches!(base, "tags" | "options" | "post_ids") {
+                if let Ok(index) = index.parse::<usize>() {
+                    return (format!("{base}[]"), index, value.as_str());
+                }
+            }
+        }
+        (key.clone(), 0, value.as_str())
+    }).collect();
+    pairs.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+    pairs.into_iter().map(|(key, _, value)| (key, value)).collect()
+}
+
 pub(crate) fn build_http_bridge_script(
     url: &str,
     method: &str,
@@ -334,7 +349,7 @@ pub(crate) fn build_http_bridge_script(
         "url": url,
         "method": method,
         "headers": headers,
-        "form": form,
+        "form": form.as_ref().map(discourse_form_entries),
         "referrer": referrer,
         "forceNoStore": force_no_store,
         "csrfOwner": csrf_owner,
@@ -688,6 +703,19 @@ pub struct SiteHttpResponse {
     pub diag: Option<SiteHttpDiag>,
 }
 
+impl SiteHttpResponse {
+    fn cooldown(remaining_ms: u64) -> Self {
+        Self {
+            status: 429,
+            body: r#"{"errors":["请求较频繁，请稍后再试"],"localCooldown":true}"#.into(),
+            is_challenge: false,
+            is_unauthenticated: false,
+            rate_limited_ms: Some(remaining_ms),
+            diag: Some(SiteHttpDiag { local_cooldown: true, ..Default::default() }),
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 struct PendingRsaGrant {
     private_base64: String,
@@ -700,7 +728,6 @@ pub struct BridgeEngine {
     bootstrap_lock: Mutex<()>,
     cookie_lock: Mutex<()>,
     verify_lock: Mutex<()>,
-    self_heal_lock: Mutex<()>,
     account_lock: RwLock<()>,
     nav_lock: RwLock<()>,
     priority_gate: PriorityGate,
@@ -744,7 +771,6 @@ impl<'a> VerifyingFlagGuard<'a> {
             rt.verifying = true;
             rt.origin_ready = false;
             rt.bootstrap_challenged = false;
-            rt.rate_limit_until = None;
             rt.fg_challenge_until = None;
             rt.bg_challenge_until = None;
         }
@@ -956,7 +982,6 @@ struct BridgeRuntime {
     origin_ready: bool,
     bootstrap_challenged: bool,
     pending_interactive_challenge: bool,
-    last_self_healed_round: u64,
     ui_composer_open: bool,
     ui_ime_composing: bool,
     ui_last_typing_at_ms: u64,
@@ -968,7 +993,6 @@ struct BridgeRuntime {
     last_login_at: Option<Instant>,
     last_expiry_check: Option<Instant>,
     rate_limit_until: Option<Instant>,
-    last_429_probe_at: Option<Instant>,
     fg_challenge_until: Option<Instant>,
     bg_challenge_until: Option<Instant>,
     media_cooldown_until: Option<Instant>,
@@ -977,6 +1001,19 @@ struct BridgeRuntime {
     verifying: bool,
     pending_rsa: Option<PendingRsaGrant>,
     consumed_nonces: Vec<String>,
+}
+
+impl BridgeRuntime {
+    fn rate_limit_response(&self, now: Instant) -> Option<SiteHttpResponse> {
+        let remaining = self.rate_limit_until?.checked_duration_since(now)?;
+        if remaining.is_zero() { return None; }
+        Some(SiteHttpResponse::cooldown(remaining.as_millis().max(1) as u64))
+    }
+
+    fn extend_rate_limit(&mut self, now: Instant, duration: Duration) {
+        let until = now + duration;
+        self.rate_limit_until = Some(self.rate_limit_until.map_or(until, |old| old.max(until)));
+    }
 }
 
 impl BridgeEngine {
@@ -1004,7 +1041,6 @@ impl BridgeEngine {
             bootstrap_lock: Mutex::new(()),
             cookie_lock: Mutex::new(()),
             verify_lock: Mutex::new(()),
-            self_heal_lock: Mutex::new(()),
             account_lock: RwLock::new(()),
             nav_lock: RwLock::new(()),
             priority_gate: PriorityGate::new(3, 1),
@@ -1023,7 +1059,6 @@ impl BridgeEngine {
                 origin_ready: false,
                 bootstrap_challenged: false,
                 pending_interactive_challenge: false,
-                last_self_healed_round: 0,
                 ui_composer_open: false,
                 ui_ime_composing: false,
                 ui_last_typing_at_ms: 0,
@@ -1035,7 +1070,6 @@ impl BridgeEngine {
                 last_login_at: None,
                 last_expiry_check: None,
                 rate_limit_until: None,
-                last_429_probe_at: None,
                 fg_challenge_until: None,
                 bg_challenge_until: None,
                 media_cooldown_until: None,
@@ -1143,7 +1177,6 @@ impl BridgeEngine {
     fn reset_network_route_state(&self, reset_cf_incumbent: bool) {
         {
             let mut rt = self.inner.lock().unwrap();
-            rt.rate_limit_until = None;
             rt.fg_challenge_until = None;
             rt.bg_challenge_until = None;
             rt.media_cooldown_until = None;
@@ -1163,73 +1196,8 @@ impl BridgeEngine {
         }
     }
 
-    /// Clean-room network & verification self-heal (100% preserving `_t` / `_forum_session` login state):
-    /// 1. Purges stale `cf_clearance` / `__cf_bm` / `_cfuvid` from WebView & persisted cookies and resets `CfClearanceAuthority`.
-    /// 2. Notifies ECH gateway of route change (clears `h2_pool`), rotates `sticky_ip`, and reconciles WebKit/WebView2 proxy mode.
-    /// 3. Resets transient rate-limit / CSRF / background challenge state.
-    pub(crate) async fn perform_clean_network_and_verify_reset(
-        &self,
-        app: &AppHandle,
-        reason: &str,
-        preserve_ineffective_strikes: bool,
-    ) {
-        let _ = self.purge_cf_clearance_for_reverify().await;
-        self.cf_authority.lock().unwrap().reset();
-
-        let mode_pref = self
-            .state
-            .lock()
-            .unwrap()
-            .preferences
-            .ech_routing_mode
-            .clone();
-        let mode = crate::ech_desktop::EchRoutingMode::from_pref(&mode_pref);
-        if mode == crate::ech_desktop::EchRoutingMode::SmartAuto {
-            let _ = crate::ech_desktop::note_proxy_tunnel_unreachable();
-        }
-        crate::ech_desktop::notify_network_route_changed();
-        crate::ech_desktop::rotate_sticky_ip();
-        let ech_snap = crate::ech_desktop::reconcile_with_mode(mode);
-        crate::ech_desktop::notify_ui_ech_updated(app, &ech_snap);
-
-        {
-            let mut rt = self.inner.lock().unwrap();
-            rt.rate_limit_until = None;
-            rt.fg_challenge_until = None;
-            rt.bg_challenge_until = None;
-            rt.media_cooldown_until = None;
-            rt.challenge_429_streak = 0;
-        }
-        self.cf_429_classifier.lock().unwrap().reset();
-        self.bg_challenge_tracker.lock().unwrap().reset();
-        {
-            let mut coord = self.verify_coord.lock().unwrap();
-            if preserve_ineffective_strikes {
-                coord.prepare_for_self_heal_reverify();
-            } else {
-                coord.reset_on_network_change();
-            }
-        }
-        let _ = native_call(
-            "evaluate",
-            json!({
-                "script": "(() => { window.__lindoCsrf = null; window.__lindoIgnoreDomCsrf = true; window.__lindoCsrfCooldownUntil = 0; return true; })()"
-            }),
-            3,
-        )
-        .await;
-        emit_diag(
-            app,
-            "INFO",
-            "NET",
-            "NetSelfHeal",
-            "已执行净室网络通道自愈重置（保留登录态，清理旧验证票据并刷新边缘路由）",
-            Some(&format!("reason={reason} | {}", ech_snap.diag_line)),
-        );
-    }
-
     /// 切网 / VPN / 系统代理切换实时自愈（由 macOS NWPathMonitor 或 Windows 代理监听驱动）：
-    /// 立即清空过时的限流/挑战冷却与 180s 免打扰期，清理死连接并同步 ECH 路由。
+    /// 更新连接池；保留服务端限流窗口和正在进行的人工验证。
     pub async fn on_network_changed(&self, app: &AppHandle, signature: &str) {
         let prev_snap = crate::ech_desktop::current_snapshot();
         let mode_pref = self
@@ -1245,10 +1213,9 @@ impl BridgeEngine {
         let ech_snap = crate::ech_desktop::reconcile_with_mode(mode);
         crate::ech_desktop::notify_ui_ech_updated(app, &ech_snap);
         let route_flipped = prev_snap.active != ech_snap.active;
-        if route_flipped {
-            let _ = self.purge_cf_clearance_for_reverify().await;
+        if let Ok(_guard) = self.verify_lock.try_lock() {
+            self.reset_network_route_state(route_flipped);
         }
-        self.reset_network_route_state(route_flipped);
         emit_diag(
             app,
             "INFO",
@@ -1290,10 +1257,9 @@ impl BridgeEngine {
         crate::ech_desktop::notify_ui_ech_updated(app, &ech_snap);
         let exit_changed = prev_snap.active != ech_snap.active
             || (!prev_snap.sticky_ip.is_empty() && prev_snap.sticky_ip != ech_snap.sticky_ip);
-        if exit_changed {
-            let _ = self.purge_cf_clearance_for_reverify().await;
+        if let Ok(_guard) = self.verify_lock.try_lock() {
+            self.reset_network_route_state(exit_changed);
         }
-        self.reset_network_route_state(exit_changed);
         emit_diag(
             app,
             "INFO",
@@ -1683,7 +1649,7 @@ impl BridgeEngine {
     /// Navigates the hidden shared bridge WebView back to lightweight `https://linux.do/about`
     /// and waits for the NEW `/about` document to actually commit (guarded by `window.__lindoLeavingNonce`)
     /// before returning so immediate POST/GET replays never match the outgoing document or blindly mark a broken page ready.
-    async fn restore_about_origin_context(&self) {
+    async fn restore_about_origin_context(&self) -> bool {
         // Fast path: if the bridge WebView is ALREADY committed on a clean non-challenged `https://linux.do`
         // document (e.g., `/challenge` 404 HTML right after passing Turnstile), reuse it in-place (<5ms)
         // without navigating to `/about`!
@@ -1697,7 +1663,7 @@ impl BridgeEngine {
                     const lowerTitle = (document.title || '').toLowerCase();
                     const explicitChallenge = !!document.querySelector('#challenge-running, #challenge-stage, #challenge-form, .cf-turnstile, #turnstile-wrapper, iframe[src*="challenges.cloudflare.com"]')
                         || /^(just a moment|请稍候|attention required|security check|something went wrong|access denied)/i.test(lowerTitle);
-                    return !explicitChallenge;
+                    return !explicitChallenge && !!document.querySelector('meta[name="csrf-token"], #data-preloaded, header.d-header, meta[name="lindo-bridge-document"]');
                 })()"#
             }),
             3,
@@ -1719,7 +1685,7 @@ impl BridgeEngine {
             let mut rt = self.inner.lock().unwrap();
             rt.origin_ready = true;
             rt.bootstrap_challenged = false;
-            return;
+            return true;
         }
 
         let nonce = self.next_nav_nonce();
@@ -1734,7 +1700,7 @@ impl BridgeEngine {
                 const explicitChallenge = !!document.querySelector('#challenge-running, #challenge-stage, #challenge-form, .cf-turnstile, #turnstile-wrapper, iframe[src*="challenges.cloudflare.com"]')
                     || /^(Just a moment|请稍候|Attention Required|Security Check)/i.test(document.title || '');
                 if (explicitChallenge) return {{ state: 'challenge' }};
-                return {{ state: 'ready' }};
+                return {{ state: document.querySelector('meta[name="csrf-token"], #data-preloaded, header.d-header, meta[name="lindo-bridge-document"]') ? 'ready' : 'waiting' }};
             }})()"#,
             nonce_json = json!(nonce)
         );
@@ -1765,7 +1731,7 @@ impl BridgeEngine {
                     let mut rt = self.inner.lock().unwrap();
                     rt.origin_ready = true;
                     rt.bootstrap_challenged = false;
-                    return;
+                    return true;
                 }
                 Some("challenge") => {
                     saw_challenge = true;
@@ -1785,6 +1751,7 @@ impl BridgeEngine {
         if saw_challenge {
             rt.bootstrap_challenged = true;
         }
+        false
     }
 
     /// Proactive Cloudflare precheck for cold-start, near-expiry, route changes, and background challenges:
@@ -1914,19 +1881,6 @@ impl BridgeEngine {
     ) -> VerifyOutcome {
         // Invariant 1: strictly Manual-only & non-sticky (clamped to false for all auto paths).
         let force_refresh = effective_force_refresh(requested, force_refresh);
-        if requested == VerifyPresentation::Manual {
-            let need_manual_heal = self
-                .verify_coord
-                .lock()
-                .unwrap()
-                .needs_clean_heal_on_manual(Instant::now())
-                && !self.inner.lock().unwrap().verifying;
-            if need_manual_heal {
-                self.perform_clean_network_and_verify_reset(app, "manual_verify_heal", false)
-                    .await;
-            }
-        }
-
         let net_sig = crate::ech_desktop::detect_net_env().signature();
         let join = {
             let mut coord = self.verify_coord.lock().unwrap();
@@ -2011,7 +1965,7 @@ impl BridgeEngine {
                 );
                 let _verify_guard = self.verify_lock.lock().await;
                 let mut saw_interactive_or_challenge = self.has_unresolved_challenge_hint();
-                let _verifying_flag = VerifyingFlagGuard::enter(&self.inner);
+                let verifying_flag = VerifyingFlagGuard::enter(&self.inner);
                 let disposition = self
                     .run_unified_cf_verify(
                         app,
@@ -2026,12 +1980,13 @@ impl BridgeEngine {
                     .unwrap_or(UnifiedVerifyDisposition::Failed);
 
                 let _ = native_call("hide", json!({}), 5).await;
-                {
+                let ready = {
                     let _nav = self.nav_lock.write().await;
-                    self.restore_about_origin_context().await;
-                }
-                let passed = disposition == UnifiedVerifyDisposition::Passed;
+                    self.restore_about_origin_context().await
+                };
+                let passed = disposition == UnifiedVerifyDisposition::Passed && ready;
                 if passed {
+                    self.cf_429_classifier.lock().unwrap().reset();
                     self.bg_challenge_tracker.lock().unwrap().reset();
                     let mut rt = self.inner.lock().unwrap();
                     rt.bootstrap_challenged = false;
@@ -2039,7 +1994,6 @@ impl BridgeEngine {
                     rt.last_challenge_url = None;
                     rt.fg_challenge_until = None;
                     rt.bg_challenge_until = None;
-                    rt.rate_limit_until = None;
                     rt.challenge_429_streak = 0;
                     rt.cf_attention_notified = false;
                 } else if disposition == UnifiedVerifyDisposition::UserDismissed {
@@ -2056,6 +2010,7 @@ impl BridgeEngine {
                     self.inner.lock().unwrap().cf_attention_notified = true;
                 }
 
+                drop(verifying_flag);
                 let outcome = match disposition {
                     UnifiedVerifyDisposition::Abandoned
                     | UnifiedVerifyDisposition::UserDismissed => {
@@ -2239,19 +2194,11 @@ impl BridgeEngine {
             let _ = native_call("show", json!({ "dark": is_dark, "login": false }), 8).await;
         }
 
-        let mut oops_reloaded = false;
-        let mut cf_err_reloads = 0u32;
-        let mut nav_err_reloads = 0u32;
         let mut challenge_ticks = 0u32;
-        let mut panel_shown_ticks = 0u32;
-        let mut widget_mounted_since: Option<Instant> = None;
-        let mut blank_healed_once = false;
         let mut quiet_rounds = 0u32;
         let mut clean_ip_settle_ticks = 0u32;
         let mut clean_ip_probe_attempts = 0u32;
         let mut last_reload_epoch: Option<u64> = None;
-        let mut pass_mask_stuck_ticks = 0u32;
-        let mut stuck_reloaded = false;
         let mut terminated_reloaded = false;
         let mut pill_emitted = false;
         let loop_started = Instant::now();
@@ -2356,10 +2303,7 @@ impl BridgeEngine {
                 Some(prev) if prev != native_reload_epoch => {
                     last_reload_epoch = Some(native_reload_epoch);
                     challenge_ticks = 0;
-                    widget_mounted_since = None;
                     quiet_rounds = 0;
-                    pass_mask_stuck_ticks = 0;
-                    stuck_reloaded = false;
                     crate::ech_desktop::notify_network_route_changed();
                     crate::ech_desktop::rotate_sticky_ip();
                     let purged = self.purge_cf_clearance_for_reverify().await;
@@ -2378,7 +2322,7 @@ impl BridgeEngine {
                 _ => {}
             }
 
-            if (cur_pres.allows_ui() || panel_shown) && user_cancelled && (native_user_reloading || native_terminated) {
+            if (cur_pres.allows_ui() || panel_shown) && user_cancelled {
                 *saw_interactive_or_challenge = true;
                 disposition = UnifiedVerifyDisposition::UserDismissed;
                 break;
@@ -2387,9 +2331,7 @@ impl BridgeEngine {
             if native_terminated && !terminated_reloaded {
                 terminated_reloaded = true;
                 challenge_ticks = 0;
-                widget_mounted_since = None;
                 quiet_rounds = 0;
-                pass_mask_stuck_ticks = 0;
                 emit_diag(
                     app,
                     "WARN",
@@ -2413,9 +2355,7 @@ impl BridgeEngine {
 
             if native_user_reloading {
                 challenge_ticks = 0;
-                widget_mounted_since = None;
                 quiet_rounds = 0;
-                pass_mask_stuck_ticks = 0;
                 if cur_pres.allows_ui() && !panel_shown && loop_started.elapsed() >= Duration::from_millis(1200) {
                     panel_shown = true;
                     let _ = native_call("show", json!({ "dark": is_dark, "login": false }), 8).await;
@@ -2423,34 +2363,10 @@ impl BridgeEngine {
                 continue;
             }
 
-            if crate::platform_bridge::CAPS.linux_webkit_quirks
-                && !native_nav_error.is_empty()
-                && !user_cancelled
-            {
+            if !native_nav_error.is_empty() && !native_loading {
                 *saw_interactive_or_challenge = true;
-                if nav_err_reloads < 2 {
-                    nav_err_reloads += 1;
-                    challenge_ticks = 0;
-                    panel_shown_ticks = 0;
-                    widget_mounted_since = None;
-                    quiet_rounds = 0;
-                    crate::ech_desktop::notify_network_route_changed();
-                    crate::ech_desktop::rotate_sticky_ip();
-                    emit_diag(
-                        app,
-                        "WARN",
-                        "AUTH",
-                        "VerifyNetRecover",
-                        "安全确认页面连接中断，正在自动切换通道并重试",
-                        Some(&format!("round={round} attempt={nav_err_reloads} err={native_nav_error}")),
-                    );
-                    tokio::time::sleep(Duration::from_millis(450)).await;
-                    let _ = native_call("navigate", json!({ "url": "https://linux.do/challenge" }), 8).await;
-                    continue;
-                }
                 break;
             }
-
             // Silent probe bails immediately on `interactiveBegin` unless escalated!
             if cur_pres == VerifyPresentation::Silent && native_interactive {
                 *saw_interactive_or_challenge = true;
@@ -2592,69 +2508,23 @@ impl BridgeEngine {
                     })
                     .unwrap_or(false);
 
-            if is_cf_error_page {
+            if panel_shown && (is_cf_error_page || is_discourse_oops) {
+                if mask_visible {
+                    mask_visible = false;
+                    let _ = native_call("setVerifyMask", json!({ "visible": false, "dark": is_dark }), 4).await;
+                }
+                continue;
+            }
+            if is_cf_error_page || is_discourse_oops {
                 *saw_interactive_or_challenge = true;
-                if cf_err_reloads < 2 {
-                    cf_err_reloads += 1;
-                    crate::ech_desktop::notify_network_route_changed();
-                    crate::ech_desktop::rotate_sticky_ip();
-                    let _ = self.purge_cf_clearance_for_reverify().await;
-                    let _ = native_call("navigate", json!({ "url": "https://linux.do/challenge" }), 8).await;
-                    continue;
-                }
                 break;
             }
-
-            if is_discourse_oops {
-                let current_cfs = self.browser_cf_clearances().await;
-                let has_fresh = {
-                    let auth = self.cf_authority.lock().unwrap();
-                    current_cfs
-                        .iter()
-                        .any(|c| !stale_cf.contains(c) && !auth.is_challenged(c))
-                };
-                if has_fresh {
-                    self.cf_authority.lock().unwrap().mark_rotation_open();
-                    let _ = self.sync_cookies_from_webkit_verified(false, true).await;
-                } else {
-                    let _ = self.sync_cookies_from_webkit_verified(false, false).await;
-                }
-                if !oops_reloaded {
-                    oops_reloaded = true;
-                    let _ = native_call("navigate", json!({ "url": "https://linux.do/challenge" }), 8).await;
-                    continue;
-                }
-                if has_fresh || !require_fresh_ticket {
-                    disposition = UnifiedVerifyDisposition::Passed;
-                }
-                break;
-            }
-
-            if (cur_pres.allows_ui() || panel_shown) && user_cancelled {
-                if (ready || is_origin_404) && !in_challenge && (!effective_force || page_settled) {
-                    // User closed right as verification finished
-                } else {
-                    *saw_interactive_or_challenge = true;
-                    disposition = UnifiedVerifyDisposition::UserDismissed;
-                    break;
-                }
-            }
-
             if in_challenge {
                 *saw_interactive_or_challenge = true;
                 quiet_rounds = 0;
                 clean_ip_settle_ticks = 0;
                 clean_ip_probe_attempts = 0;
-                pass_mask_stuck_ticks = 0;
                 challenge_ticks += 1;
-                if panel_shown {
-                    panel_shown_ticks += 1;
-                }
-                if has_rendered_widget {
-                    let _ = widget_mounted_since.get_or_insert_with(Instant::now);
-                } else {
-                    widget_mounted_since = None;
-                }
 
                 if crate::platform_bridge::CAPS.verify_confirm_fresh_clearance_via_xhr
                     && !native_loading
@@ -2692,67 +2562,10 @@ impl BridgeEngine {
                 }
 
                 if cur_pres == VerifyPresentation::Proactive && !panel_shown {
-                    let interactive_confirmed = native_interactive
-                        || (crate::platform_bridge::CAPS.hidden_webview_pauses_turnstile
-                            && explicit_challenge
-                            && challenge_ticks >= 3)
-                        || widget_mounted_since
-                            .map(|t| {
-                                t.elapsed()
-                                    >= Duration::from_millis(VERIFY_PROACTIVE_WIDGET_PROMOTE_MS)
-                            })
-                            .unwrap_or(false);
-                    if interactive_confirmed {
-                        if !self.is_main_window_visible(app) {
-                            self.inner.lock().unwrap().pending_interactive_challenge = true;
-                            disposition = UnifiedVerifyDisposition::Abandoned;
-                            break;
-                        }
-                        let cur_sig = crate::ech_desktop::detect_net_env().signature();
-                        if self
-                            .verify_coord
-                            .lock()
-                            .unwrap()
-                            .is_user_dismiss_snoozed(&cur_sig, Instant::now())
-                            .is_some()
-                        {
-                            disposition = UnifiedVerifyDisposition::Abandoned;
-                            break;
-                        }
-                        let (composer_open, actively_typing) =
-                            self.ui_typing_guard_state(now_epoch_ms());
-                        if composer_open {
-                            // User is editing/typing in `ComposerModal`: never steal input focus!
-                            // Keep PC's existing verification prompt intact and wait for click on Verify or Send.
-                            self.inner.lock().unwrap().pending_interactive_challenge = true;
-                            disposition = UnifiedVerifyDisposition::Abandoned;
-                            break;
-                        }
-                        if actively_typing {
-                            // Momentary typing outside ComposerModal (e.g. search input): hold `/challenge` warm quietly.
-                            continue;
-                        }
-                        presentation.fetch_max(VerifyPresentation::Blocking as u8, Ordering::SeqCst);
-                        if mask_visible {
-                            mask_visible = false;
-                            let _ = native_call(
-                                "setVerifyMask",
-                                json!({ "visible": false, "dark": is_dark }),
-                                4,
-                            )
-                            .await;
-                        }
-                        panel_shown = true;
-                        panel_shown_ticks = 0;
-                        let _ = native_call("show", json!({ "dark": is_dark, "login": false }), 8).await;
-                        emit_diag(
-                            app,
-                            "INFO",
-                            "AUTH",
-                            "ProactiveVerifyShown",
-                            "检测到连接需人工安全确认，已主动展开安全确认面板",
-                            Some(&format!("round={round}")),
-                        );
+                    if native_interactive || has_rendered_widget {
+                        self.inner.lock().unwrap().pending_interactive_challenge = true;
+                        disposition = UnifiedVerifyDisposition::Abandoned;
+                        break;
                     }
                     continue;
                 }
@@ -2771,56 +2584,27 @@ impl BridgeEngine {
                     continue;
                 }
 
-                let blank_watchdog_tripped = if crate::platform_bridge::CAPS.linux_webkit_quirks {
-                    !has_challenge_stage_dom && panel_shown_ticks >= 28
-                } else {
-                    challenge_ticks >= 28
-                };
-                if panel_shown
-                    && !has_rendered_widget
-                    && !native_interactive
-                    && blank_watchdog_tripped
-                    && !blank_healed_once
-                {
-                    blank_healed_once = true;
-                    challenge_ticks = 0;
-                    panel_shown_ticks = 0;
-                    crate::ech_desktop::notify_network_route_changed();
-                    crate::ech_desktop::rotate_sticky_ip();
-                    let purged = self.purge_cf_clearance_for_reverify().await;
-                    for p in purged {
-                        stale_cf.insert(p);
-                    }
-                    mask_visible = true;
-                    let _ = native_call(
-                        "setVerifyMask",
-                        json!({
-                            "visible": true,
-                            "dark": is_dark,
-                            "message": "通道已重置，正在重新加载验证…"
-                        }),
-                        4,
-                    )
-                    .await;
-                    let _ = native_call("navigate", json!({ "url": "https://linux.do/challenge" }), 8).await;
-                    continue;
-                }
-
                 let show_panel_tick = if crate::platform_bridge::CAPS.hidden_webview_pauses_turnstile {
                     2
                 } else {
-                    16
+                    12
                 };
                 let reveal_mask_tick = if crate::platform_bridge::CAPS.hidden_webview_pauses_turnstile {
                     3
                 } else {
-                    18
+                    14
                 };
                 let ready_to_reveal = native_interactive
                     || has_rendered_widget
+                    || (has_challenge_stage_dom && challenge_ticks >= 5)
                     || (explicit_challenge && challenge_ticks >= reveal_mask_tick)
                     || challenge_ticks >= 24;
-                if (native_interactive || has_rendered_widget || (explicit_challenge && challenge_ticks >= show_panel_tick)) && !panel_shown {
+                if (native_interactive
+                    || has_rendered_widget
+                    || (has_challenge_stage_dom && challenge_ticks >= 3)
+                    || (explicit_challenge && challenge_ticks >= show_panel_tick))
+                    && !panel_shown
+                {
                     if pill_emitted {
                         pill_emitted = false;
                         let _ = app.emit(
@@ -2838,7 +2622,6 @@ impl BridgeEngine {
                         .await;
                     }
                     panel_shown = true;
-                    panel_shown_ticks = 0;
                     let _ = native_call("show", json!({ "dark": is_dark, "login": false }), 8).await;
                 }
                 if ready_to_reveal && mask_visible {
@@ -2855,8 +2638,6 @@ impl BridgeEngine {
                 continue;
             }
             challenge_ticks = 0;
-            panel_shown_ticks = 0;
-            widget_mounted_since = None;
 
             if (cur_pres.allows_ui() || panel_shown) && !mask_visible && (is_origin_404 || ready) {
                 mask_visible = true;
@@ -2877,7 +2658,6 @@ impl BridgeEngine {
             };
 
             if has_fresh_cf || is_origin_404 || ready {
-                pass_mask_stuck_ticks = 0;
                 quiet_rounds += 1;
             } else {
                 quiet_rounds = 0;
@@ -2893,41 +2673,8 @@ impl BridgeEngine {
                     let _ = native_call("show", json!({ "dark": is_dark, "login": false }), 8).await;
                 }
                 if (cur_pres.allows_ui() || panel_shown) && mask_visible && native_mask_message == "已通过，正在继续…" {
-                    pass_mask_stuck_ticks += 1;
-                    if pass_mask_stuck_ticks >= 18 {
-                        let detail = format!(
-                            "round={round}, elapsedMs={}, hasFreshCf={}, origin404={}, ready={}, navError={}",
-                            loop_started.elapsed().as_millis(),
-                            has_fresh_cf,
-                            is_origin_404,
-                            ready,
-                            if native_nav_error.is_empty() { "none" } else { native_nav_error }
-                        );
-                        emit_diag(
-                            app,
-                            "WARN",
-                            "AUTH",
-                            "VerifyWatchdog",
-                            "安全确认停留在过渡状态超过 4 秒，触发自动恢复",
-                            Some(&detail),
-                        );
-                        pass_mask_stuck_ticks = 0;
-                        if !stuck_reloaded {
-                            stuck_reloaded = true;
-                            let _ = native_call(
-                                "setVerifyMask",
-                                json!({ "visible": true, "dark": is_dark, "message": "正在重新加载验证…" }),
-                                4,
-                            )
-                            .await;
-                            let _ = native_call("navigate", json!({ "url": "https://linux.do/challenge" }), 8).await;
-                        } else {
-                            mask_visible = false;
-                            let _ = native_call("setVerifyMask", json!({ "visible": false, "dark": is_dark }), 4).await;
-                        }
-                    }
-                } else {
-                    pass_mask_stuck_ticks = 0;
+                    mask_visible = false;
+                    let _ = native_call("setVerifyMask", json!({ "visible": false, "dark": is_dark }), 4).await;
                 }
                 continue;
             }
@@ -3156,10 +2903,6 @@ impl BridgeEngine {
         self.seed_session().await?;
 
         let status_obj = native_call("status", json!({}), 5).await.ok();
-        let status_terminated = status_obj
-            .as_ref()
-            .and_then(|s| s.get("processTerminated")?.as_bool())
-            .unwrap_or(false);
         let bridge_ua = status_obj
             .as_ref()
             .and_then(|s| s.get("bridgeUa")?.as_str())
@@ -3214,20 +2957,10 @@ impl BridgeEngine {
             }
         }
 
-        let current_href = if force_reload || status_terminated {
-            None
-        } else {
-            native_call("evaluate", json!({ "script": "location.href", "isolated": true }), 6)
-                .await
-                .ok()
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-        };
-        let needs_nav = match current_href.as_deref() {
-            None | Some("") | Some("about:blank") => true,
-            Some(u) => !u.starts_with("https://linux.do"),
-        };
-        if (force_reload || status_terminated || needs_nav) && !self.inner.lock().unwrap().verifying {
+        // A matching URL alone also matches a stalled navigation or HTTP error page.
+        if !self.inner.lock().unwrap().verifying {
             let _nav_guard = self.nav_lock.write().await;
+            if self.inner.lock().unwrap().verifying { return Ok(()); }
             {
                 let mut rt = self.inner.lock().unwrap();
                 rt.origin_ready = false;
@@ -3260,11 +2993,8 @@ impl BridgeEngine {
                         }} catch (_) {{}}
                     }}
                     const hasDiscourseDom = hasPreloaded || !!document.querySelector('header.d-header, #main-outlet, #d-splash');
-                    if (tok || hasDiscourseDom) {{
+                    if (tok || hasDiscourseDom || document.querySelector('meta[name="lindo-bridge-document"]')) {{
                         return {{ state: 'ready', csrf: tok, hasPreloaded, hasPreloadedUser }};
-                    }}
-                    if (document.readyState === 'complete' && location.pathname.indexOf('/about') === 0) {{
-                        return {{ state: 'ready', csrf: '', hasPreloaded: false, hasPreloadedUser: false }};
                     }}
                     return {{ state: 'waiting' }};
                 }})()"#,
@@ -3337,10 +3067,10 @@ impl BridgeEngine {
                 }
                 tokio::time::sleep(Duration::from_millis(90)).await;
             }
-        } else if !needs_nav {
-            let mut rt = self.inner.lock().unwrap();
-            rt.origin_ready = true;
-            rt.bootstrap_challenged = false;
+        }
+        let rt = self.inner.lock().unwrap();
+        if !rt.origin_ready && !rt.bootstrap_challenged && !rt.verifying {
+            return Err("站点连接尚未恢复，请稍后重试".to_string());
         }
         Ok(())
     }
@@ -3812,7 +3542,7 @@ impl BridgeEngine {
         let mut joined_active_verify = false;
 
         {
-            let mut rt = self.inner.lock().unwrap();
+            let rt = self.inner.lock().unwrap();
             if !in_verification {
                 if rt.verifying {
                     if is_background || is_timings_req {
@@ -3857,31 +3587,12 @@ impl BridgeEngine {
                     if now < until {
                         let remain_dur = until.saturating_duration_since(now);
                         let remain_ms = remain_dur.as_millis() as u64;
-                        let can_force_probe = !is_background
-                            && force_retry
-                            && rt
-                                .last_429_probe_at
-                                .map(|t| now.saturating_duration_since(t) >= Duration::from_millis(1800))
-                                .unwrap_or(true);
-                        if can_force_probe {
-                            rt.last_429_probe_at = Some(now);
-                        } else if !is_background && remain_ms <= 6500 {
+                        if !is_background && remain_ms <= 6500 {
                             // Short rate-limit window: hold quietly in normal Loading state & auto-dispatch once cooldown ends!
                             pending_cooldown_wait = Some(remain_dur);
                             cooldown_wait_ms = remain_ms;
                         } else {
-                            return Ok(SiteHttpResponse {
-                                status: 429,
-                                body: r#"{"errors":["请求较频繁，请稍后再试"],"localCooldown":true}"#
-                                    .to_string(),
-                                is_challenge: false,
-                                is_unauthenticated: false,
-                                rate_limited_ms: Some(remain_ms),
-                                diag: Some(SiteHttpDiag {
-                                    local_cooldown: true,
-                                    ..Default::default()
-                                }),
-                            });
+                            return Ok(SiteHttpResponse::cooldown(remain_ms));
                         }
                     }
                 }
@@ -3982,7 +3693,6 @@ impl BridgeEngine {
         let mut call_deadline = CallDeadline::for_request(idempotent, is_background, Instant::now());
         let mut auth_replayed = false;
         let mut force_no_store_replay = false;
-        let mut self_healed_once = false;
 
         // Execute fetch inside scoped `account_lock.read()` + `PriorityGate` (always released before verification!)
         let eval_res: Value = loop {
@@ -4024,6 +3734,9 @@ impl BridgeEngine {
                 if !pace_wait.is_zero() {
                     pace_wait_ms += pace_wait.as_millis() as u64;
                     tokio::time::sleep(pace_wait).await;
+                }
+                if let Some(response) = self.inner.lock().unwrap().rate_limit_response(Instant::now()) {
+                    return Ok(response);
                 }
                 self.ensure_ready(false).await?;
                 let (verifying_now, boot_challenged) = {
@@ -4212,7 +3925,7 @@ impl BridgeEngine {
                 let cf = val.get("challenge").and_then(|v| v.as_str()).unwrap_or("");
                 let ct = val.get("contentType").and_then(|v| v.as_str()).unwrap_or("");
                 let bd = val.get("body").and_then(|v| v.as_str()).unwrap_or("");
-                if Self::is_cf_challenge_response(st, cf, ct, bd) {
+                if Self::is_cf_challenge_response(st, cf, ct, bd) && (!is_write || cf.eq_ignore_ascii_case("challenge")) {
                     if is_write {
                         self.verify_coord.lock().unwrap().note_write_challenge();
                     }
@@ -4272,91 +3985,13 @@ impl BridgeEngine {
                             break val;
                         }
                     } else if let Some(passed_round) = verify_round {
-                        // Two-stage ineffective-clearance closed loop:
-                        // - 1st hit: run clean-room network self-heal once (100% preserving `_t` / `_forum_session`) and re-pull `/challenge`!
-                        // - 2nd consecutive hit: trip 60s circuit breaker cleanly.
-                        let decision = self
-                            .verify_coord
-                            .lock()
-                            .unwrap()
-                            .record_ineffective_clearance_step(passed_round, is_write, Instant::now());
-                        if !self_healed_once
-                            && matches!(decision, IneffectiveClearanceDecision::SelfHealAndReverify)
-                        {
-                            self_healed_once = true;
-                            drop(_fg_guard);
-                            drop(_permit);
-                            drop(_acct);
-                            call_deadline.pause(Instant::now());
-                            {
-                                let _heal_guard = self.self_heal_lock.lock().await;
-                                let already_healed = self
-                                    .inner
-                                    .lock()
-                                    .map(|rt| rt.last_self_healed_round >= passed_round)
-                                    .unwrap_or(false);
-                                if !already_healed {
-                                    self.inner.lock().unwrap().last_self_healed_round = passed_round;
-                                    self.perform_clean_network_and_verify_reset(
-                                        app,
-                                        "auto_ineffective_heal",
-                                        true,
-                                    )
-                                    .await;
-                                }
-                            }
-                            let is_dark = self.current_is_dark();
-                            let heal_outcome = self
-                                .coordinate_cf_verification_ext(
-                                    app,
-                                    VerifyPresentation::Blocking,
-                                    is_dark,
-                                    true,
-                                    bypass_user_dismiss,
-                                )
-                                .await;
-                            call_deadline.resume(Instant::now());
-                            if heal_outcome.round > 0 {
-                                verify_round = Some(heal_outcome.round);
-                            }
-                            if heal_outcome.passed {
-                                silent_cf_revalidated = true;
-                                force_no_store_replay = true;
-                                if self.session_generation.load(Ordering::Acquire) != session_gen {
-                                    return Err("账号会话已切换，请求已取消".to_string());
-                                }
-                                let _ = native_call(
-                                    "evaluate",
-                                    json!({ "script": "(() => { window.__lindoCsrfCooldownUntil = 0; window.__lindoCsrfPromise = null; return true; })()" }),
-                                    4,
-                                )
-                                .await;
-                                continue;
-                            } else {
-                                verify_cooldown_ms = heal_outcome.cooldown_remain_ms;
-                                ineffective_clearance = heal_outcome.ineffective_blocked;
-                                break val;
-                            }
-                        } else {
-                            let breaker_ms = match decision {
-                                IneffectiveClearanceDecision::TripBreaker { cooldown_ms } => cooldown_ms,
-                                IneffectiveClearanceDecision::SelfHealAndReverify => self
-                                    .verify_coord
-                                    .lock()
-                                    .unwrap()
-                                    .record_ineffective_clearance(passed_round, Instant::now()),
-                            };
-                            verify_cooldown_ms = breaker_ms;
-                            ineffective_clearance = true;
-                            self.emit_net_health_diag(
-                                app,
-                                "WARN",
-                                "ineffective_clearance_breaker",
-                                Some(&format!(
-                                    "round={passed_round} method={method_upper} url={url} status={st} breakerMs={breaker_ms}"
-                                )),
-                            );
+                        let mut coord = self.verify_coord.lock().unwrap();
+                        if is_write {
+                            coord.note_write_challenge();
                         }
+                        verify_cooldown_ms = coord.record_ineffective_clearance(passed_round, Instant::now());
+                        ineffective_clearance = true;
+                        break val;
                     }
                 }
             }
@@ -4601,7 +4236,6 @@ impl BridgeEngine {
             };
             let clear_banner = {
                 let mut rt = self.inner.lock().unwrap();
-                rt.rate_limit_until = None;
                 rt.challenge_429_streak = 0;
                 if !is_background {
                     rt.fg_challenge_until = None;
@@ -4652,7 +4286,7 @@ impl BridgeEngine {
             let reset_hdr = eval_res.get("rateLimitReset").and_then(|v| v.as_str());
             let now_epoch_secs = (now_epoch_ms() / 1000) as i64;
             let retry_after_secs =
-                parse_retry_after_secs(retry_after_hdr, reset_hdr, &body, now_epoch_secs);
+                parse_retry_after_secs(retry_after_hdr, reset_hdr, &body, now_epoch_secs).map(|secs| secs.min(604_800));
             let is_discourse_action_429 = method_upper != "GET" && !raw_body_is_html;
             // `/topics/timings` is a discardable background stat: never lock out main app browsing on timings 429!
             // Discourse JSON write-action 429s (e.g. reaction toggle / reply cooldown) are action-scoped:
@@ -4660,27 +4294,25 @@ impl BridgeEngine {
             if let Some(short_ms) = adaptive_429_cooldown_ms {
                 let now = Instant::now();
                 self.api_pacer.lock().unwrap().on_rate_limit(now);
-                let dur = Duration::from_millis(short_ms.max(retry_after_secs.unwrap_or(0) * 1000).min(8_000));
+                let dur = Duration::from_millis(short_ms.max(retry_after_secs.unwrap_or(0) * 1000));
                 {
                     let mut rt = self.inner.lock().unwrap();
-                    rt.rate_limit_until = Some(now + dur);
-                    rt.last_429_probe_at = Some(now);
+                    rt.extend_rate_limit(now, dur);
                 }
                 rate_limited_ms = Some(dur.as_millis() as u64);
             } else if is_discourse_action_429 {
                 let now = Instant::now();
                 self.api_pacer.lock().unwrap().on_rate_limit(now);
-                let secs = retry_after_secs.unwrap_or(5).clamp(2, 120);
+                let secs = retry_after_secs.unwrap_or(5).max(1);
                 rate_limited_ms = Some(secs * 1000);
             } else if !is_timings_req {
                 let now = Instant::now();
                 self.api_pacer.lock().unwrap().on_rate_limit(now);
-                let secs = retry_after_secs.unwrap_or(3).clamp(2, 45);
+                let secs = retry_after_secs.unwrap_or(3).max(1);
                 let dur = Duration::from_secs(secs);
                 {
                     let mut rt = self.inner.lock().unwrap();
-                    rt.rate_limit_until = Some(now + dur);
-                    rt.last_429_probe_at = Some(now);
+                    rt.extend_rate_limit(now, dur);
                 }
                 rate_limited_ms = Some(dur.as_millis() as u64);
             }
@@ -5075,7 +4707,7 @@ impl BridgeEngine {
                 }}, hardCapMs);
                 (async () => {{
                     try {{
-                        if (location.origin !== 'https://linux.do') return finish({{ originLost: true }});
+                        if (location.origin !== 'https://linux.do') return finish({{ beforeDispatch: true }});
                         const csrfCtrl = new AbortController();
                         activeCtrl = csrfCtrl;
                         const csrfTimer = setTimeout(() => {{ try {{ csrfCtrl.abort(); }} catch (_) {{}} }}, 10000);
@@ -5085,7 +4717,7 @@ impl BridgeEngine {
                         }} finally {{
                             clearTimeout(csrfTimer);
                         }}
-                        if (!csrfRes.ok) return finish({{ status: csrfRes.status, body: await csrfRes.text(), challenge: csrfRes.headers.get('cf-mitigated'), cfRay: csrfRes.headers.get('cf-ray'), contentType: csrfRes.headers.get('content-type') }});
+                        if (!csrfRes.ok) return finish({{ status: csrfRes.status, body: await csrfRes.text(), challenge: csrfRes.headers.get('cf-mitigated'), cfRay: csrfRes.headers.get('cf-ray'), contentType: csrfRes.headers.get('content-type'), retryAfter: csrfRes.headers.get('Retry-After') }});
                         const token = (await csrfRes.json()).csrf;
                         if (!token) return finish({{ status: 422, body: '{{"errors":["请先完成登录"]}}' }});
                         const bin = atob(c.data);
@@ -5112,7 +4744,7 @@ impl BridgeEngine {
                         }} finally {{
                             clearTimeout(upTimer);
                         }}
-                        return finish({{ status: r.status, body: bodyText, challenge: r.headers.get('cf-mitigated'), cfRay: r.headers.get('cf-ray'), contentType: r.headers.get('content-type') }});
+                        return finish({{ status: r.status, body: bodyText, challenge: r.headers.get('cf-mitigated'), cfRay: r.headers.get('cf-ray'), contentType: r.headers.get('content-type'), retryAfter: r.headers.get('Retry-After') }});
                     }} catch (err) {{
                         let originLostNow = false;
                         try {{ originLostNow = location.origin !== 'https://linux.do'; }} catch (_) {{ originLostNow = true; }}
@@ -5129,7 +4761,6 @@ impl BridgeEngine {
         let mut ineffective_clearance = false;
         let mut silent_cf_revalidated = false;
         let mut origin_reloaded_once = false;
-        let mut self_healed_once = false;
 
         let res: Value = loop {
             let _acct = self.account_lock.read().await;
@@ -5138,17 +4769,20 @@ impl BridgeEngine {
             }
             let _permit = self.priority_gate.acquire(RequestPriority::High).await;
             let _fg = FgRequestGuard::enter(&self.active_fg_requests);
+            if let Some(response) = self.inner.lock().unwrap().rate_limit_response(Instant::now()) {
+                return Ok(response);
+            }
             self.ensure_ready(false).await?;
 
             let eval_val = {
                 let _nav = self.nav_lock.read().await;
                 native_call("evaluate", json!({ "script": script }), 105).await?
             };
-            if eval_val.get("originLost").and_then(|v| v.as_bool()) == Some(true) {
+            if eval_val.get("beforeDispatch").and_then(|v| v.as_bool()) == Some(true) {
                 if !origin_reloaded_once {
                     origin_reloaded_once = true;
                     self.inner.lock().unwrap().origin_ready = false;
-                    let _ = self.ensure_ready(true).await;
+                    self.ensure_ready(true).await?;
                     continue;
                 }
                 return Err("内置网页上下文正在唤醒，请重试上传".to_string());
@@ -5162,7 +4796,7 @@ impl BridgeEngine {
             let ct = eval_val.get("contentType").and_then(|v| v.as_str()).unwrap_or("");
             let is_cf = Self::is_cf_challenge_response(st, cf, ct, bd);
 
-            if is_cf {
+            if is_cf && cf.eq_ignore_ascii_case("challenge") {
                 self.verify_coord.lock().unwrap().note_write_challenge();
                 let carried_cf = {
                     let raw = self.state.lock().unwrap().raw_cookies.clone();
@@ -5204,73 +4838,11 @@ impl BridgeEngine {
                     ineffective_clearance = outcome.ineffective_blocked;
                     break eval_val;
                 } else if let Some(passed_round) = verify_round {
-                    let decision = self
-                        .verify_coord
-                        .lock()
-                        .unwrap()
-                        .record_ineffective_clearance_step(passed_round, true, Instant::now());
-                    if !self_healed_once
-                        && matches!(decision, IneffectiveClearanceDecision::SelfHealAndReverify)
-                    {
-                        self_healed_once = true;
-                        drop(_fg);
-                        drop(_permit);
-                        drop(_acct);
-                        {
-                            let _heal_guard = self.self_heal_lock.lock().await;
-                            let already_healed = self
-                                .inner
-                                .lock()
-                                .map(|rt| rt.last_self_healed_round >= passed_round)
-                                .unwrap_or(false);
-                            if !already_healed {
-                                self.inner.lock().unwrap().last_self_healed_round = passed_round;
-                                self.perform_clean_network_and_verify_reset(
-                                    app,
-                                    "auto_ineffective_heal_upload",
-                                    true,
-                                )
-                                .await;
-                            }
-                        }
-                        let is_dark = self.current_is_dark();
-                        let heal_outcome = self
-                            .coordinate_cf_verification_ext(
-                                app,
-                                VerifyPresentation::Blocking,
-                                is_dark,
-                                true,
-                                true,
-                            )
-                            .await;
-                        if heal_outcome.round > 0 {
-                            verify_round = Some(heal_outcome.round);
-                        }
-                        if heal_outcome.passed {
-                            silent_cf_revalidated = true;
-                            continue;
-                        }
-                        verify_cooldown_ms = heal_outcome.cooldown_remain_ms;
-                        ineffective_clearance = heal_outcome.ineffective_blocked;
-                        break eval_val;
-                    } else {
-                        let actual_ms = match decision {
-                            IneffectiveClearanceDecision::TripBreaker { cooldown_ms } => cooldown_ms,
-                            IneffectiveClearanceDecision::SelfHealAndReverify => self
-                                .verify_coord
-                                .lock()
-                                .unwrap()
-                                .record_ineffective_clearance(passed_round, Instant::now()),
-                        };
-                        verify_cooldown_ms = actual_ms;
-                        ineffective_clearance = true;
-                        self.emit_net_health_diag(
-                            app,
-                            "WARN",
-                            "ineffective_clearance_breaker",
-                            Some(&format!("round={passed_round} method=POST url=/uploads.json breakerMs={actual_ms}")),
-                        );
-                    }
+                    let mut coord = self.verify_coord.lock().unwrap();
+                    coord.note_write_challenge();
+                    verify_cooldown_ms = coord.record_ineffective_clearance(passed_round, Instant::now());
+                    ineffective_clearance = true;
+                    break eval_val;
                 }
             }
             break eval_val;
@@ -5294,13 +4866,18 @@ impl BridgeEngine {
                 .unwrap()
                 .note_healthy_response(true, has_bg_writes);
         }
+        let rate_limited_ms = if status == 429 && !is_challenge {
+            let seconds = parse_retry_after_secs(res.get("retryAfter").and_then(|v| v.as_str()), None, &body,
+                (now_epoch_ms() / 1000) as i64).unwrap_or(5).clamp(1, 604_800);
+            Some(seconds * 1000)
+        } else { None };
         let body_bytes = body.len();
         Ok(SiteHttpResponse {
             status,
             body,
             is_challenge,
             is_unauthenticated,
-            rate_limited_ms: None,
+            rate_limited_ms,
             diag: Some(SiteHttpDiag {
                 cf_ray: res.get("cfRay").and_then(|v| v.as_str()).map(|s| s.to_string()),
                 cf_mitigated: if cf_hdr.is_empty() {
@@ -5690,7 +5267,6 @@ impl BridgeEngine {
             rt.verifying = true;
             rt.origin_ready = false;
             rt.bootstrap_challenged = false;
-            rt.rate_limit_until = None;
             rt.fg_challenge_until = None;
             rt.bg_challenge_until = None;
         }
@@ -5707,10 +5283,6 @@ impl BridgeEngine {
         {
             let mut rt = self.inner.lock().unwrap();
             rt.verifying = false;
-            if matches!(result, Ok(true)) {
-                rt.origin_ready = true;
-                rt.bootstrap_challenged = false;
-            }
         }
         result
     }
@@ -5850,14 +5422,9 @@ impl BridgeEngine {
 
         let mut requested_login = login || is_otp_flow;
         let mut otp_submitted = false;
-        let mut oops_reloaded = false;
-        let mut cf_err_reloads = 0u32;
-        let mut nav_err_reloads = 0u32;
         let mut challenge_ticks = 0u32;
         let mut quiet_rounds = 0u32;
         let mut last_reload_epoch: Option<u64> = None;
-        let mut pass_mask_stuck_ticks = 0u32;
-        let mut stuck_reloaded = false;
         let mut terminated_reloaded = false;
         let mut last_current_session_poll: Option<Instant> = None;
         let loop_started = Instant::now();
@@ -5912,8 +5479,6 @@ impl BridgeEngine {
                     last_reload_epoch = Some(native_reload_epoch);
                     challenge_ticks = 0;
                     quiet_rounds = 0;
-                    pass_mask_stuck_ticks = 0;
-                    stuck_reloaded = false;
                     emit_diag(
                         app,
                         "INFO",
@@ -5925,14 +5490,13 @@ impl BridgeEngine {
                 }
                 _ => {}
             }
-            if user_cancelled && (native_user_reloading || native_terminated) {
+            if user_cancelled {
                 return Ok(false);
             }
             if !login && !requested_login && native_terminated && !terminated_reloaded {
                 terminated_reloaded = true;
                 challenge_ticks = 0;
                 quiet_rounds = 0;
-                pass_mask_stuck_ticks = 0;
                 emit_diag(
                     app,
                     "WARN",
@@ -5954,7 +5518,6 @@ impl BridgeEngine {
             if !login && !requested_login && native_user_reloading {
                 challenge_ticks = 0;
                 quiet_rounds = 0;
-                pass_mask_stuck_ticks = 0;
                 if !panel_shown && loop_started.elapsed() >= Duration::from_millis(1200) {
                     panel_shown = true;
                     let _ = native_call("show", json!({ "dark": is_dark, "login": false }), 8).await;
@@ -5962,37 +5525,9 @@ impl BridgeEngine {
                 continue;
             }
 
-            if crate::platform_bridge::CAPS.linux_webkit_quirks
-                && !native_nav_error.is_empty()
-                && !user_cancelled
-            {
-                if nav_err_reloads < 2 {
-                    nav_err_reloads += 1;
-                    challenge_ticks = 0;
-                    quiet_rounds = 0;
-                    crate::ech_desktop::notify_network_route_changed();
-                    crate::ech_desktop::rotate_sticky_ip();
-                    emit_diag(
-                        app,
-                        "WARN",
-                        "AUTH",
-                        "VerifyNetRecover",
-                        "安全确认或登录页面连接中断，正在自动切换通道并重试",
-                        Some(&format!("attempt={nav_err_reloads} err={native_nav_error}")),
-                    );
-                    tokio::time::sleep(Duration::from_millis(450)).await;
-                    let reload_url = if requested_login {
-                        "https://linux.do/login"
-                    } else {
-                        "https://linux.do/challenge"
-                    };
-                    let _ = native_call("navigate", json!({ "url": reload_url }), 8).await;
-                    continue;
-                }
-                break;
+            if !native_nav_error.is_empty() && !native_loading {
+                return Err("页面连接中断，请检查网络后重试".to_string());
             }
-
-            // Passive read-only DOM observation in isolated `defaultClientWorld` (macOS) / zero-global sync eval (Windows):
             // NEVER include `script[src*="challenge-platform"]` (present passively on normal & 404 Discourse pages!),
             // and ALWAYS evaluate `isOrigin404` BEFORE `explicitChallenge` so `/challenge` -> 404 closes reliably!
             let probe = native_call(
@@ -6133,69 +5668,19 @@ impl BridgeEngine {
                 })
                 .unwrap_or(false);
 
-            if is_cf_error_page {
-                if cf_err_reloads < 2 {
-                    cf_err_reloads += 1;
-                    crate::ech_desktop::rotate_sticky_ip();
-                    let _ = self.purge_cf_clearance_for_reverify().await;
-                    let reload_url = if requested_login {
-                        "https://linux.do/login"
-                    } else {
-                        "https://linux.do/challenge"
-                    };
-                    let _ = native_call("navigate", json!({ "url": reload_url }), 8).await;
+            if is_cf_error_page || is_discourse_oops {
+                if panel_shown {
+                    if mask_visible {
+                        mask_visible = false;
+                        let _ = native_call("setVerifyMask", json!({ "visible": false, "dark": is_dark }), 4).await;
+                    }
                     continue;
                 }
                 break;
             }
 
-            if is_discourse_oops {
-                let _ = self.sync_cookies_from_webkit_verified(false, true).await;
-                if !oops_reloaded {
-                    oops_reloaded = true;
-                    let clean_url = if requested_login {
-                        "https://linux.do/login"
-                    } else {
-                        "https://linux.do/challenge"
-                    };
-                    let _ = native_call("navigate", json!({ "url": clean_url }), 8).await;
-                    continue;
-                }
-                if !login && !requested_login {
-                    {
-                        let mut rt = self.inner.lock().unwrap();
-                        rt.last_challenge_url = None;
-                        rt.fg_challenge_until = None;
-                        rt.bg_challenge_until = None;
-                        rt.bootstrap_challenged = false;
-                        rt.cf_attention_notified = false;
-                    }
-                    let _ = native_call("hide", json!({}), 5).await;
-                    {
-                        let _nav = self.nav_lock.write().await;
-                        self.restore_about_origin_context().await;
-                    }
-                    let _ = app.emit("lindo://cf-attention-needed", false);
-                    let _ = app.emit("lindo://verified", ());
-                    return Ok(true);
-                }
-                if user_cancelled {
-                    return Ok(false);
-                }
-                continue;
-            }
-
-            if user_cancelled {
-                if !login && !requested_login && (ready || is_origin_404) && !in_challenge {
-                    // User closed the panel right as verification completed: treat as verified!
-                } else {
-                    return Ok(false);
-                }
-            }
-
             if in_challenge {
                 quiet_rounds = 0;
-                pass_mask_stuck_ticks = 0;
                 challenge_ticks += 1;
 
                 if !login
@@ -6220,13 +5705,12 @@ impl BridgeEngine {
                         rt.fg_challenge_until = None;
                         rt.bg_challenge_until = None;
                         rt.bootstrap_challenged = false;
-                        rt.rate_limit_until = None;
                         rt.challenge_429_streak = 0;
                         rt.cf_attention_notified = false;
                     }
                     {
                         let _nav = self.nav_lock.write().await;
-                        self.restore_about_origin_context().await;
+                        if !self.restore_about_origin_context().await { return Ok(false); }
                     }
                     let pass_detail = format!(
                         "elapsedMs={}, outcome=XhrConfirmedFreshCf",
@@ -6301,7 +5785,6 @@ impl BridgeEngine {
                 };
 
                 if has_fresh_cf || is_origin_404 || ready {
-                    pass_mask_stuck_ticks = 0;
                     quiet_rounds += 1;
                 } else {
                     quiet_rounds = 0;
@@ -6310,59 +5793,8 @@ impl BridgeEngine {
                         let _ = native_call("show", json!({ "dark": is_dark, "login": false }), 8).await;
                     }
                     if mask_visible && native_mask_message == "已通过，正在继续…" {
-                        pass_mask_stuck_ticks += 1;
-                        if pass_mask_stuck_ticks >= 18 {
-                            let detail = format!(
-                                "elapsedMs={}, hasFreshCf={}, origin404={}, ready={}, navError={}",
-                                loop_started.elapsed().as_millis(),
-                                has_fresh_cf,
-                                is_origin_404,
-                                ready,
-                                if native_nav_error.is_empty() {
-                                    "none"
-                                } else {
-                                    native_nav_error
-                                }
-                            );
-                            emit_diag(
-                                app,
-                                "WARN",
-                                "AUTH",
-                                "VerifyWatchdog",
-                                "安全确认停留在过渡状态超过 4 秒，触发自动恢复",
-                                Some(&detail),
-                            );
-                            pass_mask_stuck_ticks = 0;
-                            if !stuck_reloaded {
-                                stuck_reloaded = true;
-                                let _ = native_call(
-                                    "setVerifyMask",
-                                    json!({
-                                        "visible": true,
-                                        "dark": is_dark,
-                                        "message": "正在重新加载验证…"
-                                    }),
-                                    4,
-                                )
-                                .await;
-                                let _ = native_call(
-                                    "navigate",
-                                    json!({ "url": "https://linux.do/challenge" }),
-                                    8,
-                                )
-                                .await;
-                            } else {
-                                mask_visible = false;
-                                let _ = native_call(
-                                    "setVerifyMask",
-                                    json!({ "visible": false, "dark": is_dark }),
-                                    4,
-                                )
-                                .await;
-                            }
-                        }
-                    } else {
-                        pass_mask_stuck_ticks = 0;
+                        mask_visible = false;
+                        let _ = native_call("setVerifyMask", json!({ "visible": false, "dark": is_dark }), 4).await;
                     }
                     continue;
                 }
@@ -6489,14 +5921,13 @@ impl BridgeEngine {
                     rt.fg_challenge_until = None;
                     rt.bg_challenge_until = None;
                     rt.bootstrap_challenged = false;
-                    rt.rate_limit_until = None;
                     rt.challenge_429_streak = 0;
                     rt.cf_attention_notified = false;
                 }
                 // Restore clean origin context (in-place <5ms when `/challenge` 404 is already on `https://linux.do`)
                 {
                     let _nav = self.nav_lock.write().await;
-                    self.restore_about_origin_context().await;
+                    if !self.restore_about_origin_context().await { return Ok(false); }
                 }
                 let pass_detail = format!(
                     "elapsedMs={}, hasFreshCf={}, origin404={}, ready={}",
@@ -6620,7 +6051,7 @@ impl BridgeEngine {
                 continue;
             }
 
-            if !login && !requested_login && resp.status != 429 && !resp.body.trim().starts_with('<') {
+            if !login && !requested_login && (200..300).contains(&resp.status) && serde_json::from_str::<Value>(&resp.body).is_ok() {
                 let _ = self.sync_cookies_from_webkit_verified(false, true).await;
                 {
                     let mut rt = self.inner.lock().unwrap();
@@ -6724,7 +6155,6 @@ impl BridgeEngine {
             rt.fg_challenge_until = None;
             rt.bg_challenge_until = None;
             rt.bootstrap_challenged = false;
-            rt.rate_limit_until = None;
         }
         {
             let mut st = self.state.lock().unwrap();
@@ -8299,7 +7729,6 @@ impl BridgeEngine {
         {
             let mut rt = self.inner.lock().unwrap();
             rt.verifying = false;
-            rt.origin_ready = true;
         }
         Ok(extracted_html)
     }
@@ -8331,6 +7760,24 @@ pub(crate) fn resolve_proactive_cf_presentation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forum_forms_encode_repeated_values_and_keep_named_fields() {
+        let fields = HashMap::from([
+            ("tags[10]".to_string(), "later".to_string()),
+            ("tags[2]".to_string(), "earlier".to_string()),
+            ("options[0]".to_string(), "first".to_string()),
+            ("timings[42]".to_string(), "1000".to_string()),
+            ("post[raw]".to_string(), "body".to_string()),
+        ]);
+        assert_eq!(discourse_form_entries(&fields), [
+            ("options[]".into(), "first"),
+            ("post[raw]".into(), "body"),
+            ("tags[]".into(), "earlier"),
+            ("tags[]".into(), "later"),
+            ("timings[42]".into(), "1000"),
+        ]);
+    }
 
     #[test]
     fn cf_authority_cold_seed_respects_browser_presence_and_ttl() {
@@ -8375,6 +7822,23 @@ mod tests {
             BridgeEngine::challenge_url_to_probe_get_url("https://linux.do/posts.json"),
             "https://linux.do/latest.json?no_definitions=true"
         );
+    }
+
+    #[test]
+    fn later_rate_limit_survives_shorter_response_and_verification() {
+        let eng = BridgeEngine::new(PersistedState::default());
+        let t = Instant::now();
+        eng.inner.lock().unwrap().extend_rate_limit(t, Duration::from_secs(75));
+        {
+            let _guard = VerifyingFlagGuard::enter(&eng.inner);
+            eng.inner.lock().unwrap().extend_rate_limit(t + Duration::from_secs(1), Duration::from_secs(3));
+        }
+        let rt = eng.inner.lock().unwrap();
+        let response = rt.rate_limit_response(t + Duration::from_secs(5)).unwrap();
+        assert_eq!(response.status, 429);
+        assert_eq!(response.rate_limited_ms, Some(70_000));
+        assert!(!response.is_challenge);
+        assert!(rt.rate_limit_response(t + Duration::from_secs(75)).is_none());
     }
 
     #[test]

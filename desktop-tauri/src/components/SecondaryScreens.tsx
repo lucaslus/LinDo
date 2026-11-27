@@ -1670,12 +1670,17 @@ export const MessagesView: React.FC<{
     }
   }, [initialComposeRecipient, onConsumeInitialRecipient]);
 
+  const messageListRequest = useRef(0);
   const loadNotifications = async (forceRefresh = false) => {
     if (!isAuthorized) return;
+    const generation = ++messageListRequest.current;
+    setLoadingMorePms(false);
+    setLoadingMoreNotifs(false);
     setLoading(true);
     setLoadError(null);
     try {
       const list = await fetchNotifications(0, forceRefresh);
+      if (generation !== messageListRequest.current) return;
       setItems(list);
       setHasMoreNotifs(list.length >= 55);
       const pageUnread = list.filter((x) => !x.read).length;
@@ -1683,54 +1688,65 @@ export const MessagesView: React.FC<{
         onSyncUnreadCount?.(resolveAuthoritativeUnreadCount(list, pageUnread, 60));
       }
     } catch (err: any) {
+      if (generation !== messageListRequest.current) return;
       setLoadError(err?.message || "通知加载失败，请重试");
     } finally {
-      setLoading(false);
+      if (generation === messageListRequest.current) setLoading(false);
     }
   };
 
   const loadMoreNotifications = async () => {
     if (!isAuthorized || loadingMoreNotifs || !hasMoreNotifs) return;
+    const generation = messageListRequest.current;
     setLoadingMoreNotifs(true);
     setNotifsLoadMoreErr(null);
     try {
       const more = await fetchNotifications(items.length);
+      if (generation !== messageListRequest.current) return;
       setItems((prev) => {
         const seen = new Set(prev.map((x) => x.id));
         return [...prev, ...more.filter((x) => !seen.has(x.id))];
       });
       setHasMoreNotifs(more.length >= 55);
     } catch (err: any) {
+      if (generation !== messageListRequest.current) return;
       setNotifsLoadMoreErr(err?.message || "加载更早通知失败，请重试");
     } finally {
-      setLoadingMoreNotifs(false);
+      if (generation === messageListRequest.current) setLoadingMoreNotifs(false);
     }
   };
 
   const loadPms = async (box: "inbox" | "sent" | "archive" = pmBox) => {
     if (!isAuthorized || !currentUser?.username) return;
+    const generation = ++messageListRequest.current;
+    setLoadingMorePms(false);
+    setLoadingMoreNotifs(false);
     setLoading(true);
     setLoadError(null);
     setPmLoadMoreErr(null);
     try {
       const list = await fetchPrivateMessages(currentUser.username, box, 0);
+      if (generation !== messageListRequest.current) return;
       setPmList(list);
       setPmPage(0);
       setPmHasMore(list.length >= 25);
     } catch (err: any) {
+      if (generation !== messageListRequest.current) return;
       setLoadError(err?.message || "私信加载失败，请重试");
     } finally {
-      setLoading(false);
+      if (generation === messageListRequest.current) setLoading(false);
     }
   };
 
   const loadMorePms = async () => {
     if (!isAuthorized || !currentUser?.username || loadingMorePms || !pmHasMore) return;
     const nextPage = pmPage + 1;
+    const generation = messageListRequest.current;
     setLoadingMorePms(true);
     setPmLoadMoreErr(null);
     try {
       const more = await fetchPrivateMessages(currentUser.username, pmBox, nextPage);
+      if (generation !== messageListRequest.current) return;
       setPmList((prev) => {
         const seen = new Set(prev.map((x) => x.id));
         return [...prev, ...more.filter((x) => !seen.has(x.id))];
@@ -1738,9 +1754,10 @@ export const MessagesView: React.FC<{
       setPmPage(nextPage);
       setPmHasMore(more.length >= 25);
     } catch (err: any) {
+      if (generation !== messageListRequest.current) return;
       setPmLoadMoreErr(err?.message || "加载更多私信失败，请重试");
     } finally {
-      setLoadingMorePms(false);
+      if (generation === messageListRequest.current) setLoadingMorePms(false);
     }
   };
 
@@ -1927,9 +1944,14 @@ export const MessagesView: React.FC<{
                 <button
                   type="button"
                   onClick={async () => {
-                    await markAllNotificationsRead().catch(() => {});
-                    setItems((prev) => prev.map((x) => ({ ...x, read: true })));
-                    onUnreadCleared();
+                    try {
+                      await markAllNotificationsRead();
+                      setItems((prev) => prev.map((x) => ({ ...x, read: true })));
+                      onUnreadCleared();
+                    } catch (err) {
+                      setPmActionNotice(err instanceof Error ? err.message : "未能将通知标为已读");
+                      if (err instanceof SiteError && err.isVerification) onTriggerVerify?.();
+                    }
                   }}
                   title="全部标为已读"
                   className="lindo-interactive flex items-center gap-1 rounded-lg px-2 py-1 text-[12px] font-medium"
@@ -2570,6 +2592,7 @@ export const MessagesView: React.FC<{
                       setPmBody("");
                       setSubTab("PM");
                       if (tid > 0) onOpenNotificationTopic(tid, pmTitle, 1);
+                      else setPmActionNotice("私信已提交审核");
                     } catch (err: any) {
                       if (err instanceof SiteError && err.isVerification && onTriggerVerify) {
                         onTriggerVerify();
@@ -5387,11 +5410,10 @@ export const ProfileSettingsView: React.FC<{
                 })()
               ) : subSheet === "drafts" ? (
                 (() => {
-                  const normalizeDraftMatchKey = (k: string, topicId?: number | null): string => {
-                    if (k === "new_topic") return "new_topic";
-                    if (topicId && topicId > 0) return `topic_${topicId}`;
-                    if (k.startsWith("reply_")) return `topic_${k.slice(6)}`;
-                    return k;
+                  const matchKey = (draft: LocalDraftRecord | CloudDraftItem, key: string) => {
+                    if (draft.action === "REPLY" && draft.topicId) return `reply_${draft.topicId}_${draft.replyToPostNumber ?? 0}`;
+                    if (draft.action === "EDIT" && draft.postId) return `edit_${draft.postId}`;
+                    return key;
                   };
 
                   type MergedDraftRow = {
@@ -5401,11 +5423,11 @@ export const ProfileSettingsView: React.FC<{
                   };
                   const mergedMap = new Map<string, MergedDraftRow>();
                   for (const ld of localDraftList) {
-                    const ck = normalizeDraftMatchKey(ld.key, ld.topicId);
+                    const ck = matchKey(ld, ld.key);
                     mergedMap.set(ck, { canonicalKey: ck, local: ld });
                   }
                   for (const cd of cloudDrafts) {
-                    const ck = normalizeDraftMatchKey(cd.draftKey, cd.topicId);
+                    const ck = matchKey(cd, cd.draftKey);
                     const prev = mergedMap.get(ck);
                     if (prev) {
                       prev.cloud = cd;
@@ -5477,7 +5499,7 @@ export const ProfileSettingsView: React.FC<{
                                   initialTitle: src?.title ?? csrc?.title ?? "",
                                   initialRaw: src?.raw ?? csrc?.raw ?? "",
                                   initialTags: src?.tags ?? csrc?.tags ?? [],
-                                  draftKeyOverride: src?.key,
+                                  draftKeyOverride: src?.key ?? (action === "EDIT" ? csrc?.draftKey : undefined),
                                 });
                               }}
                               className="min-w-0 flex-1 text-left cursor-pointer"

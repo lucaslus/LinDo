@@ -34,12 +34,14 @@ import {
   ProfileSettingsView,
   formatSiteVerifyStatusLabel,
 } from "../components/SecondaryScreens";
-import { triggerInteractiveVerifyOnce } from "../lib/api";
+import { fetchTopicAiSummary, siteRequest, triggerInteractiveVerifyOnce } from "../lib/api";
 import { prepareCookedHtml } from "../lib/cooked";
 import {
   clearForumMediaBlobCache,
   fetchForumMediaBlobUrl,
+  markCookedImageLoaded,
   observeCookedForumImages,
+  rememberImageNaturalDimensions,
 } from "../lib/forumMedia";
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -98,6 +100,27 @@ describe("SideRail shield indicator, Settings manual verify, and zero-CLS image 
   afterEach(() => {
     unmountActive();
     vi.restoreAllMocks();
+  });
+
+  it.each([
+    { status: 429, isChallenge: true },
+    { status: 429, isChallenge: false },
+    { status: 503, isChallenge: false },
+  ])("stops summary requests on $status (challenge=$isChallenge)", async ({ status, isChallenge }) => {
+    invokeMock.mockResolvedValue({ status, isChallenge, body: "{}", rateLimitedMs: 5000 });
+    await expect(fetchTopicAiSummary(123)).rejects.toMatchObject({ status, isVerification: isChallenge });
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === "site_request")).toHaveLength(1);
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === "site_verify")).toBe(false);
+  });
+
+  it("releases a shared GET after an IPC failure so the user can retry", async () => {
+    const url = "https://linux.do/latest.json";
+    invokeMock.mockRejectedValueOnce(new Error("offline"));
+    const results = await Promise.allSettled([siteRequest(url), siteRequest(url)]);
+    expect(results.map((r) => r.status)).toEqual(["rejected", "rejected"]);
+    invokeMock.mockResolvedValue({ status: 200, body: "{}", isChallenge: false });
+    await expect(siteRequest(url)).resolves.toMatchObject({ status: 200 });
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === "site_request")).toHaveLength(2);
   });
 
   it("renders SideRail shield indicator directly below Sun/Moon toggle ONLY when cfAttentionNeeded or verifyActive", () => {
@@ -489,5 +512,56 @@ describe("SideRail shield indicator, Settings manual verify, and zero-CLS image 
     );
     const verifyRow = findButtonByText(rendered, "站点安全验证");
     expect(verifyRow?.textContent).toContain("刚刚已验证");
+  });
+
+  it("locks .lindo-img-sized across Retina/scaled loads, extracts optimized URL & cached dims, skips onebox thumbnails, and releases mismatched HTML ratios", () => {
+    // 1. Pre-seed session dimension cache for an external image with no HTML width/height
+    rememberImageNaturalDimensions("https://img.example.com/previously-seen.webp", 720, 405);
+
+    const html = prepareCookedHtml(`
+      <p><img class="retina-scaled" src="https://cdn.example.com/shot.png" width="345" height="258" /></p>
+      <p><img class="bad-meta" src="https://cdn.example.com/wrong.png" width="400" height="400" /></p>
+      <p><img class="opt-url" src="https://cdn.example.com/optimized/4X/a/b/c/abc_2_690x388.jpeg" /></p>
+      <p><img class="cached-ext" src="https://img.example.com/previously-seen.webp" /></p>
+      <aside class="onebox"><div class="onebox-body"><img class="thumbnail" src="https://cdn.example.com/thumb.png" /></div></aside>
+    `);
+    const wrap = document.createElement("div");
+    wrap.innerHTML = html;
+
+    // 2. Retina/50%-scaled image keeps .lindo-img-sized after load when real aspect ratio matches (690/517 ~= 345/258)
+    const retinaImg = wrap.querySelector<HTMLImageElement>("img.retina-scaled")!;
+    expect(retinaImg.classList.contains("lindo-img-sized")).toBe(true);
+    expect(retinaImg.getAttribute("style")).toContain("--lindo-img-w:345px");
+    Object.defineProperty(retinaImg, "naturalWidth", { value: 690, configurable: true });
+    Object.defineProperty(retinaImg, "naturalHeight", { value: 516, configurable: true });
+    markCookedImageLoaded(retinaImg);
+    expect(retinaImg.classList.contains("lindo-img-loading")).toBe(false);
+    expect(retinaImg.classList.contains("lindo-img-sized")).toBe(true);
+
+    // 3. Corrupted HTML metadata (declared 400x400, real 800x200) releases .lindo-img-sized on load so image never distorts
+    const badMeta = wrap.querySelector<HTMLImageElement>("img.bad-meta")!;
+    expect(badMeta.classList.contains("lindo-img-sized")).toBe(true);
+    Object.defineProperty(badMeta, "naturalWidth", { value: 800, configurable: true });
+    Object.defineProperty(badMeta, "naturalHeight", { value: 200, configurable: true });
+    markCookedImageLoaded(badMeta);
+    expect(badMeta.classList.contains("lindo-img-sized")).toBe(false);
+
+    // 4. Discourse optimized URL `_2_690x388.jpeg` resolves exact dimensions without fallback
+    const optImg = wrap.querySelector<HTMLImageElement>("img.opt-url")!;
+    expect(optImg.classList.contains("lindo-img-loading-fallback")).toBe(false);
+    expect(optImg.classList.contains("lindo-img-sized")).toBe(true);
+    expect(optImg.getAttribute("style")).toContain("--lindo-img-w:690px");
+    expect(optImg.getAttribute("style")).toContain("aspect-ratio:690 / 388");
+
+    // 5. Previously loaded external image without HTML dims hits session dim cache cleanly
+    const cachedExt = wrap.querySelector<HTMLImageElement>("img.cached-ext")!;
+    expect(cachedExt.classList.contains("lindo-img-loading-fallback")).toBe(false);
+    expect(cachedExt.getAttribute("style")).toContain("--lindo-img-w:720px");
+    expect(cachedExt.getAttribute("style")).toContain("aspect-ratio:720 / 405");
+
+    // 6. Onebox thumbnail is excluded from giant 480x300 content skeleton fallback
+    const thumb = wrap.querySelector<HTMLImageElement>("img.thumbnail")!;
+    expect(thumb.classList.contains("lindo-img-loading")).toBe(false);
+    expect(thumb.classList.contains("lindo-img-loading-fallback")).toBe(false);
   });
 });

@@ -386,6 +386,8 @@ export interface PostItemModel {
   boosts: PostBoostItem[];
   linkCounts?: PostLinkCountItem[];
   canBoost?: boolean;
+  hasBoostsField?: boolean;
+  hasCanBoostField?: boolean;
   polls: PostPollModel[];
   bookmarked: boolean;
   bookmarkId?: number | null;

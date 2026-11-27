@@ -27,6 +27,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -37,12 +38,13 @@ import kotlinx.serialization.json.putJsonObject
  * End-to-end UI regression tests for:
  * 1. Unified guest login flow (`GuestLoginGuideSheet` across Home / TopicReader / Messages / Profile / Expired session / Account Management with 0 saved accounts).
  * 2. Mobile <-> Desktop QR login parity (logged-in QR generation from Profile & Account Management, mode switching between Generate and Scan/Token, guest direct redeem mode).
- * 3. Android foldable wide-screen feed collapse (reader header toggle + repositioned edge ear clear of bottom reply bar + back navigation restore).
+ * 3. Android foldable wide-screen feed collapse (reader header toggle and back navigation restore).
  */
 @OptIn(ExperimentalTestApi::class)
 class LoginQrAndFoldableSplitRegressionTest {
 
     private val openedWebUrls = CopyOnWriteArrayList<String>()
+    private var fixtureLength = 1
 
     @BeforeTest
     fun setUp() {
@@ -77,6 +79,8 @@ class LoginQrAndFoldableSplitRegressionTest {
         PlatformSessionRecovery.verifySession = null
         PlatformSessionRecovery.verificationMessage = null
         PlatformSessionRecovery.verifying = false
+        PlatformSessionRecovery.verifyPillVisible = false
+        PlatformSessionRecovery.onExpandVerifyPill = null
         PlatformSessionRecovery.cancelVerification = null
         UserApiKeyAuthManager.webViewHttpExecutor = null
         UserApiKeyAuthManager.webViewJsonFetcher = null
@@ -157,6 +161,7 @@ class LoginQrAndFoldableSplitRegressionTest {
     @Test
     fun allGenericGuestLoginEntriesOpenGuideSheetWhileQrShortcutOpensScanDirectly() =
         runDesktopComposeUiTest(width = 390, height = 840) {
+            isAndroidRuntimeOverrideForTest = true
             setContent { LinDoApp(systemAnimationsEnabled = false) }
             waitForText("使用 Linuxdo 登录")
             edt { onNodeWithText("先逛逛").performClick() }
@@ -166,10 +171,13 @@ class LoginQrAndFoldableSplitRegressionTest {
             edt { onNodeWithText("登录").performClick() }
             assertGuideSheetWithThreeOptionsAndDismiss()
 
-            // 2. TopicReader bottom reply bar
+            // 2. Floating topic reply button
             edt { onNodeWithText("折叠屏沉浸阅读测试主帖").performClick() }
-            waitForText("登录后参与回复")
-            edt { onNodeWithText("登录后参与回复").performClick() }
+            waitForContentDescription("登录后参与回复")
+            edt {
+                onAllNodesWithText("登录后参与回复").assertCountEquals(0)
+                onNodeWithContentDescription("登录后参与回复").performClick()
+            }
             assertGuideSheetWithThreeOptionsAndDismiss()
             edt { onNodeWithContentDescription("返回").performClick() }
             waitForText("消息")
@@ -270,42 +278,114 @@ class LoginQrAndFoldableSplitRegressionTest {
         }
 
     @Test
-    fun androidFoldableWideSplitProvidesHeaderAndNonOverlappingEdgeCollapseControls() =
+    fun androidFoldableUsesOneHeaderToggleAndBackRestoresList() =
         runDesktopComposeUiTest(width = 760, height = 840) {
             isAndroidRuntimeOverrideForTest = true
             setContent { LinDoApp(systemAnimationsEnabled = false) }
-            waitForText("使用 Linuxdo 登录")
+            waitForText("先逛逛")
             edt { onNodeWithText("先逛逛").performClick() }
-
-            waitForText("折叠屏沉浸阅读测试主帖")
-            waitForText("登录后参与回复")
-            waitForContentDescription("收起话题列表")
-            waitForContentDescription("收起侧边话题列表")
-
-            // Verify edge handle sits cleanly above the bottom reply bar (no overlap!)
-            val earBounds = edt { onNodeWithContentDescription("收起侧边话题列表").fetchSemanticsNode().boundsInRoot }
-            val replyBounds = edt { onNodeWithText("登录后参与回复").fetchSemanticsNode().boundsInRoot }
-            assertTrue(
-                earBounds.bottom < replyBounds.top - 8f,
-                "Edge collapse ear (bottom=${earBounds.bottom}) must stay cleanly above bottom reply bar (top=${replyBounds.top})"
-            )
-
-            // 1. Collapse via reader header button
-            edt { onNodeWithContentDescription("收起话题列表").performClick() }
+            waitForContentDescription("登录后参与回复")
+            edt {
+                onAllNodesWithContentDescription("收起侧边话题列表").assertCountEquals(0)
+                onNodeWithContentDescription("收起话题列表").performClick()
+            }
             waitForContentDescription("展开话题列表")
-            waitForContentDescription("展开侧边话题列表")
-            edt { onNodeWithText("列表").assertIsDisplayed() }
-
-            // 2. Expand back via reader header button
             edt { onNodeWithContentDescription("展开话题列表").performClick() }
             waitForContentDescription("收起话题列表")
-            waitForContentDescription("收起侧边话题列表")
-
-            // 3. Collapse via edge ear and restore via Android back navigation
-            edt { onNodeWithContentDescription("收起侧边话题列表").performClick() }
+            edt { onNodeWithContentDescription("收起话题列表").performClick() }
             waitForContentDescription("展开话题列表")
-            assertTrue(edt { BackNavigationBridge.dispatchBack() }, "Back navigation must expand collapsed feed pane")
+            assertTrue(edt { BackNavigationBridge.dispatchBack() })
             waitForContentDescription("收起话题列表")
+        }
+
+    @Test
+    fun androidReaderPencilOpensReplyComposerAndFloorCounterOpensNavigator() =
+        runDesktopComposeUiTest(width = 390, height = 840) {
+            isAndroidRuntimeOverrideForTest = true
+            UserApiKeyAuthManager.onSessionAuthenticated(
+                AuthenticatedUserProfile(userId = 42, username = "lucas", displayName = "Lucas", trustLevel = 3),
+                rawCookies = "_t=valid_session_cookie"
+            )
+            setContent { LinDoApp(systemAnimationsEnabled = false) }
+            waitForText("折叠屏沉浸阅读测试主帖")
+            edt { onNodeWithText("折叠屏沉浸阅读测试主帖").performClick() }
+            waitForContentDescription("回复话题")
+            edt {
+                onAllNodesWithText("回复话题").assertCountEquals(0)
+                onAllNodesWithTag("main_navigation_bar").assertCountEquals(0)
+                onNodeWithText(" / 2 楼", substring = true).performClick()
+            }
+            waitForContentDescription("关闭楼层导航")
+            edt {
+                onNodeWithContentDescription("关闭楼层导航").performClick()
+                onNodeWithContentDescription("回复话题").performClick()
+            }
+            waitForText("发送")
+        }
+
+    @Test
+    fun phoneCanTapLastFeedTopicAndFinalFloor() = verifyEndOfLists(width = 390, height = 760, split = false)
+
+    @Test
+    fun unfoldedPhoneCanTapLastFeedTopicAndFinalFloor() = verifyEndOfLists(width = 700, height = 740, split = true)
+
+    @Test
+    fun tabletCanTapLastFeedTopicAndFinalFloor() = verifyEndOfLists(width = 1150, height = 720, split = true)
+
+    private fun verifyEndOfLists(width: Int, height: Int, split: Boolean) =
+        runDesktopComposeUiTest(width = width, height = height) {
+            isAndroidRuntimeOverrideForTest = true
+            fixtureLength = 17
+            UserApiKeyAuthManager.onSessionAuthenticated(
+                AuthenticatedUserProfile(userId = 42, username = "lucas", displayName = "Lucas", trustLevel = 3),
+                rawCookies = "_t=valid_session_cookie"
+            )
+            setContent { LinDoApp(systemAnimationsEnabled = false) }
+            waitForText("列表话题 1")
+            val feed = onAllNodes(hasScrollToIndexAction()).onFirst()
+            edt { feed.performScrollToKey("load_more_footer") }
+            waitForIdle()
+            edt {
+                val dock = onNodeWithTag("main_navigation_bar").fetchSemanticsNode().boundsInRoot
+                val lastTopic = onNodeWithText("折叠屏沉浸阅读测试主帖")
+                val footer = onAllNodesWithText("没有更多了").onFirst().fetchSemanticsNode().boundsInRoot
+                assertTrue(lastTopic.fetchSemanticsNode().boundsInRoot.bottom <= dock.top)
+                assertTrue(footer.bottom <= dock.top)
+                lastTopic.performTouchInput { click() }
+            }
+            waitForText("这是用于验证宽屏分栏与沉浸阅读收折控制的正文内容。", substring = true)
+            val reader = onAllNodes(hasScrollToIndexAction()).onLast()
+            var noticeOpened = false
+            edt {
+                PlatformSessionRecovery.onExpandVerifyPill = { noticeOpened = true }
+                PlatformSessionRecovery.verifyPillVisible = true
+            }
+            waitForContentDescription("展开安全校验")
+            edt { reader.performScrollToKey("load_more_posts") }
+            waitForIdle()
+            edt {
+                val pencil = onNodeWithContentDescription("回复话题").fetchSemanticsNode().boundsInRoot
+                val notice = onNodeWithContentDescription("展开安全校验").fetchSemanticsNode().boundsInRoot
+                assertTrue(notice.bottom <= reader.fetchSemanticsNode().boundsInRoot.top)
+                if (split) {
+                    val dock = onNodeWithTag("main_navigation_bar").fetchSemanticsNode().boundsInRoot
+                    val floor = onNodeWithText(" / 2 楼", substring = true).fetchSemanticsNode().boundsInRoot
+                    assertEquals(dock.center.y, pencil.center.y, 1f)
+                    assertTrue(dock.right < floor.left && floor.right <= pencil.left)
+                }
+                val refresh = onNodeWithContentDescription("刷新后续评论")
+                val lastReply = onAllNodesWithContentDescription("回复本楼").onLast()
+                assertTrue(refresh.fetchSemanticsNode().boundsInRoot.bottom <= pencil.top)
+                assertTrue(lastReply.fetchSemanticsNode().boundsInRoot.bottom <= pencil.top)
+                refresh.performTouchInput { click() }
+            }
+            waitForText("已是最新回复")
+            edt { onAllNodesWithContentDescription("回复本楼").onLast().performTouchInput { click() } }
+            waitForText("Alice · 2 楼", substring = true)
+            edt { BackNavigationBridge.dispatchBack() }
+            waitForTextGone("发送")
+            edt { onNodeWithContentDescription("展开安全校验").performTouchInput { click() } }
+            assertTrue(noticeOpened)
         }
 
     @Test
@@ -497,7 +577,17 @@ class LoginQrAndFoldableSplitRegressionTest {
                     })
                 }
                 putJsonObject("topic_list") {
+                    put("more_topics_url", JsonNull)
                     putJsonArray("topics") {
+                        for (index in 1 until fixtureLength) {
+                            add(buildJsonObject {
+                                put("id", 901 + index)
+                                put("title", "列表话题 $index")
+                                put("category_id", 4)
+                                put("posts_count", 1)
+                                put("created_at", nowIso)
+                            })
+                        }
                         add(buildJsonObject {
                             put("id", 901)
                             put("title", "折叠屏沉浸阅读测试主帖")
@@ -549,7 +639,7 @@ class LoginQrAndFoldableSplitRegressionTest {
                             put("user_id", 7)
                             put("username", "neo")
                             put("name", "Neo")
-                            put("cooked", "<p>这是用于验证宽屏分栏与沉浸阅读收折控制的正文内容。</p>")
+                            put("cooked", "<p>这是用于验证宽屏分栏与沉浸阅读收折控制的正文内容。</p>".repeat(fixtureLength))
                             put("post_type", 1)
                             put("created_at", nowIso)
                         })

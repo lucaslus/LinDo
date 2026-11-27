@@ -46,6 +46,14 @@ import {
 import {
   clearLocalCachesInRust,
   fetchCloudDrafts,
+  fetchSingleCloudDraft,
+  fetchTopicFeed,
+  resetNotificationReadState,
+  publishReply,
+  publishTopic,
+  updateTopicMetadata,
+  saveBookmarkWithDetails,
+  sendPrivateMessage,
   fetchSiteCustomEmojis,
   fetchUserFollowList,
   sendTopicTimingsBatch,
@@ -211,6 +219,7 @@ function makeTopicSummary(id = 900): TopicSummary {
 }
 
 beforeEach(() => {
+  resetNotificationReadState();
   invokeMock.mockReset();
   openUrlMock.mockReset();
   localStorage.clear();
@@ -218,6 +227,129 @@ beforeEach(() => {
 
 afterEach(() => {
   unmountActive();
+});
+
+describe("forum writing and reading", () => {
+  it.each(["title", "body"])("submits only the changed first-post %s", async (field) => {
+    const published = vi.fn();
+    const edited = vi.fn();
+    const writes: { url: string; form: Record<string, string> }[] = [];
+    invokeMock.mockImplementation(async (cmd: string, args: any) => {
+      if (cmd !== "site_request") return {};
+      if (args.method === "PUT") {
+        writes.push(args);
+        return jsonResponse({ post: { id: 9, post_number: 1, topic_id: 7, username: "alice" } });
+      }
+      return jsonResponse({ results: [] });
+    });
+    const el = mountElement(React.createElement(ComposerModal, {
+      request: { action: "EDIT", topicId: 7, postId: 9, postNumber: 1, initialTitle: field === "body" ? "旧帖" : "原来的话题标题足够长", initialCategoryId: 42, initialRaw: field === "title" ? "旧文" : "原来的帖子正文" },
+      categories: SAMPLE_CATEGORIES, onTopicEdited: edited, onPublished: published, onClose: vi.fn(), onTriggerVerify: vi.fn(),
+    }));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    const input = el.querySelector(field === "title" ? 'input[placeholder="话题标题"]' : "textarea")!;
+    const value = field === "title" ? "修改后的话题标题足够长" : "修改后的帖子正文";
+    act(() => {
+      Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "value")!.set!.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => { findButtonByText(el, "保存")!.click(); });
+    expect(writes.map((r) => [new URL(r.url).pathname, r.form])).toEqual(field === "title"
+      ? [["/t/-/7.json", { title: value }]] : [["/posts/9.json", { "post[raw]": value }]]);
+    expect(published).toHaveBeenCalledOnce();
+    if (field === "title") expect(edited).toHaveBeenCalledWith(7, { title: value });
+  });
+
+  it("compares a resumed edit draft with the published original and submits its saved text", async () => {
+    invokeMock.mockImplementation(async (cmd: string, args: any) => {
+      if (cmd !== "site_request") return {};
+      if (args.url.endsWith("/posts/9.json")) return jsonResponse({ id: 9, topic_id: 7, post_number: 3, raw: "原来的正文" });
+      return jsonResponse({});
+    });
+    const published = vi.fn();
+    const el = mountElement(React.createElement(ComposerModal, {
+      request: { action: "EDIT", topicId: 7, postId: 9, postNumber: 3, initialRaw: "上次保存的修改正文", draftKeyOverride: "edit_9" },
+      categories: SAMPLE_CATEGORIES, onTopicEdited: vi.fn(), onPublished: published, onClose: vi.fn(), onTriggerVerify: vi.fn(),
+    }));
+    await flushPromises();
+    expect(el.querySelector("textarea")!.value).toBe("上次保存的修改正文");
+    await act(async () => { findButtonByText(el, "保存")!.click(); });
+    expect(invokeMock).toHaveBeenCalledWith("site_request", expect.objectContaining({
+      method: "PUT", form: { "post[raw]": "上次保存的修改正文" },
+    }));
+    expect(published).toHaveBeenCalledOnce();
+  });
+
+  it("sends an explicit removal when clearing the last topic tag", async () => {
+    invokeMock.mockResolvedValue(jsonResponse({}));
+    await updateTopicMetadata(7, { tags: [] });
+    expect(invokeMock).toHaveBeenCalledWith("site_request", expect.objectContaining({ form: { tags: "" } }));
+  });
+
+  it("keeps unconfirmed writes separate from moderation-queue receipts", async () => {
+    const topic = { categoryId: 4, title: "新的话题标题", tags: [], raw: "一段足够长的正文" };
+    const reply = { topicId: 7, raw: topic.raw, replyToPostNumber: 3 };
+    const message = { recipients: "alice", title: topic.title, raw: topic.raw };
+    invokeMock.mockResolvedValue(jsonResponse({}));
+    await expect(publishTopic(topic)).rejects.toThrow("回执");
+    await expect(publishReply(reply)).rejects.toThrow("回执");
+    await expect(sendPrivateMessage(message)).rejects.toThrow("回执");
+    await expect(saveBookmarkWithDetails({ postId: 9 })).rejects.toThrow("书签编号");
+    invokeMock.mockResolvedValue(jsonResponse({ action: "enqueued", success: true }));
+    await expect(publishTopic(topic)).resolves.toMatchObject({ pendingReview: true });
+    await expect(publishReply(reply)).resolves.toMatchObject({ pendingReview: true });
+    await expect(sendPrivateMessage(message)).resolves.toBe(0);
+  });
+
+  it("reads the current server sequence even when the cloud draft is empty", async () => {
+    invokeMock.mockResolvedValue(jsonResponse({ draft: null, draft_sequence: 17 }));
+    await expect(fetchSingleCloudDraft("new_topic")).resolves.toEqual({ draft: null, sequence: 17 });
+    invokeMock.mockResolvedValue(jsonResponse({
+      draft: JSON.stringify({ action: "createTopic", reply: "草稿内容", tags: ["kotlin", { id: 7, name: "linux" }] }),
+      draft_sequence: 18,
+    }));
+    await expect(fetchSingleCloudDraft("new_topic")).resolves.toMatchObject({ draft: { tags: ["kotlin", "linux"] }, sequence: 18 });
+  });
+
+  it("preserves the badge when marking all notifications read fails", async () => {
+    const cleared = vi.fn();
+    invokeMock.mockImplementation(async (cmd: string, args: any) => {
+      if (cmd !== "site_request") return {};
+      if (args.url.includes("mark-read")) return jsonResponse({ errors: ["操作失败"] }, 503);
+      return jsonResponse({ notifications: [] });
+    });
+    const el = mountElement(React.createElement(MessagesView, {
+      isAuthorized: true, currentUser: CURRENT_USER, selectedTopicId: null, onOpenNotificationTopic: vi.fn(),
+      onUnreadCleared: cleared, onOpenAuth: vi.fn(), onOpenChat: vi.fn(),
+    }));
+    await flushPromises();
+    await act(async () => { findButtonByText(el, "全部标为已读")!.click(); });
+    expect(cleared).not.toHaveBeenCalled();
+    expect(el.textContent).toContain("操作失败");
+  });
+
+  it("sends both category and tag filters for a sorted feed", async () => {
+    invokeMock.mockResolvedValue(jsonResponse({ topic_list: { topics: [], more_topics_url: null } }));
+    const page = await fetchTopicFeed({ sort: "top", categoryId: 4, tag: "kotlin", topPeriod: "weekly" });
+    expect(page.hasMore).toBe(false);
+    expect(invokeMock).toHaveBeenCalledWith("site_request", expect.objectContaining({
+      url: "https://linux.do/tags/c/develop/4/kotlin/l/top.json?no_definitions=true&period=weekly",
+    }));
+  });
+
+  it("uses the follow cursor after filtering and lists each topic once", async () => {
+    invokeMock.mockImplementation(async (cmd: string, args: any) => {
+      if (cmd !== "site_request") return {};
+      const more = !new URL(args.url).searchParams.has("created_before");
+      const topic = { id: more ? 7 : 9, tags: [more ? "one" : "two"] };
+      return jsonResponse({ posts: [4, 3].map((n) => ({ topic, post_number: n, created_at: "2026-11-20" })), extras: { has_more: more } });
+    });
+    const params = { username: "alice", sort: "follow", tag: "two" };
+    await expect(fetchTopicFeed(params)).resolves.toEqual({ topics: [], hasMore: true });
+    const next = await fetchTopicFeed({ ...params, page: 1 });
+    expect(next.topics.map((item) => item.id)).toEqual([9]);
+    expect(next.hasMore).toBe(false);
+  });
 });
 
 describe("P1-2: Real dwell-time ScreenTrack engine & official Discourse headers", () => {
@@ -446,8 +578,10 @@ describe("P1-4, P1-5, P1-6: Composer drafts/conflicts, interactive builders, [bg
       updatedAt: Date.now(),
     };
 
+    vi.useFakeTimers();
     const el = mountElement(
       React.createElement(ComposerModal, {
+        onTopicEdited: vi.fn(),
         request: { action: "NEW_TOPIC" },
         categories: SAMPLE_CATEGORIES,
         savedDraft,
@@ -460,6 +594,13 @@ describe("P1-4, P1-5, P1-6: Composer drafts/conflicts, interactive builders, [bg
 
     // Cloud draft conflict bar appears with both options
     expect(el.textContent).toContain("检测到云端草稿与本地内容不同");
+    try {
+      await act(async () => { await vi.advanceTimersByTimeAsync(3500); });
+      expect(invokeMock.mock.calls.some(([cmd, args]) =>
+        cmd === "site_request" && args.method === "POST" && args.url.endsWith("/drafts.json"))).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
     act(() => {
       findButtonByText(el, "使用云端草稿")!.click();
     });
@@ -524,6 +665,7 @@ describe("P1-4, P1-5, P1-6: Composer drafts/conflicts, interactive builders, [bg
     });
     const editEl = mountElement(
       React.createElement(ComposerModal, {
+        onTopicEdited: vi.fn(),
         request: {
           action: "EDIT",
           topicId: 777,
@@ -1223,6 +1365,7 @@ describe("Composer Link Picker default tab (引用社区帖子 default + recents
 
     const el = mountElement(
       React.createElement(ComposerModal, {
+        onTopicEdited: vi.fn(),
         request: { action: "REPLY", topicId: 404, topicTitle: "当前话题" },
         categories: SAMPLE_CATEGORIES,
         onClose: vi.fn(),

@@ -194,7 +194,8 @@ class ComposerDraftSession(
             tags = if (remote.tags.isNotEmpty() || current.action == ComposerAction.NEW_TOPIC) remote.tags else current.tags,
             topicId = remote.topicId.takeIf { it > 0 } ?: current.topicId,
             postId = remote.postId ?: current.postId,
-            replyToPostNumber = remote.replyToPostNumber ?: current.replyToPostNumber,
+            replyToPostNumber = if (current.action == ComposerAction.REPLY) remote.replyToPostNumber else current.replyToPostNumber,
+            replyToUsername = current.replyToUsername.takeIf { current.replyToPostNumber == remote.replyToPostNumber },
             recipients = remote.recipients.ifBlank { current.recipients },
             sequence = remote.sequence,
             updatedAt = System.currentTimeMillis()
@@ -236,6 +237,7 @@ class ComposerDraftSession(
         } catch (_: Throwable) {
             return null
         }
+        if (completed) return null
         val remoteDraft = remote.draft
         if (remoteDraft == null) {
             existsOnServer = false
@@ -253,15 +255,19 @@ class ComposerDraftSession(
         } else {
             current.hasContent
         }
-        if (!hasLocalEdits) {
+        val differentReplyTarget = current.action == ComposerAction.REPLY && current.replyToPostNumber != remoteDraft.replyToPostNumber
+        if (!hasLocalEdits && !differentReplyTarget) {
             applyRemoteItem(remoteDraft.copy(sequence = remote.sequence, sequenceKnown = true))
             return null
         }
 
         val cleanRemoteTitle = stripGeneratedDraftTitle(remoteDraft.title)
         val isPrivateMessageDraft = current.cloudKind == CloudDraftKind.PRIVATE_MESSAGE
-        val contentDiffers = remoteDraft.raw.trim() != current.raw.trim() ||
-            (current.action == ComposerAction.NEW_TOPIC && cleanRemoteTitle.trim() != current.title.trim()) ||
+        val contentDiffers = differentReplyTarget || remoteDraft.raw.trim() != current.raw.trim() ||
+            (current.action == ComposerAction.NEW_TOPIC && (
+                cleanRemoteTitle.trim() != current.title.trim() || current.tags != remoteDraft.tags ||
+                    (remoteDraft.categoryId != null && remoteDraft.categoryId != current.categoryId)
+                )) ||
             (isPrivateMessageDraft && remoteDraft.recipients.trim() != current.recipients.trim())
 
         existsOnServer = true

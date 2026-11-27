@@ -20,6 +20,8 @@ import type {
 import {
   acceptPostSolution,
   archivePrivateMessage,
+  canShowPostBoostAction,
+  classifyBoostSubmitFailure,
   deletePostBoost,
   deletePostFloor,
   desktopScreenTrack,
@@ -2652,17 +2654,50 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                   detail.opUsername &&
                   targetReplyUsername.toLowerCase() === detail.opUsername.toLowerCase()
               );
+              const isOwnPost = Boolean(
+                currentUser?.username &&
+                  post.username.toLowerCase() === currentUser.username.toLowerCase()
+              );
+              const myBoost = currentUser?.username
+                ? post.boosts.find(
+                    (b) => b.username.toLowerCase() === currentUser.username.toLowerCase()
+                  )
+                : undefined;
+              const isTopicArchived = Boolean(detail?.archived ?? summary.archived);
+              const canComposeBoost = canShowPostBoostAction({
+                isAuthorized,
+                isOwnPost,
+                isDeletedTombstone: post.isDeletedTombstone,
+                isSmallAction: post.isSmallAction,
+                topicArchived: isTopicArchived,
+                canBoost: post.canBoost,
+                hasMyBoost: Boolean(myBoost),
+              });
               const boostStats =
-                activeBoostComposerPostId === post.id ? computeBoostStats(boostDraftText) : null;
+                canComposeBoost && activeBoostComposerPostId === post.id
+                  ? computeBoostStats(boostDraftText)
+                  : null;
 
               const submitBoostNow = async (rawText: string) => {
+                if (!canComposeBoost) return;
                 const stats = computeBoostStats(rawText);
                 if (!stats.canSubmit || boostSubmitting) return;
                 setBoostSubmitting(true);
                 try {
                   const created = await sendPostBoost(post.id, rawText.trim());
                   if (created) {
-                    onAppendPosts([{ ...post, boosts: [...post.boosts, created] }], "after");
+                    onAppendPosts(
+                      [
+                        {
+                          ...post,
+                          boosts: [...post.boosts, created],
+                          canBoost: false,
+                          hasBoostsField: true,
+                          hasCanBoostField: true,
+                        },
+                      ],
+                      "after"
+                    );
                   } else {
                     onRefresh();
                   }
@@ -2678,7 +2713,22 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                       "重新登录后即可继续互动"
                     );
                   } else {
-                    setToastMsg(err?.message || "发送短评失败");
+                    const classified = classifyBoostSubmitFailure(err);
+                    if (classified.disableCanBoost) {
+                      onAppendPosts(
+                        [
+                          {
+                            ...post,
+                            canBoost: false,
+                            hasCanBoostField: true,
+                          },
+                        ],
+                        "after"
+                      );
+                      setBoostEmojiOpen(false);
+                      setActiveBoostComposerPostId(null);
+                    }
+                    setToastMsg(classified.message);
                   }
                 } finally {
                   setBoostSubmitting(false);
@@ -3162,11 +3212,24 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                                   e.stopPropagation();
                                   try {
                                     await deletePostBoost(boost.id);
+                                    const isDeletingOwnBoost = Boolean(
+                                      currentUser?.username &&
+                                        boost.username.toLowerCase() ===
+                                          currentUser.username.toLowerCase()
+                                    );
                                     onAppendPosts(
                                       [
                                         {
                                           ...post,
                                           boosts: post.boosts.filter((b) => b.id !== boost.id),
+                                          canBoost: isDeletingOwnBoost
+                                            ? !isOwnPost &&
+                                              !post.isDeletedTombstone &&
+                                              !post.isSmallAction &&
+                                              !isTopicArchived
+                                            : post.canBoost,
+                                          hasBoostsField: true,
+                                          hasCanBoostField: true,
                                         },
                                       ],
                                       "after"
@@ -3189,7 +3252,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                   )}
 
                   {/* 独立极简「小火箭 Boost」单行输入条（1:1 对齐移动端：默认仅单行清爽输入 + 左侧纯矢量表情按钮按需展开抽屉） */}
-                  {activeBoostComposerPostId === post.id && boostStats && (() => {
+                  {canComposeBoost && activeBoostComposerPostId === post.id && boostStats && (() => {
                     const counterOverLimit =
                       boostStats.exceedsLength || boostStats.exceedsEmojiLimit;
                     const canSendNow = boostStats.canSubmit && !boostSubmitting;
@@ -3499,17 +3562,8 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                       )}
                     </div>
 
-                    {/* 右侧：克制紧凑 4 键簇（♡ 点赞 · 🚀 小火箭[本人隐藏] · ⋯ 更多 · ↩ 回复；零悬浮透明空洞、零父级重绘） */}
+                    {/* 右侧：克制紧凑 4 键簇（♡ 点赞 · 🚀 小火箭[仅可发短评时展示] · ⋯ 更多 · ↩ 回复；零悬浮透明空洞、零父级重绘） */}
                     {(() => {
-                      const isOwnPost = Boolean(
-                        currentUser?.username &&
-                          post.username.toLowerCase() === currentUser.username.toLowerCase()
-                      );
-                      const myBoost = currentUser?.username
-                        ? post.boosts.find(
-                            (b) => b.username.toLowerCase() === currentUser.username.toLowerCase()
-                          )
-                        : undefined;
                       const activeReactionId =
                         post.currentUserReaction || (post.liked ? "heart" : null);
                       const showReactionBar =
@@ -3774,39 +3828,24 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                             })()}
                           </div>
 
-                          {/* 2. 短评按钮（1:1 对齐移动端：本人帖子自动隐藏） */}
-                          {!isOwnPost && !post.isDeletedTombstone && !post.isSmallAction && (
+                          {/* 2. 短评按钮（仅当服务端允许且当前可正常发送时展示；达上限/已发过/本人/归档/访客一律隐藏） */}
+                          {canComposeBoost && (
                             <button
                               type="button"
-                              title={myBoost ? "查看我的短评" : "发短评"}
+                              title="发短评"
                               onClick={() => {
-                                if (!isAuthorized) {
-                                  onRequestGuestLogin(
-                                    "登录后发短评",
-                                    "给帖子发一条简短回应"
-                                  );
-                                  return;
-                                }
-                                if (myBoost) {
-                                  setExpandedBoostId((prev) =>
-                                    prev === myBoost.id ? null : myBoost.id
-                                  );
-                                } else {
-                                  setBoostEmojiOpen(false);
-                                  setActiveBoostComposerPostId((prev) =>
-                                    prev === post.id ? null : post.id
-                                  );
-                                  setBoostDraftText("");
-                                }
+                                setBoostEmojiOpen(false);
+                                setActiveBoostComposerPostId((prev) =>
+                                  prev === post.id ? null : post.id
+                                );
+                                setBoostDraftText("");
                               }}
                               className={`lindo-interactive flex ${btnSqCls} items-center justify-center rounded-full ${
-                                activeBoostComposerPostId === post.id || Boolean(myBoost)
-                                  ? ""
-                                  : mutedIdleCls
+                                activeBoostComposerPostId === post.id ? "" : mutedIdleCls
                               }`}
                               style={{
                                 color:
-                                  activeBoostComposerPostId === post.id || Boolean(myBoost)
+                                  activeBoostComposerPostId === post.id
                                     ? "var(--brand-gold)"
                                     : "var(--ink-tertiary)",
                               }}

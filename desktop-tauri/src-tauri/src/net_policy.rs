@@ -14,7 +14,6 @@ pub const VERIFY_FAILURE_COOLDOWN_SECS: u64 = 30;
 pub const VERIFY_INEFFECTIVE_COOLDOWN_SECS: u64 = 60;
 pub const VERIFY_SILENT_BACKOFF_SECS: u64 = 45;
 pub const VERIFY_RECENT_PASS_COALESCE_SECS: u64 = 5;
-pub const VERIFY_INEFFECTIVE_WINDOW_SECS: u64 = 15;
 pub const VERIFY_USER_DISMISS_SNOOZE_SECS: u64 = 180;
 pub const VERIFY_PROACTIVE_WIDGET_PROMOTE_MS: u64 = 3_500;
 pub const VERIFY_TYPING_QUIET_GUARD_MS: u64 = 2_500;
@@ -439,10 +438,7 @@ pub enum VerifyPresentation {
     Silent = 0,
     /// Non-intrusive delayed corner progress pill (shown after 2s if hidden check still running; click opens panel).
     Pill = 1,
-    /// Visible main-window proactive precheck (cold start, near-expiry, background `timings`/`notifications` escalation):
-    /// starts 100% silent (0 UI, 0 Pill); if browser auto-passes -> 0 UI seamless recovery;
-    /// once human interaction is confirmed (`native_interactive` or rendered widget >= 3.5s),
-    /// promotes straight to native panel when not in 180s dismiss snooze and not typing in `ComposerModal`.
+    /// Background check while the app is visible. A pending challenge is surfaced in the main window.
     Proactive = 2,
     /// Foreground user-waiting request: starts hidden on `/challenge`; if invisible JS passes -> 0 UI;
     /// >2s -> gentle corner Pill; if Turnstile triggers `interactiveBegin` -> promotes straight to panel on the SAME page!
@@ -803,15 +799,6 @@ pub struct VerifyOutcome {
     pub cooldown_remain_ms: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IneffectiveClearanceDecision {
-    /// 1st ineffective clearance hit: execute clean-room network self-heal (preserving `_t` / `_forum_session`)
-    /// and re-pull `/challenge` once before tripping the 60s circuit breaker.
-    SelfHealAndReverify,
-    /// 2nd consecutive ineffective clearance hit (even after self-heal): trip 60s circuit breaker.
-    TripBreaker { cooldown_ms: u64 },
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct VerifyHealthSnapshot {
     pub active: bool,
@@ -859,7 +846,6 @@ pub struct VerifyCoordinator {
     consecutive_failures: u32,
     failure_counted_round: Option<u64>,
     ineffective_strikes: u32,
-    ineffective_counted_round: Option<u64>,
     unresolved_write_challenge: bool,
     cooldown_until: Option<Instant>,
     cooldown_is_ineffective: bool,
@@ -889,16 +875,6 @@ impl VerifyCoordinator {
 
     pub fn has_unresolved_write_challenge(&self) -> bool {
         self.unresolved_write_challenge
-    }
-
-    pub fn ineffective_strikes(&self) -> u32 {
-        self.ineffective_strikes
-    }
-
-    pub fn needs_clean_heal_on_manual(&self, now: Instant) -> bool {
-        self.ineffective_strikes > 0
-            || (self.cooldown_is_ineffective
-                && self.cooldown_until.map(|u| now < u).unwrap_or(false))
     }
 
     pub fn record_user_dismiss(&mut self, net_sig: &str, now: Instant) -> u64 {
@@ -979,7 +955,6 @@ impl VerifyCoordinator {
                 self.consecutive_failures = 0;
                 self.failure_counted_round = None;
                 self.ineffective_strikes = 0;
-                self.ineffective_counted_round = None;
             }
         }
         if let Some(until) = self.silent_backoff_until {
@@ -1054,7 +1029,7 @@ impl VerifyCoordinator {
     ) -> VerifyOutcome {
         let flight = match self.active.as_ref() {
             Some(f) if f.round == round => self.active.take(),
-            _ => None,
+            _ => return VerifyOutcome { passed: false, round, ineffective_blocked: false, cooldown_remain_ms: 0 },
         };
 
         if passed {
@@ -1121,64 +1096,12 @@ impl VerifyCoordinator {
         }
     }
 
-    /// Two-stage ineffective-clearance closed loop:
-    /// - 1st consecutive hit (`ineffective_strikes == 1`): returns `SelfHealAndReverify` so caller runs
-    ///   clean-room network self-heal (purging CF cookies + rotating sticky IP + reconciling ECH route,
-    ///   100% preserving `_t` / `_forum_session`) and re-pulls `/challenge` once.
-    /// - 2nd consecutive hit (`ineffective_strikes >= 2`): trips the 60s ineffective circuit breaker.
-    pub fn record_ineffective_clearance_step(
-        &mut self,
-        round: u64,
-        is_write: bool,
-        now: Instant,
-    ) -> IneffectiveClearanceDecision {
-        if is_write {
-            self.unresolved_write_challenge = true;
-        }
-        let within_window = self.last_passed_round == round
-            && self
-                .last_passed_at
-                .map(|t| {
-                    now.saturating_duration_since(t)
-                        <= Duration::from_secs(VERIFY_INEFFECTIVE_WINDOW_SECS)
-                })
-                .unwrap_or(true);
-        if (within_window || self.ineffective_counted_round != Some(round))
-            && self.ineffective_counted_round != Some(round)
-        {
-            self.ineffective_counted_round = Some(round);
-            self.ineffective_strikes = self.ineffective_strikes.saturating_add(1);
-            self.last_passed_at = None;
-        }
-        if self.ineffective_strikes <= 1 {
-            IneffectiveClearanceDecision::SelfHealAndReverify
-        } else {
-            let cooldown_ms = self.record_ineffective_clearance(round, now);
-            IneffectiveClearanceDecision::TripBreaker { cooldown_ms }
-        }
-    }
-
-    pub fn prepare_for_self_heal_reverify(&mut self) {
-        self.consecutive_failures = 0;
-        self.failure_counted_round = None;
-        self.cooldown_until = None;
-        self.cooldown_is_ineffective = false;
-        self.silent_backoff_until = None;
-        self.last_passed_at = None;
-    }
-
     /// Immediate circuit breaker helper: enters 60s ineffective-clearance cooldown immediately.
     pub fn record_ineffective_clearance(&mut self, round: u64, now: Instant) -> u64 {
-        let within_window = self.last_passed_round == round
-            && self
-                .last_passed_at
-                .map(|t| now.saturating_duration_since(t) <= Duration::from_secs(VERIFY_INEFFECTIVE_WINDOW_SECS))
-                .unwrap_or(true);
-        if within_window || self.failure_counted_round != Some(round) {
+        if round == self.round && round == self.last_passed_round && self.last_passed_at.is_some() {
             self.failure_counted_round = Some(round);
             self.consecutive_failures = VERIFY_MAX_FAILURES_BEFORE_COOLDOWN;
-            self.ineffective_strikes = self.ineffective_strikes.max(2);
-            self.ineffective_counted_round = Some(round);
+            self.ineffective_strikes += 1;
             self.cooldown_until = Some(now + Duration::from_secs(VERIFY_INEFFECTIVE_COOLDOWN_SECS));
             self.cooldown_is_ineffective = true;
             // Invalidate recent-pass coalescing so subsequent requests immediately observe the breaker.
@@ -1208,7 +1131,6 @@ impl VerifyCoordinator {
         self.consecutive_failures = 0;
         self.failure_counted_round = None;
         self.ineffective_strikes = 0;
-        self.ineffective_counted_round = None;
         self.cooldown_until = None;
         self.cooldown_is_ineffective = false;
         self.silent_backoff_until = None;
@@ -1216,7 +1138,6 @@ impl VerifyCoordinator {
 
     pub fn reset_on_network_change(&mut self) {
         self.unresolved_write_challenge = false;
-        self.clear_user_dismiss();
         self.reset_on_healthy_response();
     }
 
@@ -2274,7 +2195,7 @@ mod tests {
     }
 
     #[test]
-    fn ineffective_clearance_closed_loop_self_heals_once_and_blocks_get_200_whitewash() {
+    fn rejected_replay_stops_once_and_read_success_preserves_a_blocked_write() {
         let t0 = Instant::now();
         let coord = Arc::new(StdMutex::new(VerifyCoordinator::default()));
 
@@ -2297,63 +2218,17 @@ mod tests {
             .complete(true, t0 + Duration::from_secs(1));
         assert!(out1.passed);
 
-        // 1st ineffective replay on a write MUST trigger clean-room SelfHealAndReverify (not 60s breaker yet)
-        let dec1 = coord.lock().unwrap().record_ineffective_clearance_step(
-            r1,
-            true,
-            t0 + Duration::from_secs(2),
-        );
-        assert_eq!(dec1, IneffectiveClearanceDecision::SelfHealAndReverify);
-        let snap_after_1st = coord.lock().unwrap().snapshot(t0 + Duration::from_secs(2));
-        assert_eq!(snap_after_1st.ineffective_strikes, 1);
-        assert_eq!(snap_after_1st.cooldown_remain_ms, 0);
-        assert!(snap_after_1st.unresolved_write_challenge);
-
-        // Ordinary GET 200 MUST NOT clear `ineffective_strikes` while unresolved write challenge exists!
-        coord.lock().unwrap().note_healthy_response(false, false);
-        let snap_after_get = coord.lock().unwrap().snapshot(t0 + Duration::from_secs(3));
-        assert_eq!(snap_after_get.ineffective_strikes, 1);
-        assert!(snap_after_get.unresolved_write_challenge);
-
-        // Clean-room self-heal prepares coordinator and runs Round 2 re-verification
-        coord.lock().unwrap().prepare_for_self_heal_reverify();
-        let (r2, p2) = match coord.lock().unwrap().join_or_start_with_context(
-            VerifyPresentation::Blocking,
-            t0 + Duration::from_secs(4),
-            true,
-            true,
-            "net_sig_v1_healed",
-        ) {
-            VerifyJoin::Leader {
-                round,
-                presentation,
-                ..
-            } => (round, presentation),
-            _ => panic!("expected round 2 leader after self-heal"),
-        };
-        let out2 = VerifyFlightGuard::new(Arc::clone(&coord), r2, p2)
-            .complete(true, t0 + Duration::from_secs(5));
-        assert!(out2.passed);
-
-        // 2nd consecutive ineffective replay MUST trip the 60s circuit breaker!
-        let dec2 = coord.lock().unwrap().record_ineffective_clearance_step(
-            r2,
-            true,
-            t0 + Duration::from_secs(6),
-        );
-        match dec2 {
-            IneffectiveClearanceDecision::TripBreaker { cooldown_ms } => {
-                assert!(cooldown_ms >= 59_000, "expected ~60s breaker, got {cooldown_ms}ms");
-            }
-            other => panic!("expected TripBreaker on 2nd strike, got {other:?}"),
+        {
+            let mut c = coord.lock().unwrap();
+            c.note_write_challenge();
+            assert_eq!(c.record_ineffective_clearance(r1, t0 + Duration::from_secs(2)), 60_000);
+            assert_eq!(c.record_ineffective_clearance(r1, t0 + Duration::from_secs(6)), 56_000);
+            assert!(!c.finish_flight(r1, true, false, VerifyPresentation::Blocking, t0 + Duration::from_secs(7)).passed);
+            c.note_healthy_response(false, false);
+            let snapshot = c.snapshot(t0 + Duration::from_secs(10));
+            assert_eq!(snapshot.cooldown_remain_ms, 52_000);
+            assert!(snapshot.unresolved_write_challenge);
         }
-
-        // Another ordinary GET 200 during the breaker MUST NOT clear the 60s write breaker!
-        coord.lock().unwrap().note_healthy_response(false, false);
-        let snap_breaker = coord.lock().unwrap().snapshot(t0 + Duration::from_secs(10));
-        assert!(snap_breaker.cooldown_is_ineffective);
-        assert!(snap_breaker.cooldown_remain_ms >= 55_000);
-        assert!(snap_breaker.unresolved_write_challenge);
 
         // A genuine healthy write 2xx clears the unresolved write challenge and breaker cleanly
         coord.lock().unwrap().note_healthy_response(true, false);

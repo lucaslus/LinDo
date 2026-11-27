@@ -78,19 +78,12 @@ sealed interface VerifyJoin {
     ) : VerifyJoin
 }
 
-sealed interface IneffectiveClearanceDecision {
-    /** 第 1 次命中无效票据：触发一次进程内净室网络自愈重置并干净重拉验证页，不立即冷冻 60s */
-    data object SelfHealAndRetryOnce : IneffectiveClearanceDecision
-    /** 净室重置重验后第 2 次仍撞盾：拉起 60s 无效票据熔断器阻断死循环 */
-    data class TripBreaker(val cooldownRemainMs: Long) : IneffectiveClearanceDecision
-}
-
 /**
  * 权威单飞过盾协调器（对齐 PC Rust `VerifyCoordinator`）：
  * - 单飞合流 + 4 档单调升舱；
  * - 轮次号（round）去重记失败（并发 N 个请求同轮失败仅记 1 次）；
  * - 连续 3 轮失败进入 30s 冷却；
- * - 过盾后 15s 内立即复撞：第 1 次触发进程内净室自愈重验，连续第 2 次触发 60s 无效票据熔断；
+ * - 同一轮通过后重试仍被拦截，暂停自动验证 60s；
  * - 静默验证失败仅 45s 静默退避，绝不计入用户失败；
  * - `MANUAL` 手动点击绕过所有自动冷却。
  */
@@ -101,7 +94,6 @@ class VerifyCoordinator {
         const val INEFFECTIVE_COOLDOWN_MS = 60_000L
         const val SILENT_BACKOFF_MS = 45_000L
         const val RECENT_PASS_COALESCE_MS = 5_000L
-        const val INEFFECTIVE_WINDOW_MS = 15_000L
         const val PILL_DELAY_MS = 2_000L
     }
 
@@ -121,7 +113,6 @@ class VerifyCoordinator {
     private var silentBackoffUntilMs: Long = 0L
     private var lastPassedRound: Long = 0L
     private var lastPassedAtMs: Long = 0L
-    private var ineffectiveHealUsedSinceHealthy: Boolean = false
     private var unresolvedIneffectiveClearance: Boolean = false
 
     @Synchronized
@@ -207,7 +198,8 @@ class VerifyCoordinator {
         nowMs: Long = System.currentTimeMillis(),
         abandoned: Boolean = false
     ): VerifyOutcome {
-        val flight = active?.takeIf { it.round == round }?.also { active = null }
+        val flight = active?.takeIf { it.round == round } ?: return VerifyOutcome(false, round)
+        active = null
 
         if (!passed && abandoned) {
             // 被动中止（App 切后台 / WebView 被系统回收 / 交棒给前台验证面板）不是一次真实失败：
@@ -233,7 +225,7 @@ class VerifyCoordinator {
             ineffectiveBlocked = cooldownIsIneffective && remain > 0L,
             cooldownRemainMs = remain
         )
-        flight?.deferred?.complete(outcome)
+        flight.deferred.complete(outcome)
         return outcome
     }
 
@@ -256,27 +248,9 @@ class VerifyCoordinator {
     }
 
     @Synchronized
-    fun onPostVerifyReplayChallenged(
-        round: Long,
-        nowMs: Long = System.currentTimeMillis()
-    ): IneffectiveClearanceDecision {
-        unresolvedIneffectiveClearance = true
-        return if (!ineffectiveHealUsedSinceHealthy) {
-            ineffectiveHealUsedSinceHealthy = true
-            lastPassedAtMs = 0L
-            IneffectiveClearanceDecision.SelfHealAndRetryOnce
-        } else {
-            val remain = recordIneffectiveClearance(round, nowMs)
-            IneffectiveClearanceDecision.TripBreaker(remain)
-        }
-    }
-
-    @Synchronized
     fun recordIneffectiveClearance(round: Long, nowMs: Long = System.currentTimeMillis()): Long {
-        unresolvedIneffectiveClearance = true
-        val withinWindow = lastPassedRound == round &&
-            (lastPassedAtMs <= 0L || (nowMs - lastPassedAtMs) <= INEFFECTIVE_WINDOW_MS)
-        if (withinWindow || failureCountedRound != round) {
+        if (round == this.round && round == lastPassedRound && lastPassedAtMs > 0L) {
+            unresolvedIneffectiveClearance = true
             failureCountedRound = round
             consecutiveFailures = MAX_FAILURES_BEFORE_COOLDOWN
             cooldownUntilMs = nowMs + INEFFECTIVE_COOLDOWN_MS
@@ -287,27 +261,12 @@ class VerifyCoordinator {
     }
 
     @Synchronized
-    fun clearCooldownsForCleanReset(preserveAutoHealGuard: Boolean = false) {
-        consecutiveFailures = 0
-        failureCountedRound = null
-        cooldownUntilMs = 0L
-        cooldownIsIneffective = false
-        silentBackoffUntilMs = 0L
-        lastPassedAtMs = 0L
-        if (!preserveAutoHealGuard) {
-            ineffectiveHealUsedSinceHealthy = false
-            unresolvedIneffectiveClearance = false
-        }
-    }
-
-    @Synchronized
     fun resetOnHealthyResponse() {
         consecutiveFailures = 0
         failureCountedRound = null
         cooldownUntilMs = 0L
         cooldownIsIneffective = false
         silentBackoffUntilMs = 0L
-        ineffectiveHealUsedSinceHealthy = false
         unresolvedIneffectiveClearance = false
     }
 
@@ -854,7 +813,7 @@ sealed interface SilentVerifyStep {
  * - 一旦确认需要人工交互（`interactiveBegin` 或 `widget == true` 满 3.5s 未自动通过）：
  *   1. 若用户在 180s 点 `×` 免打扰期内且非主动写操作：不自动硬弹大窗，保留右下角「需安全确认」小提示框；
  *   2. 若用户正在输入栏连续打字（`< 2.5s`）且尚未点击发送：暂不抢键盘，先展示右下角小提示框，停笔 `>= 2.5s` 或点击小提示框 / 发送立即弹出；
- *   3. 其余前台常规状态（冷启动、唤醒恢复、切网、刷帖、后台 `timings`/`notifications` 实测撞盾）：直接原位升舱主动弹出「安全确认」！
+ *   3. 用户正在等待的前台操作可展开面板，后台预检只提示。
  */
 object SilentVerifyPolicy {
     const val FOREGROUND_BUDGET_MS = 9_000L
@@ -908,12 +867,9 @@ object SilentVerifyPolicy {
             if (isUserDismissSnoozed) {
                 return SilentVerifyStep.Abandon("snoozed_by_user_dismiss")
             }
-            if (isUserActivelyTyping) {
-                return SilentVerifyStep.HoldForTyping
-            }
-            return SilentVerifyStep.Escalate(
-                if (trigger == SilentVerifyTrigger.FOREGROUND) "interactive_required" else "interactive_required_proactive"
-            )
+            if (trigger == SilentVerifyTrigger.PREWARM) return SilentVerifyStep.Abandon("background_requires_user")
+            if (isUserActivelyTyping) return SilentVerifyStep.HoldForTyping
+            return SilentVerifyStep.Escalate("interactive_required")
         }
         if (elapsedMs >= budgetMs(trigger)) {
             return if (trigger == SilentVerifyTrigger.FOREGROUND) {
@@ -1375,7 +1331,7 @@ object NetworkPolicyEngine {
         timeoutBlackholeDetector.noteHealthyResponse()
         backgroundChallengeTracker.reset()
         clearCsrfCooldown()
-        clearVerifyAttentionAndSnooze()
+        // The existing snooze checks the effective network signature when next consulted.
         CfClearanceAuthority.reset()
     }
 

@@ -372,6 +372,8 @@ internal fun collectAllImagesFromPostNodes(nodes: List<PostBlockNode>): PostBloc
     val captions = mutableListOf<String>()
     val linkUrls = mutableListOf<String?>()
     val aspectRatios = mutableListOf<Float?>()
+    val widths = mutableListOf<Int?>()
+    val heights = mutableListOf<Int?>()
     val seen = HashSet<String>()
 
     fun walk(list: List<PostBlockNode>) {
@@ -387,6 +389,8 @@ internal fun collectAllImagesFromPostNodes(nodes: List<PostBlockNode>): PostBloc
                             captions += n.captions.getOrElse(idx) { "" }
                             linkUrls += n.linkUrls.getOrNull(idx)
                             aspectRatios += n.aspectRatios.getOrNull(idx)
+                            widths += n.widths.getOrNull(idx)
+                            heights += n.heights.getOrNull(idx)
                         }
                     }
                 }
@@ -402,7 +406,15 @@ internal fun collectAllImagesFromPostNodes(nodes: List<PostBlockNode>): PostBloc
     }
     walk(nodes)
     return if (urls.size > 1) {
-        PostBlockNode.ImageGallery(urls = urls, fullUrls = fullUrls, captions = captions, linkUrls = linkUrls, aspectRatios = aspectRatios)
+        PostBlockNode.ImageGallery(
+            urls = urls,
+            fullUrls = fullUrls,
+            captions = captions,
+            linkUrls = linkUrls,
+            aspectRatios = aspectRatios,
+            widths = widths,
+            heights = heights
+        )
     } else null
 }
 

@@ -419,6 +419,51 @@ class ComposerAndSafetyTest {
         }
     }
 
+    @Test fun boostMaxLimitErrorDisablesCanBoostAndLocalizesMessage() = runTest {
+        LinuxDoRepository.clearPollVoteState()
+        withTransport({ _, method, _ ->
+            assertEquals("POST", method)
+            422 to """{"errors":["This post has reached the maximum number of boosts."]}"""
+        }) {
+            val res = LinuxDoRepository.createPostBoost(699, "及时止损")
+            assertFalse(res.ok)
+            assertTrue(res.disableCanBoost)
+            assertEquals("该楼层短评已达上限", res.errorMessage)
+            val snap = LinuxDoRepository.getPostBoostSnapshot(699)
+            assertNotNull(snap)
+            assertFalse(snap.canBoost)
+        }
+    }
+
+    @Test fun topicDetailRespectsServerCanBoostFalseAndOmitted() = runTest {
+        LinuxDoRepository.clearPollVoteState()
+        withTransport({ _, _, _ ->
+            200 to """
+                {
+                  "id": 8801,
+                  "title": "Boost 权限测试",
+                  "slug": "boost-test",
+                  "posts_count": 3,
+                  "post_stream": {
+                    "stream": [9101, 9102, 9103],
+                    "posts": [
+                      {"id": 9101, "post_number": 1, "user_id": 10, "username": "alice", "cooked": "<p>can boost</p>", "can_boost": true, "boosts": []},
+                      {"id": 9102, "post_number": 2, "user_id": 11, "username": "bob", "cooked": "<p>maxed out</p>", "can_boost": false, "boosts": []},
+                      {"id": 9103, "post_number": 3, "user_id": 12, "username": "carol", "cooked": "<p>omitted</p>"}
+                    ]
+                  }
+                }
+            """.trimIndent()
+        }) {
+            val detail = LinuxDoRepository.fetchTopicDetail(8801)
+            assertNotNull(detail)
+            val byId = detail.posts.associateBy { it.id }
+            assertTrue(byId.getValue(9101).canBoost)
+            assertFalse(byId.getValue(9102).canBoost)
+            assertFalse(byId.getValue(9103).canBoost)
+        }
+    }
+
     @Test fun cookieSentinelPreservesFreshSessionCookiesOverOlderRecords() {
         CookieSentinel.clearAll()
         CookieSentinel.putCookie(

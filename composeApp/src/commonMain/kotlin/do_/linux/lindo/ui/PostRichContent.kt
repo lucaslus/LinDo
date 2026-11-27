@@ -816,6 +816,7 @@ private fun PostRichContentBody(
                 var lightboxIndex by remember(node) { mutableStateOf<Int?>(null) }
                 node.urls.forEachIndexed { index, url ->
                     var loadState by remember(url) { mutableIntStateOf(0) } // 0=loading, 1=loaded, -1=failed
+                    var measuredOverride by remember(url) { mutableStateOf<Pair<Int, Int>?>(null) }
                     val fullUrl = node.fullUrls.getOrElse(index) { url }
                     val rawLink = node.linkUrls.getOrNull(index)?.trim().orEmpty()
                     val linkTarget = rawLink.ifEmpty { fullUrl }
@@ -824,7 +825,17 @@ private fun PostRichContentBody(
                         !rawLink.equals(url, ignoreCase = true) &&
                         !isPostImageAssetUrl(rawLink)
                     val alt = node.captions.getOrNull(index).orEmpty().ifBlank { LinDoReaderCopy.POST_IMAGE_ALT.text }
-                    val knownAspectRatio = node.aspectRatios.getOrNull(index)?.coerceIn(0.45f, 3.0f)
+                    val cachedDims = remember(url) { PostImageDimensionCache.get(url) }
+                    val declaredW = node.widths.getOrNull(index)
+                    val declaredH = node.heights.getOrNull(index)
+                    val declaredAr = node.aspectRatios.getOrNull(index)
+                    val effectiveW = measuredOverride?.first ?: declaredW ?: cachedDims?.first
+                    val effectiveH = measuredOverride?.second ?: declaredH ?: cachedDims?.second
+                    val effectiveAr = if (measuredOverride != null) {
+                        measuredOverride!!.first.toFloat() / measuredOverride!!.second.coerceAtLeast(1).toFloat()
+                    } else {
+                        declaredAr ?: cachedDims?.let { (cw, ch) -> cw.toFloat() / ch.coerceAtLeast(1).toFloat() }
+                    }
                     if (loadState < 0) {
                         TextButton(onClick = {
                             if (isExternalArticleLink) onOpenLink(linkTarget) else lightboxIndex = index
@@ -857,59 +868,94 @@ private fun PostRichContentBody(
                             )
                             a
                         } else 0.78f
-                        val boxMod = if (isLoading) {
-                            val base = Modifier
+                        BoxWithConstraints(
+                            modifier = Modifier
                                 .widthIn(max = 560.dp)
                                 .fillMaxWidth()
-                                .let { m ->
-                                    if (knownAspectRatio != null) {
-                                        m.aspectRatio(knownAspectRatio).heightIn(min = 120.dp, max = 360.dp)
-                                    } else {
-                                        m.height(200.dp)
-                                    }
-                                }
-                            base
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(palette.subtleSurface.copy(alpha = skeletonAlpha))
-                                .border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp))
-                                .testTag("post_image_skeleton_$index")
-                        } else {
-                            Modifier
-                                .widthIn(max = 560.dp)
-                                .heightIn(max = 360.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                        }
-                        Box(
-                            modifier = boxMod.clickable {
-                                if (isExternalArticleLink) {
-                                    onOpenLink(linkTarget)
-                                } else {
-                                    lightboxIndex = index
-                                }
-                            },
-                            contentAlignment = Alignment.Center
                         ) {
-                            if (isLoading) {
-                                Icon(
-                                    imageVector = do_.linux.lindo.ui.components.LinDoIcons.Image,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(26.dp),
-                                    tint = palette.inkTertiary.copy(alpha = 0.45f)
+                            val availWidthDp = maxWidth.value.coerceAtLeast(1f)
+                            val resolvedBox = computeUnifiedImageBoxSize(
+                                availableWidthDp = availWidthDp,
+                                widthPx = effectiveW,
+                                heightPx = effectiveH,
+                                aspectRatio = effectiveAr,
+                                maxHeightDp = 360f
+                            )
+                            val shape = RoundedCornerShape(10.dp)
+                            val boxMod = if (resolvedBox != null) {
+                                Modifier
+                                    .size(width = resolvedBox.widthDp.dp, height = resolvedBox.heightDp.dp)
+                                    .clip(shape)
+                                    .let { m ->
+                                        if (isLoading) {
+                                            m.background(palette.subtleSurface.copy(alpha = skeletonAlpha))
+                                                .border(0.5.dp, palette.hairline, shape)
+                                                .testTag("post_image_skeleton_$index")
+                                        } else {
+                                            m
+                                        }
+                                    }
+                            } else if (isLoading) {
+                                val fallbackW = minOf(availWidthDp, 400f).dp
+                                Modifier
+                                    .size(width = fallbackW, height = 200.dp)
+                                    .clip(shape)
+                                    .background(palette.subtleSurface.copy(alpha = skeletonAlpha))
+                                    .border(0.5.dp, palette.hairline, shape)
+                                    .testTag("post_image_skeleton_$index")
+                            } else {
+                                Modifier
+                                    .widthIn(max = 560.dp)
+                                    .heightIn(max = 360.dp)
+                                    .clip(shape)
+                            }
+                            Box(
+                                modifier = boxMod.clickable {
+                                    if (isExternalArticleLink) {
+                                        onOpenLink(linkTarget)
+                                    } else {
+                                        lightboxIndex = index
+                                    }
+                                },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (isLoading) {
+                                    Icon(
+                                        imageVector = do_.linux.lindo.ui.components.LinDoIcons.Image,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(26.dp),
+                                        tint = palette.inkTertiary.copy(alpha = 0.45f)
+                                    )
+                                }
+                                AsyncImage(
+                                    model = imageRequest,
+                                    contentDescription = alt,
+                                    contentScale = if (resolvedBox != null) ContentScale.Fit else ContentScale.Inside,
+                                    filterQuality = androidx.compose.ui.graphics.FilterQuality.Medium,
+                                    onSuccess = { success ->
+                                        val bmpW = success.result.image.width
+                                        val bmpH = success.result.image.height
+                                        if (bmpW > 0 && bmpH > 0) {
+                                            val logicalW = kotlin.math.round(bmpW / imageDensity).toInt().coerceAtLeast(1)
+                                            val logicalH = kotlin.math.round(bmpH / imageDensity).toInt().coerceAtLeast(1)
+                                            PostImageDimensionCache.put(url, logicalW, logicalH)
+                                            val actualAr = bmpW.toFloat() / bmpH.toFloat()
+                                            val curAr = effectiveAr
+                                            if (curAr != null && curAr > 0f && kotlin.math.abs(actualAr - curAr) / curAr > 0.05f) {
+                                                // Declared dimensions disagreed with decoded bitmap: snap to real aspect ratio cleanly
+                                                measuredOverride = logicalW to logicalH
+                                            }
+                                        }
+                                        loadState = 1
+                                    },
+                                    onError = { loadState = -1 },
+                                    modifier = if (resolvedBox != null || isLoading) {
+                                        Modifier.fillMaxSize()
+                                    } else {
+                                        Modifier.widthIn(max = 560.dp).heightIn(max = 360.dp)
+                                    }
                                 )
                             }
-                            AsyncImage(
-                                model = imageRequest,
-                                contentDescription = alt,
-                                contentScale = ContentScale.Inside,
-                                filterQuality = androidx.compose.ui.graphics.FilterQuality.Medium,
-                                onSuccess = { loadState = 1 },
-                                onError = { loadState = -1 },
-                                modifier = if (isLoading) {
-                                    Modifier.matchParentSize()
-                                } else {
-                                    Modifier.widthIn(max = 560.dp).heightIn(max = 360.dp)
-                                }
-                            )
                         }
                     }
                 }
@@ -1966,4 +2012,65 @@ internal fun PostImageLightboxDialog(
             }
         }
     }
+}
+
+internal data class ResolvedImageBoxSize(val widthDp: Float, val heightDp: Float)
+
+/**
+ * 与桌面端 CSS `width: min(100%, var(--lindo-img-w), calc(maxH * var(--lindo-img-ar)))` 严格一致的等比盒尺寸公式：
+ * - 竖屏长图：按 maxHeightDp 封顶并等比收缩宽度，不再撑成宽方块
+ * - 小图 / 缩放图：按自身声明逻辑宽度展示，不再拉伸到 100% 满宽
+ * - 超宽横幅：按真实比例计算真实高度，不再强行撑高到 120dp
+ */
+internal fun computeUnifiedImageBoxSize(
+    availableWidthDp: Float,
+    widthPx: Int?,
+    heightPx: Int?,
+    aspectRatio: Float?,
+    maxHeightDp: Float = 360f
+): ResolvedImageBoxSize? {
+    val availW = availableWidthDp.coerceAtLeast(1f)
+    val maxH = maxHeightDp.coerceAtLeast(1f)
+    if (widthPx != null && heightPx != null && widthPx > 0 && heightPx > 0) {
+        val ar = widthPx.toFloat() / heightPx.toFloat()
+        val targetW = minOf(availW, widthPx.toFloat(), maxH * ar).coerceAtLeast(1f)
+        val targetH = (targetW / ar).coerceAtMost(maxH).coerceAtLeast(1f)
+        return ResolvedImageBoxSize(targetW, targetH)
+    }
+    if (aspectRatio != null && aspectRatio > 0f) {
+        val targetW = minOf(availW, maxH * aspectRatio).coerceAtLeast(1f)
+        val targetH = (targetW / aspectRatio).coerceAtMost(maxH).coerceAtLeast(1f)
+        return ResolvedImageBoxSize(targetW, targetH)
+    }
+    return null
+}
+
+/**
+ * 会话内图片真实解码尺寸缓存（上限 500 条）：
+ * 首次加载无 HTML 尺寸属性的外链图后记录真实逻辑宽高，后续滚动复用或再次进入话题直接精准占位。
+ */
+internal object PostImageDimensionCache {
+    private const val MAX_ENTRIES = 500
+    private val cache = LinkedHashMap<String, Pair<Int, Int>>(64, 0.75f, true)
+
+    fun get(url: String): Pair<Int, Int>? = synchronized(cache) {
+        cache[url.trim()]
+    }
+
+    fun put(url: String, widthDp: Int, heightDp: Int) {
+        val key = url.trim()
+        if (key.isEmpty() || widthDp !in 1..20000 || heightDp !in 1..20000) return
+        synchronized(cache) {
+            cache[key] = widthDp to heightDp
+            if (cache.size > MAX_ENTRIES) {
+                val iter = cache.entries.iterator()
+                if (iter.hasNext()) {
+                    iter.next()
+                    iter.remove()
+                }
+            }
+        }
+    }
+
+    fun clear() = synchronized(cache) { cache.clear() }
 }

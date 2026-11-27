@@ -28,6 +28,14 @@ class AndroidNetworkRecoveryTest {
         LinuxDoRepository.clearChallengeCooldown()
     }
 
+    @Test fun serverWaitSurvivesChallengeRecoveryAndShorterResponses() = runBlocking {
+        LinuxDoRepository.noteChallengeRateLimitHit("90", shortCooldownMs = 1_800L)
+        LinuxDoRepository.noteRetryAfter("1")
+        LinuxDoRepository.clearChallengeCooldown()
+        LinuxDoRepository.prepareForManualRecovery()
+        assertTrue(LinuxDoRepository.getTransientRateLimitRemainingMs() in 85_000L..90_000L)
+    }
+
     @Test fun androidConcurrentReadsWaitTwoSecondsAndRetryOnlyOnce() = runBlocking {
         val calls = AtomicInteger()
         val times = java.util.Collections.synchronizedList(mutableListOf<Long>())

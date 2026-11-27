@@ -217,17 +217,79 @@ export function useForumImageSrc(
 
 let sharedCookedObserver: IntersectionObserver | null = null;
 
+const MAX_IMAGE_DIM_CACHE = 500;
+const imageNaturalDimCache = new Map<string, { width: number; height: number }>();
+
+export function rememberImageNaturalDimensions(
+  url: string | null | undefined,
+  width: number,
+  height: number
+): void {
+  const key = (url || "").trim();
+  if (!key || !Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return;
+  }
+  const w = Math.round(width);
+  const h = Math.round(height);
+  if (w <= 0 || h <= 0 || w > 20000 || h > 20000) return;
+  if (imageNaturalDimCache.has(key)) {
+    imageNaturalDimCache.delete(key);
+  } else if (imageNaturalDimCache.size >= MAX_IMAGE_DIM_CACHE) {
+    const oldest = imageNaturalDimCache.keys().next().value;
+    if (oldest) imageNaturalDimCache.delete(oldest);
+  }
+  imageNaturalDimCache.set(key, { width: w, height: h });
+}
+
+export function getCachedImageNaturalDimensions(
+  url: string | null | undefined
+): { width: number; height: number } | null {
+  const key = (url || "").trim();
+  if (!key) return null;
+  return imageNaturalDimCache.get(key) ?? null;
+}
+
 export function markCookedImageLoaded(img: HTMLImageElement): void {
   img.classList.remove("lindo-img-loading", "lindo-img-loading-fallback", "lindo-img-error");
   img.removeAttribute("data-lindo-loading");
   img.style.removeProperty("aspect-ratio");
+
+  const nw = img.naturalWidth;
+  const nh = img.naturalHeight;
+  if (nw > 0 && nh > 0) {
+    const canonical = img.getAttribute("data-canonical-src") || img.getAttribute("src");
+    if (canonical && !canonical.startsWith("data:") && !canonical.startsWith("blob:")) {
+      rememberImageNaturalDimensions(canonical, nw, nh);
+    }
+    if (img.classList.contains("lindo-img-sized")) {
+      const declaredAr = Number(img.style.getPropertyValue("--lindo-img-ar"));
+      const actualAr = nw / nh;
+      if (
+        Number.isFinite(declaredAr) &&
+        declaredAr > 0 &&
+        Math.abs(actualAr - declaredAr) / declaredAr > 0.05
+      ) {
+        // Declared HTML dimensions disagreed with real bitmap aspect ratio: release lock to prevent distortion
+        img.classList.remove("lindo-img-sized");
+        img.style.removeProperty("--lindo-img-w");
+        img.style.removeProperty("--lindo-img-ar");
+      }
+    }
+  }
   img.classList.add("lindo-img-loaded");
 }
 
 export function markCookedImageError(img: HTMLImageElement): void {
-  img.classList.remove("lindo-img-loading", "lindo-img-loading-fallback", "lindo-img-loaded");
+  img.classList.remove(
+    "lindo-img-loading",
+    "lindo-img-loading-fallback",
+    "lindo-img-loaded",
+    "lindo-img-sized"
+  );
   img.removeAttribute("data-lindo-loading");
   img.style.removeProperty("aspect-ratio");
+  img.style.removeProperty("--lindo-img-w");
+  img.style.removeProperty("--lindo-img-ar");
   img.classList.add("lindo-img-error");
 }
 

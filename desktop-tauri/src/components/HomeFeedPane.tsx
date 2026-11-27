@@ -361,7 +361,7 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
   useEffect(() => {
     const sentinel = sentinelRef.current;
     const root = scrollRef.current;
-    if (!sentinel || !root || !hasMore || isLoading || isLoadingMore || loadMoreError) return;
+    if (!sentinel || !root || !topics.length || !hasMore || isLoading || isLoadingMore || loadMoreError) return;
     const observer = new IntersectionObserver(
       (entries) => {
         if (entries[0]?.isIntersecting) {
@@ -1203,6 +1203,11 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                     <MascotExpression expression="wink" sizePx={22} className="animate-bounce" />
                     <span>加载更多...</span>
                   </span>
+                ) : topics.length === 0 ? (
+                  <div className="flex items-center gap-3 text-[12px]" style={{ color: "var(--ink-secondary)" }}>
+                    <span>{hasMore ? "这一页没有符合条件的话题" : "暂无话题"}</span>
+                    {hasMore && <button type="button" onClick={onLoadMore} className="lindo-interactive underline">继续加载</button>}
+                  </div>
                 ) : !hasMore && regularTopics.length > 0 ? (
                   <span className="flex items-center gap-2 text-[11.5px]" style={{ color: "var(--ink-tertiary)" }}>
                     <span className="h-[0.5px] w-6" style={{ backgroundColor: "var(--hairline)" }} />

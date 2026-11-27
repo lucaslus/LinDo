@@ -138,11 +138,16 @@ internal object MacBrowserTransport {
     private suspend fun readySession(forceReload: Boolean = false): MacWebSession = bootstrap.withLock {
         val web = attach(true) ?: error("应用内网页不可用")
         seedSession(web)
-        val url = if (forceReload) null else runCatching { (web.evaluate("location.href") as? JsonPrimitive)?.contentOrNull }.getOrNull()
-        if (forceReload || url == "about:blank" || url.isNullOrEmpty() || !url.startsWith("https://linux.do")) {
+        val onSite = !forceReload && (web.evaluate(
+            "location.origin === 'https://linux.do' && document.readyState !== 'loading'", isolated = true
+        ) as? JsonPrimitive)?.booleanOrNull == true
+        if (!onSite) {
+            val navigationId = JsonPrimitive(System.nanoTime().toString())
+            web.evaluate("window.__lindoLeavingDocument = $navigationId", isolated = true)
             web.call("navigate", buildJsonObject { put("url", "https://linux.do/") })
+            val committed = "location.origin === 'https://linux.do' && window.__lindoLeavingDocument !== $navigationId && document.readyState !== 'loading'"
             withTimeout(20_000) {
-                while ((web.evaluate("location.origin === 'https://linux.do' && document.readyState !== 'loading'") as? JsonPrimitive)?.booleanOrNull != true) delay(150)
+                while ((web.evaluate(committed, isolated = true) as? JsonPrimitive)?.booleanOrNull != true) delay(150)
             }
         }
         web
@@ -246,7 +251,7 @@ internal object MacBrowserTransport {
                 if (generation != UserApiKeyAuthManager.sessionGeneration) return@withContext false
                 verificationDiagnostic = "probe-status-${response.first}-challenge-${looksLikeCloudflareChallenge(response.second)}"
                 if (looksLikeCloudflareChallenge(response.second)) {
-                    if (!requestedLogin && !navigatedToChallengedApi && initialUrl != probeTarget) {
+                    if (!panelShown && !requestedLogin && !navigatedToChallengedApi && initialUrl != probeTarget) {
                         navigatedToChallengedApi = true
                         web.call("navigate", buildJsonObject { put("url", probeTarget) })
                         continue
@@ -322,14 +327,14 @@ internal object MacBrowserTransport {
         }
     }
     private suspend fun finish(web: MacWebSession, resetPage: Boolean = false) {
+        web.call("hide")
+        if (resetPage) readySession(forceReload = true)
         persist?.invoke(true)
         DesktopNetworkPolicy.verifying = false
         PlatformSessionRecovery.verifying = false
         LinuxDoRepository.clearChallengeCooldown()
         PlatformSessionRecovery.verificationMessage = null
         lastChallengeUrl = null
-        web.call("hide")
-        if (resetPage) runCatching { web.call("navigate", buildJsonObject { put("url", "https://linux.do/") }) }
         UserApiKeyAuthManager.notifyNetworkRestored()
         javax.swing.SwingUtilities.invokeLater { onReady?.invoke() }
     }

@@ -24,10 +24,14 @@ internal fun webVerificationProbeScript(): String = """
     var hasChallenge = hasWidget ||
         /^(Just a moment|请稍候|Attention Required|Security Check)/i.test(title) ||
         !!document.querySelector('#challenge-running,#challenge-form');
+    var hasStageDom = hasWidget ||
+        !!document.querySelector('.main-wrapper,.main-content,#challenge-body-text,.zone-name-title,#challenge-error-text') ||
+        (document.readyState !== 'loading' && !!document.body && document.body.children.length > 0 && document.body.scrollHeight >= 120);
+    if (hasWidget && !isOrigin404Body) {
+        return result({challenge:true, widget:true, stageDom:true, interactive:hasInteractiveSignal});
+    }
     if (hasChallenge && !isOrigin404Body) {
-        return result(hasWidget
-            ? {challenge:true, widget:true, interactive:hasInteractiveSignal}
-            : {challenge:true, widget:false, interactive:hasInteractiveSignal});
+        return result({challenge:true, widget:false, stageDom:hasStageDom, interactive:hasInteractiveSignal});
     }
     var isCfErrorPage = /^(Something went wrong|Access denied)/i.test(title) ||
         /error code:\s*1034\b/i.test(bodyText);

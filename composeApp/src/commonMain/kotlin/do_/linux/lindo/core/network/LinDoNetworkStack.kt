@@ -1585,9 +1585,6 @@ object LinuxDoRepository {
         return if (cached.isEmpty()) cached else resolveOverlayedNotifications(clean, cached)
     }
 
-    @Volatile
-    private var lastFollowUsedTopicListFallback: Boolean = false
-
     var readTopicsVersion by mutableIntStateOf(0)
         private set
 
@@ -1746,7 +1743,6 @@ object LinuxDoRepository {
         updateCsrfToken(null)
         clearReadTopics()
         followFeedCursors.clear()
-        lastFollowUsedTopicListFallback = false
         userFollowFeedActivityCursors.clear()
         synchronized(badgeCacheLock) {
             cachedUserBadgesByUsername = emptyMap()
@@ -1873,7 +1869,7 @@ object LinuxDoRepository {
         if (!parsed.cookieHeader.isNullOrBlank()) {
             syncCookieHeaderPairsToPlatform(parsed.cookieHeader)
         }
-        clearTransientRateLimit()
+        if (!NetworkRecoveryPolicy.enabled) clearTransientRateLimit()
         clearChallengeCooldown()
         UserApiKeyAuthManager.fullProfileCache = null
 
@@ -1933,7 +1929,7 @@ object LinuxDoRepository {
         }
         if (ingestedAny) {
             UserApiKeyAuthManager.persistSessionQuietly()
-            clearTransientRateLimit()
+            if (!NetworkRecoveryPolicy.enabled) clearTransientRateLimit()
             clearChallengeCooldown()
         }
         return ingestedAny
@@ -2882,7 +2878,7 @@ object LinuxDoRepository {
         val headerMs = if (!retryAfterHeader.isNullOrBlank()) {
             NetworkRecoveryPolicy.retryAfterMillis(retryAfterHeader)
         } else 0L
-        noteRateLimitHit(maxOf(baseMs, headerMs).coerceAtMost(15_000L))
+        noteRateLimitHit(maxOf(baseMs.coerceAtMost(15_000L), headerMs))
     }
 
     private fun noteChallengeHit(cooldownMs: Long = 12_000L) {
@@ -3931,7 +3927,18 @@ object LinuxDoRepository {
         tag: String? = null,
         topPeriod: String? = null,
         background: Boolean = false
-    ): List<TopicSummary> = withContext(Dispatchers.IO) {
+    ): List<TopicSummary> = fetchTopicsPage(path, categoryId, page, tag, topPeriod, background).topics
+
+    data class TopicFeedPage(val topics: List<TopicSummary>, val hasMore: Boolean)
+
+    suspend fun fetchTopicsPage(
+        path: String = "latest.json",
+        categoryId: Int? = null,
+        page: Int = 0,
+        tag: String? = null,
+        topPeriod: String? = null,
+        background: Boolean = false
+    ): TopicFeedPage = withContext(Dispatchers.IO) {
         val sortMode = path.trimStart('/').substringBefore('?').removeSuffix(".json").lowercase()
         val headers = if (background) mapOf("Discourse-Background" to "true") else emptyMap()
         if (sortMode == "follow") {
@@ -3952,9 +3959,8 @@ object LinuxDoRepository {
                 }
                 ""
             } else {
-                val cursor = followFeedCursors["$cursorPrefix$cleanPage"]?.takeIf { it.isNotBlank() }
-                    ?: return@withContext emptyList()
-                "&created_before=${encodeUrlSegment(cursor)}"
+                val cursor = followFeedCursors["$cursorPrefix$cleanPage"] ?: return@withContext TopicFeedPage(emptyList(), false)
+                if (cursor.isEmpty()) "" else "&created_before=${encodeUrlSegment(cursor)}"
             }
             if (!background) {
                 markForegroundPriority(2_200L)
@@ -3985,7 +3991,6 @@ object LinuxDoRepository {
             val root = readApiObject(effectiveRes)
             val postsArr = (root["posts"] as? JsonArray) ?: (root["feed"] as? JsonArray)
             if (postsArr != null) {
-                lastFollowUsedTopicListFallback = false
                 val hasMore = (root["extras"] as? JsonObject)?.get("has_more")?.jsonPrimitive?.booleanOrNull == true
                 val lastCreatedAt = (postsArr.lastOrNull() as? JsonObject)
                     ?.get("created_at")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
@@ -3997,32 +4002,32 @@ object LinuxDoRepository {
                         followFeedCursors.remove(nextKey)
                     }
                 }
-                return@withContext parseFollowPostsIntoTopicSummaries(
+                val topics = parseFollowPostsIntoTopicSummaries(
                     postsArr = postsArr,
                     filterCategoryId = categoryId,
                     filterTag = tag
                 )
+                return@withContext TopicFeedPage(topics, hasMore && lastCreatedAt != null)
             }
             if (root["topic_list"] is JsonObject) {
-                lastFollowUsedTopicListFallback = true
                 val parsed = parseTopicListRoot(root)
-                return@withContext parsed.filter { item ->
+                val hasMore = hasNextTopicListPage(root, parsed.size)
+                if (!background && hasMore) followFeedCursors["$cursorPrefix${cleanPage + 1}"] = ""
+                val topics = parsed.filter { item ->
                     val catOk = categoryId == null || item.categoryId == categoryId ||
                         findCategoryById(item.categoryId)?.parentId == categoryId
                     val tagOk = tag.isNullOrBlank() || item.tags.any { it.equals(tag.trim(), ignoreCase = true) }
                     catOk && tagOk
                 }
+                return@withContext TopicFeedPage(topics, hasMore)
             }
             throw ApiReadException(ApiFailureKind.InvalidPayload)
         }
 
         val sortSuffix = if (sortMode in setOf("top", "new", "unread", "hot")) "/l/$sortMode.json" else ".json"
 
+        val encodedTag = tag?.trim()?.takeIf { it.isNotEmpty() }?.let { encodeUrlSegment(it) }
         val basePath = when {
-            !tag.isNullOrBlank() -> {
-                val encodedTag = encodeUrlSegment(tag.trim())
-                "tag/$encodedTag$sortSuffix"
-            }
             categoryId != null -> {
                 var cat = findCategoryById(categoryId)
                 if (cat != null && !cat.isVerifiedFromServer && syncedCategoriesSessionGen != UserApiKeyAuthManager.sessionGeneration) {
@@ -4049,8 +4054,9 @@ object LinuxDoRepository {
                     cat.isVerifiedFromServer -> "c/${cat.slug}/${cat.id}"
                     else -> "c/${cat.id}"
                 }
-                "$catPrefix$sortSuffix"
+                if (encodedTag == null) "$catPrefix$sortSuffix" else "tags/$catPrefix/$encodedTag$sortSuffix"
             }
+            encodedTag != null -> "tag/$encodedTag$sortSuffix"
             else -> path
         }
 
@@ -4068,23 +4074,14 @@ object LinuxDoRepository {
         val url = "https://linux.do/${basePath.trimStart('/')}$sep${queryParams.joinToString("&")}"
         val root = readApiObject(executeHttp(url = url, extraHeaders = headers, preserveFailure = true))
         (root["topic_list"] as? JsonObject ?: throw ApiReadException(ApiFailureKind.InvalidPayload)).requireArray("topics")
-        parseTopicListRoot(root)
+        val topics = parseTopicListRoot(root)
+        TopicFeedPage(topics, hasNextTopicListPage(root, topics.size))
     }
 
-    fun computeHasMoreTopics(
-        path: String,
-        currentPage: Int,
-        fetchedCount: Int
-    ): Boolean {
-        val cleanMode = path.removePrefix("/").substringBefore(".json").substringBefore("?").lowercase()
-        if (cleanMode == "follow") {
-            if (lastFollowUsedTopicListFallback) return fetchedCount >= 15
-            val uname = UserApiKeyAuthManager.currentUser?.username?.trim()?.lowercase().orEmpty()
-            if (uname.isBlank()) return false
-            val nextKey = "$uname:${currentPage.coerceAtLeast(0) + 1}"
-            return !followFeedCursors[nextKey].isNullOrBlank()
-        }
-        return fetchedCount >= 15
+    private fun hasNextTopicListPage(root: JsonObject, count: Int): Boolean {
+        val list = root["topic_list"] as? JsonObject ?: return false
+        if ("more_topics_url" in list) return !list["more_topics_url"]?.jsonPrimitive?.contentOrNull.isNullOrBlank()
+        return count >= (list["per_page"]?.jsonPrimitive?.intOrNull?.takeIf { it > 0 } ?: 15)
     }
 
     /**
@@ -5871,8 +5868,29 @@ object LinuxDoRepository {
     data class BoostMutationResult(
         val ok: Boolean,
         val boost: PostBoostItem? = null,
-        val errorMessage: String? = null
+        val errorMessage: String? = null,
+        val disableCanBoost: Boolean = false
     )
+
+    internal fun classifyBoostSubmitFailure(rawError: String?): Pair<Boolean, String> {
+        val raw = rawError?.trim().orEmpty()
+        val lower = raw.lowercase()
+        return when {
+            lower.contains("maximum number of boosts") ||
+                lower.contains("post_boost_limit_reached") ||
+                lower.contains("reached the maximum") ||
+                raw.contains("短评已达上限") ||
+                raw.contains("达到上限") -> true to "该楼层短评已达上限"
+            lower.contains("already boosted") ||
+                lower.contains("already_boosted") ||
+                raw.contains("已经发过短评") ||
+                raw.contains("已发过短评") -> true to "你已发过短评"
+            lower.contains("cannot boost") ||
+                lower.contains("not allowed to boost") ||
+                lower.contains("can_boost") -> true to "当前楼层暂不支持发短评"
+            else -> false to (raw.ifBlank { LinDoNetworkCopy.BOOST_SEND_FAILED.text })
+        }
+    }
 
     data class PostReactionSnapshot(
         val myReactionId: String?,
@@ -6219,9 +6237,21 @@ object LinuxDoRepository {
             )
             return@withContext BoostMutationResult(ok = true, boost = resolvedBoost)
         }
+        val rawError = extractActionErrorMessage(res, LinDoNetworkCopy.BOOST_SEND_FAILED.text)
+        val (disableCanBoost, friendlyError) = classifyBoostSubmitFailure(rawError)
+        if (disableCanBoost) {
+            val existing = postBoostSnapshots[postId]?.boosts.orEmpty()
+            putBounded(
+                postBoostSnapshots,
+                postId,
+                PostBoostSnapshot(boosts = existing, canBoost = false),
+                maxEntries = 600
+            )
+        }
         BoostMutationResult(
             ok = false,
-            errorMessage = extractActionErrorMessage(res, LinDoNetworkCopy.BOOST_SEND_FAILED.text)
+            errorMessage = friendlyError,
+            disableCanBoost = disableCanBoost
         )
     }
 
@@ -6943,9 +6973,19 @@ object LinuxDoRepository {
             val mineFromSnap = boostSnap.boosts.filter { it.isBy(account?.userId, account?.username) }
             (othersFromServer + mineFromSnap).distinctBy { it.id }
         }
+        val rawHadMyBoost = rawBoosts.any { it.isBy(account?.userId, account?.username) }
         val alreadyBoostedByMe = finalBoosts.any { it.isBy(account?.userId, account?.username) }
-        val canBoost = boostSnap?.canBoost
-            ?: (pObj["can_boost"]?.jsonPrimitive?.booleanOrNull ?: (!isOwnPost && !alreadyBoostedByMe))
+        val serverCanBoost = pObj["can_boost"]?.jsonPrimitive?.booleanOrNull
+        val canBoost = when {
+            isOwnPost || alreadyBoostedByMe -> false
+            boostSnap != null && !boostSnap.canBoost -> false
+            serverCanBoost != null -> {
+                if (!serverCanBoost && rawHadMyBoost && boostSnap?.canBoost == true) true
+                else serverCanBoost
+            }
+            boostSnap != null -> boostSnap.canBoost
+            else -> false
+        }
         val isRead = when {
             forceRead || alreadyReadInSession || isOwnPost -> true
             rawRead == false -> false
@@ -9427,7 +9467,7 @@ object LinuxDoRepository {
         if (res.first !in 200..299 || looksLikeCloudflareChallenge(res.second)) return@withContext null
         runCatching {
             val obj = json.parseToJsonElement(res.second.removePrefix(CF_MITIGATED_CHALLENGE_PREFIX)).jsonObject
-            obj["id"]?.jsonPrimitive?.intOrNull ?: existingBookmarkId ?: 1
+            obj["id"]?.jsonPrimitive?.intOrNull?.takeIf { it > 0 } ?: existingBookmarkId
         }.getOrNull()
     }
 

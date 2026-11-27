@@ -137,27 +137,18 @@ pub fn start_gateway_with_mode(
     let doh = DohResolver::new()?;
     let upstream = UpstreamPool::new(Arc::clone(&doh))?;
 
-    net_bind::update_network(net_handle, bypass_vpn);
-
     let mut guard = gateway_lock().lock();
-    if let Some(mut old) = guard.take() {
-        old.server.stop();
-    }
-
-    #[cfg(target_os = "linux")]
     let server = GatewayServer::start_on_runtime(
         rt.handle(),
         Arc::clone(&ca),
         Arc::clone(&doh),
         Arc::clone(&upstream),
     )?;
-    #[cfg(not(target_os = "linux"))]
-    let server = rt.block_on(GatewayServer::start(
-        Arc::clone(&ca),
-        Arc::clone(&doh),
-        Arc::clone(&upstream),
-    ))?;
     server.set_route_mode(initial_mode.clone());
+    net_bind::update_network(net_handle, bypass_vpn);
+    if let Some(mut old) = guard.take() {
+        old.server.stop();
+    }
     let port = server.listen_port;
 
     // Warm up DoH ECH + sticky Cloudflare IP asynchronously ONLY when starting in `EchDirect` mode.
@@ -894,6 +885,10 @@ mod tests {
                     assert_eq!(req.uri().authority().map(|a| a.as_str()), Some("linux.do"));
                     assert!(!req.headers().contains_key(http::header::HOST));
                     let pq = req.uri().path_and_query().map(|v| v.as_str()).unwrap_or("/");
+                    if pq == "/restricted" {
+                        return Ok(hyper::Response::builder().status(403).header("content-length", "6")
+                            .body(http_body_util::Full::new(bytes::Bytes::from_static(b"denied"))).unwrap());
+                    }
                     let body = format!("h2-ech:{pq}");
                     Ok::<_, std::convert::Infallible>(hyper::Response::new(
                         http_body_util::Full::new(bytes::Bytes::from(body)),
@@ -968,6 +963,17 @@ mod tests {
                 break;
             }
         }
+
+        // A complete refusal must reach the client without opening another upstream connection.
+        cli_tls.write_all(b"GET /restricted HTTP/1.1\r\nHost: linux.do\r\n\r\n").await.unwrap();
+        let mut refused = Vec::new();
+        while !String::from_utf8_lossy(&refused).contains("denied") {
+            let n = tokio::time::timeout(std::time::Duration::from_secs(5), cli_tls.read(&mut tmp))
+                .await.expect("timed out waiting for the 403").unwrap();
+            assert!(n > 0);
+            refused.extend_from_slice(&tmp[..n]);
+        }
+        assert!(String::from_utf8_lossy(&refused).contains("403 Forbidden"));
 
         // Request 2 reuses the pooled H2 sender on the same upstream connection.
         cli_tls

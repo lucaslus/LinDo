@@ -751,6 +751,14 @@ html:not(.dark) .lindo-cooked ins {
   background: var(--subtle-surface);
 }
 
+/* Keep exact Discourse display size across loading -> loaded (eliminates Retina 2x / 50%-scaled jumps) */
+.lindo-cooked img.lindo-img-sized:not(.emoji):not(.avatar):not(.site-icon) {
+  width: min(100%, var(--lindo-img-w, 100%), calc(440px * var(--lindo-img-ar, 100)));
+  max-width: 100%;
+  height: auto;
+  max-height: 440px;
+}
+
 @keyframes lindo-img-skeleton-shimmer {
   0% {
     background-position: 200% 0;
@@ -802,7 +810,8 @@ html:not(.dark) .lindo-cooked img.lindo-img-loading {
   min-height: 160px;
 }
 
-.lindo-cooked .d-image-grid img.lindo-img-loading {
+.lindo-cooked .d-image-grid img.lindo-img-loading,
+.lindo-cooked .d-image-grid img.lindo-img-sized {
   width: 100%;
   max-height: 280px;
 }
