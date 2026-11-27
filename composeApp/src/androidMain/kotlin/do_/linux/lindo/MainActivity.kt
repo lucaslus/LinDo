@@ -1064,6 +1064,11 @@ class MainActivity : ComponentActivity() {
                     caps?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
                 }.getOrDefault(false)
         }
+        val updatePrefs = prefs
+        AppUpdateManager.lastPromptedRelease = updatePrefs.getString("last_prompted_release", "").orEmpty()
+        AppUpdateManager.persistPromptedRelease = { release ->
+            updatePrefs.edit().putString("last_prompted_release", release).apply()
+        }
         AppUpdateManager.cacheDirProvider = { java.io.File(cacheDir, "updates") }
         activityScope.launch(Dispatchers.IO) {
             AppUpdateManager.cleanupObsoleteCache()
@@ -4931,9 +4936,6 @@ class MainActivity : ComponentActivity() {
                 ensureHealthyApiWebView(forceCheck = true)
                 runOnCookieIo {
                     runCatching { ensureAuthCookiesInWebKit(MainActivity.currentWebViewCookieManager()) }
-                }
-                if (pausedMs >= 15L * 60_000L) {
-                    AppUpdateManager.refreshIfStale()
                 }
             }
         }

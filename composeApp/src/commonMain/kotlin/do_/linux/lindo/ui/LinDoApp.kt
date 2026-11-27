@@ -162,6 +162,7 @@ import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -5098,15 +5099,25 @@ internal fun LinDoApp(
                     )
                 }
 
-                // Silent startup update check on Android devices 4s after launch
-                LaunchedEffect(Unit) {
-                    if (AppUpdateManager.apkInstaller != null && AppUpdateManager.latestInfo == null) {
-                        delay(4000L)
-                        AppUpdateManager.checkForUpdates(openDialogWhenAvailable = false)
+                LaunchedEffect(isAppForeground) {
+                    if (!isAppForeground || AppUpdateManager.apkInstaller == null) return@LaunchedEffect
+                    delay(4000L)
+                    while (isActive) {
+                        AppUpdateManager.refreshIfStale()
+                        delay(AppUpdateManager.CHECK_INTERVAL_MS)
                     }
                 }
-
                 val pendingMobileUpdate = AppUpdateManager.latestInfo
+                val canPromptForUpdate = AppUpdateManager.apkInstaller != null && isAppForeground &&
+                    LocalWindowInfo.current.isWindowFocused &&
+                    !BackNavigationBridge.hasActiveInterceptors && !authCompleting &&
+                    activeWebLoginUrl == null && !showSiteVerifySheet && !showAuthSheet &&
+                    guestLoginPrompt == null && qrLoginSheetMode == null
+                LaunchedEffect(pendingMobileUpdate, canPromptForUpdate) {
+                    if (canPromptForUpdate && pendingMobileUpdate?.hasUpdate == true) {
+                        AppUpdateManager.openDialog(automatic = true)
+                    }
+                }
                 if (AppUpdateManager.dialogVisible && pendingMobileUpdate != null) {
                     LindoAppUpdateDialog(
                         info = pendingMobileUpdate,

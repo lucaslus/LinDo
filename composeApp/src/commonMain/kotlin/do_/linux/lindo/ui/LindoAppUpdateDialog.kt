@@ -71,23 +71,25 @@ internal fun LindoAppUpdateDialog(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    text = buildString {
-                        append("当前 v${info.currentVersionName}")
-                        if (readyToInstall) {
-                            append(" · 安装包已就绪")
-                        } else if (info.sizeBytes > 0L) {
-                            append(" · ${formatMb(info.sizeBytes)}")
-                        }
-                    },
-                    fontSize = 12.5.sp,
-                    color = palette.inkTertiary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+                if (!AppUpdateManager.automaticPrompt) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = buildString {
+                            append("当前 v${info.currentVersionName}")
+                            if (readyToInstall) {
+                                append(" · 安装包已就绪")
+                            } else if (info.sizeBytes > 0L) {
+                                append(" · ${formatMb(info.sizeBytes)}")
+                            }
+                        },
+                        fontSize = 12.5.sp,
+                        color = palette.inkTertiary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
 
-                if (info.notes.isNotEmpty()) {
+                if (!AppUpdateManager.automaticPrompt && info.notes.isNotEmpty()) {
                     Spacer(Modifier.height(14.dp))
                     Box(
                         modifier = Modifier
@@ -248,7 +250,7 @@ internal fun LindoAppUpdateDialog(
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
-                                text = if (readyToInstall) "立即安装" else "立即更新",
+                                text = if (readyToInstall) "立即安装" else "下载更新",
                                 fontSize = 13.5.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = palette.publishBtnContent,

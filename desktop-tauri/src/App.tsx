@@ -2,13 +2,13 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, us
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { useUpdatePrompt } from "./lib/useUpdatePrompt";
 import { initialVerificationStatus, verificationStatus, type VerifyPillEvent } from "./lib/verificationStatus";
 import { LinDoIcons } from "./components/LinDoIcons";
 import { ensureGlobalImeTracking, isImeComposingEvent } from "./lib/imeGuard";
 import type {
   CategoryMeta,
   ComposerLaunchRequest,
-  DesktopUpdateInfo,
   EchDesktopSnapshot,
   FeedSort,
   GrantedBadge,
@@ -26,7 +26,6 @@ import type {
 import {
   addAccountWebLoginInRust,
   bootstrapApp,
-  checkAppUpdateInRust,
   clearExpiredNoticeInRust,
   downloadAndInstallUpdateInRust,
   drainPendingMarkReads,
@@ -301,13 +300,20 @@ export const App: React.FC = () => {
   const lastFeedSyncedAtRef = useRef<number>(Date.now());
   const backgroundPollInFlightRef = useRef(false);
 
-  // Smooth Check-for-Updates & One-Click Upgrade state
-  const [updateInfo, setUpdateInfo] = useState<DesktopUpdateInfo | null>(null);
-  const [checkingUpdate, setCheckingUpdate] = useState(false);
-  const [showUpdateModal, setShowUpdateModal] = useState(false);
+  const update = useUpdatePrompt(
+    bootstrapped,
+    !composerReq && !showAuthModal && !showQrLoginModal && !guestPrompt && !authCompleting && !verifyActive,
+    setGlobalNotice
+  );
+  const updateInfo = update.info;
   const [installingUpdate, setInstallingUpdate] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<UpdateProgressPayload | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);
+  const closeUpdate = useCallback(() => {
+    if (installingUpdate) return;
+    setUpdateError(null);
+    update.close();
+  }, [installingUpdate, update.close]);
 
   const isDark = useMemo(() => {
     if (preferences.appearance === "light") return false;
@@ -1381,15 +1387,6 @@ export const App: React.FC = () => {
             .catch(() => {});
         }
 
-        // Silent background check for updates 3.5s after launch
-        setTimeout(() => {
-          if (cancelled) return;
-          checkAppUpdateInRust()
-            .then((info) => {
-              if (!cancelled) setUpdateInfo(info);
-            })
-            .catch(() => {});
-        }, 3500);
       }
     })();
 
@@ -1700,6 +1697,13 @@ export const App: React.FC = () => {
         invoke("quit_app").catch(() => {});
         return;
       }
+      if (update.prompt) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          closeUpdate();
+        }
+        return;
+      }
       if (mod && e.key === "\\" && inMainApp && isWideLayout && (currentTab === "HOME" || currentTab === "MESSAGES")) {
         e.preventDefault();
         toggleFeedCollapse();
@@ -1740,7 +1744,6 @@ export const App: React.FC = () => {
         else if (inspectedBadge) setInspectedBadge(null);
         else if (showSiteBadgesModal) setShowSiteBadgesModal(false);
         else if (inspectedUsername) setInspectedUsername(null);
-        else if (showUpdateModal && !installingUpdate) setShowUpdateModal(false);
         else if (showGlobalSearch) setShowGlobalSearch(false);
         else if (guestPrompt) setGuestPrompt(null);
         else if (showLogoutConfirm) setShowLogoutConfirm(false);
@@ -1774,8 +1777,8 @@ export const App: React.FC = () => {
     showSiteBadgesModal,
     inspectedBadge,
     inspectedUsername,
-    showUpdateModal,
-    installingUpdate,
+    update.prompt,
+    closeUpdate,
     showGlobalSearch,
     guestPrompt,
     showLogoutConfirm,
@@ -1996,38 +1999,6 @@ export const App: React.FC = () => {
     });
   }, [preferences, isDark, updatePreferences]);
 
-  const handleManualCheckUpdate = useCallback(async () => {
-    if (checkingUpdate) return;
-    setCheckingUpdate(true);
-    setUpdateError(null);
-    try {
-      const info = await checkAppUpdateInRust();
-      setUpdateInfo(info);
-      diagLog(
-        "INFO",
-        "SYSTEM",
-        "GitHubUpdate",
-        info.hasUpdate
-          ? `发现 GitHub Release 新版本 v${info.latestVersion}`
-          : `GitHub Release 检查完成，当前已是最新 v${info.currentVersion}`
-      );
-      if (info.hasUpdate) {
-        setShowUpdateModal(true);
-      } else {
-        setGlobalNotice("已是最新版本");
-      }
-    } catch (err: any) {
-      diagLog("WARN", "SYSTEM", "GitHubUpdate", "检查 GitHub Release 失败", String(err?.message || err));
-      if (updateInfo?.hasUpdate) {
-        setShowUpdateModal(true);
-      } else {
-        setGlobalNotice(err?.message || "检查更新失败，请稍后重试");
-      }
-    } finally {
-      setCheckingUpdate(false);
-    }
-  }, [checkingUpdate, updateInfo]);
-
   const handleStartInstallUpdate = useCallback(async () => {
     if (!updateInfo || installingUpdate) return;
     setInstallingUpdate(true);
@@ -2041,16 +2012,14 @@ export const App: React.FC = () => {
     });
     try {
       const result = await downloadAndInstallUpdateInRust(updateInfo);
-      if (result === "OPENED_DMG") {
-        setInstallingUpdate(false);
-        setShowUpdateModal(false);
-        setGlobalNotice("安装包已打开，拖入「应用程序」即可完成更新");
-      }
+      update.close();
+      setGlobalNotice(result === "opened_dmg" ? "安装包已打开，拖入「应用程序」即可更新" : "更新包已就绪");
     } catch (err: any) {
+      setUpdateError(err?.message || "更新失败，请重试");
+    } finally {
       setInstallingUpdate(false);
-      setUpdateError(err?.message || "自动更新失败，请重试");
     }
-  }, [updateInfo, installingUpdate]);
+  }, [updateInfo, installingUpdate, update.close]);
 
   // 120fps DOM-direct resizable split divider drag (ZERO React re-renders during mousemove!)
   const splitContainerRef = useRef<HTMLDivElement | null>(null);
@@ -2393,11 +2362,10 @@ export const App: React.FC = () => {
                 onDraftsChanged={() => syncFromRustState()}
                 onProfileUpdated={() => syncFromRustState()}
                 updateInfo={updateInfo}
-                checkingUpdate={checkingUpdate}
-                onCheckUpdate={handleManualCheckUpdate}
-                onOpenUpdateModal={() => {
+                checkingUpdate={update.checking}
+                onCheckUpdate={() => {
                   setUpdateError(null);
-                  setShowUpdateModal(true);
+                  void update.checkManually();
                 }}
                 onOpenMessages={() => setCurrentTab("MESSAGES")}
                 echStatus={echStatus}
@@ -3117,16 +3085,15 @@ export const App: React.FC = () => {
       )}
 
       {/* 客户端新版本下载升级弹窗 */}
-      {showUpdateModal && updateInfo && (
+      {update.prompt && updateInfo && (
         <DesktopUpdateModal
           info={updateInfo}
+          compact={update.prompt === "automatic"}
           installing={installingUpdate}
           progress={updateProgress}
           error={updateError}
           onStartInstall={handleStartInstallUpdate}
-          onClose={() => {
-            if (!installingUpdate) setShowUpdateModal(false);
-          }}
+          onClose={closeUpdate}
         />
       )}
 

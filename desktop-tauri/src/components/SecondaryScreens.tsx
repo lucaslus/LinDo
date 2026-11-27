@@ -3597,7 +3597,6 @@ export const ProfileSettingsView: React.FC<{
   updateInfo?: DesktopUpdateInfo | null;
   checkingUpdate?: boolean;
   onCheckUpdate?: () => void;
-  onOpenUpdateModal?: () => void;
   onOpenMessages?: () => void;
   echStatus?: EchDesktopSnapshot | null;
   onRefreshEchStatus?: () => void;
@@ -3633,7 +3632,6 @@ export const ProfileSettingsView: React.FC<{
   updateInfo,
   checkingUpdate = false,
   onCheckUpdate,
-  onOpenUpdateModal,
   onOpenMessages,
   echStatus,
   onRefreshEchStatus,
@@ -10265,12 +10263,13 @@ function sanitizeDesktopUpdateNotes(rawNotes: string[]): string[] {
 
 export const DesktopUpdateModal: React.FC<{
   info: DesktopUpdateInfo;
+  compact: boolean;
   installing: boolean;
   progress: UpdateProgressPayload | null;
   error: string | null;
   onStartInstall: () => void;
   onClose: () => void;
-}> = ({ info, installing, progress, error, onStartInstall, onClose }) => {
+}> = ({ info, compact, installing, progress, error, onStartInstall, onClose }) => {
   const cleanNotes = useMemo(() => sanitizeDesktopUpdateNotes(info.notes || []), [info.notes]);
   const pct = Math.max(2, Math.min(100, progress?.percent ?? 2));
 
@@ -10282,6 +10281,7 @@ export const DesktopUpdateModal: React.FC<{
       }}
     >
       <div
+        role="dialog" aria-modal="true" aria-labelledby="desktop-update-title"
         className="w-[360px] max-w-full rounded-2xl p-5 shadow-2xl"
         style={{
           backgroundColor: "var(--card-surface)",
@@ -10289,14 +10289,14 @@ export const DesktopUpdateModal: React.FC<{
         }}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="text-[16px] font-semibold leading-snug" style={{ color: "var(--ink-primary)" }}>
+        <div id="desktop-update-title" className="text-[16px] font-semibold leading-snug" style={{ color: "var(--ink-primary)" }}>
           发现新版本 v{info.latestVersion}
         </div>
-        <div className="mt-1 text-[12.5px]" style={{ color: "var(--ink-tertiary)" }}>
+        {!compact && <div className="mt-1 text-[12.5px]" style={{ color: "var(--ink-tertiary)" }}>
           当前 v{info.currentVersion}
-        </div>
+        </div>}
 
-        {cleanNotes.length > 0 && (
+        {!compact && cleanNotes.length > 0 && (
           <>
             <div className="my-3.5 h-[0.5px] w-full" style={{ backgroundColor: "var(--hairline)" }} />
             <div
@@ -10400,7 +10400,7 @@ export const DesktopUpdateModal: React.FC<{
                   color: "var(--publish-btn-fg)",
                 }}
               >
-                立即更新
+                下载更新
               </button>
             </div>
           )}

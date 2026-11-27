@@ -12,6 +12,7 @@ import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URI
 import java.security.MessageDigest
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -76,6 +77,11 @@ object AppUpdateManager {
     var dialogVisible by mutableStateOf(false)
         private set
 
+    var automaticPrompt by mutableStateOf(false)
+        private set
+    internal var lastPromptedRelease = ""
+    internal var persistPromptedRelease: (String) -> Unit = {}
+
     var cachedApkReady by mutableStateOf(false)
         private set
 
@@ -126,15 +132,25 @@ object AppUpdateManager {
         }
     }
 
-    suspend fun refreshIfStale(maxAgeMs: Long = 30L * 60_000L) {
-        if (apkInstaller == null || checking || downloading) return
+    const val CHECK_INTERVAL_MS = 30L * 60_000L
+
+    suspend fun refreshIfStale(maxAgeMs: Long = CHECK_INTERVAL_MS) {
+        if (apkInstaller == null || checking || downloading || dialogVisible) return
         val now = System.currentTimeMillis()
         if (now - lastCheckedAtEpochMs < maxAgeMs) return
         checkForUpdates(openDialogWhenAvailable = false)
     }
 
-    fun openDialog() {
+    fun openDialog(automatic: Boolean = false) {
+        val info = latestInfo?.takeIf { it.hasUpdate } ?: return
+        val release = "${info.latestVersionName}:${info.latestVersionCode}"
+        if (automatic && (dialogVisible || release == lastPromptedRelease)) return
+        if (release != lastPromptedRelease) {
+            lastPromptedRelease = release
+            persistPromptedRelease(release)
+        }
         runUiSafeStateWrite {
+            automaticPrompt = automatic
             errorMessage = null
             dialogVisible = true
         }
@@ -153,7 +169,10 @@ object AppUpdateManager {
         apiEndpointOverride: String? = null
     ): Result<MobileUpdateInfo> {
         if (checking) {
-            latestInfo?.let { return Result.success(it) }
+            latestInfo?.let {
+                if (openDialogWhenAvailable) openDialog()
+                return Result.success(it)
+            }
         }
         runUiSafeStateWrite {
             checking = true
@@ -228,33 +247,26 @@ object AppUpdateManager {
                     conn.disconnect()
                 }
             }
-            lastCheckedAtEpochMs = System.currentTimeMillis()
             withContext(Dispatchers.IO) {
                 cleanupObsoleteCache(keepLatest = info)
             }
             runUiSafeStateWrite {
                 latestInfo = info
-                if (openDialogWhenAvailable && info.hasUpdate) {
-                    errorMessage = null
-                    dialogVisible = true
-                } else if (!info.hasUpdate) {
-                    dialogVisible = false
-                }
+                if (!info.hasUpdate) dialogVisible = false
             }
+            lastCheckedAtEpochMs = System.currentTimeMillis()
+            if (openDialogWhenAvailable) openDialog()
             Result.success(info)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (t: Throwable) {
+            lastCheckedAtEpochMs = System.currentTimeMillis()
             LinDoDiagnosticLogger.warn(
                 category = DiagnosticCategory.SYSTEM,
                 tag = "AppUpdate",
                 message = "GitHub Release 检查更新未成功: ${t.message ?: t::class.simpleName}"
             )
-            val fallback = latestInfo
-            if (openDialogWhenAvailable && fallback != null && fallback.hasUpdate) {
-                runUiSafeStateWrite {
-                    errorMessage = null
-                    dialogVisible = true
-                }
-            }
+            if (openDialogWhenAvailable) openDialog()
             Result.failure(t)
         } finally {
             runUiSafeStateWrite {
