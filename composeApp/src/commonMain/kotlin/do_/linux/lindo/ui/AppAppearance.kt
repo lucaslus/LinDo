@@ -37,6 +37,8 @@ enum class VerificationDialogResult { Passed, Dismissed, Expired, Unavailable }
 
 /** Native browser adapters provide capabilities, never a different product design. */
 object PlatformSessionRecovery {
+    internal val forumConnection = do_.linux.lindo.core.network.AndroidForumConnection()
+    internal var checkForumConnection: (suspend (explicitRetry: Boolean) -> Boolean)? = null
     var loginSession: (suspend () -> Boolean)? = null
     var verifySession: (suspend () -> Boolean)? = null
     var verificationMessage by mutableStateOf<String?>(null)

@@ -85,6 +85,8 @@ class PreLaunchFullAppUiE2ETest {
 
     private fun resetGlobalSingletons() {
         do_.linux.lindo.core.network.SavedAccounts.resetForTest()
+        PlatformSessionRecovery.checkForumConnection = null
+        PlatformSessionRecovery.forumConnection.reset()
         PlatformWebLoginHost.webLoginRenderer = null
         PlatformMediaPicker.launchPicker = null
         PlatformMediaPicker.webViewBinaryUploadExecutor = null
@@ -730,6 +732,44 @@ class PreLaunchFullAppUiE2ETest {
 
         waitUntil(timeoutMillis = 5_000L) { !UserApiKeyAuthManager.isAuthorized() }
         waitForText("登录 Lindo")
+    }
+
+    @Test
+    fun verifiedWindowClosesWhileReaderWaitsAndRetryLeavesCurrentTopicOpen() = runDesktopComposeUiTest(width = 430, height = 820) {
+        val response = kotlinx.coroutines.CompletableDeferred<Pair<Int, String>?>()
+        val results = java.util.concurrent.CopyOnWriteArrayList<VerificationDialogResult>()
+        var checks = 0
+        PlatformSessionRecovery.checkForumConnection = { explicit ->
+            val generation = UserApiKeyAuthManager.sessionGeneration
+            PlatformSessionRecovery.forumConnection.check(generation, null, explicit, { generation }, { false }) {
+                checks++
+                if (explicit) 200 to """{"topic_list":{"topics":[]}}""" else response.await()
+            }
+        }
+        PlatformWebLoginHost.webLoginRenderer = { _, _, pass ->
+            androidx.compose.material3.TextButton(onClick = pass) { androidx.compose.material3.Text("测试完成站点验证") }
+        }
+        setContent { LinDoApp(systemAnimationsEnabled = false) }
+        waitForText("先逛逛")
+        onNodeWithText("先逛逛").edtClick()
+        val title = "Lindo 预发版全功能自动化巡检主贴"
+        waitForText(title)
+        onNodeWithText(title).edtClick()
+        waitForText("话题")
+        onEdt { PlatformSessionRecovery.openEmbeddedVerifyModal!!.invoke { results.add(it) } }
+        waitForText("测试完成站点验证")
+        onNodeWithText("测试完成站点验证").edtClick()
+        waitForTextGone("测试完成站点验证")
+        waitForText("正在恢复连接…")
+        assertTrue(results.isEmpty())
+        onEdt { response.complete(null) }
+        waitForText("连接未恢复 · 重试连接")
+        assertEquals(listOf(VerificationDialogResult.Unavailable), results.toList())
+        onNodeWithText("连接未恢复 · 重试连接").edtClick()
+        waitForTextGone("连接未恢复 · 重试连接")
+        waitForText("话题")
+        assertEquals(2, checks)
+        assertEquals(0, onAllNodesWithText("测试完成站点验证").edtCount())
     }
 
     @Test

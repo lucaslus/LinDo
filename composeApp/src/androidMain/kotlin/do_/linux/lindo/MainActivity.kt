@@ -1,6 +1,10 @@
 package do_.linux.lindo
 
 import do_.linux.lindo.ui.VerificationDialogResult
+import do_.linux.lindo.ui.PlatformSessionRecovery
+import do_.linux.lindo.core.network.AndroidForumRead
+import do_.linux.lindo.core.network.AndroidVerificationTarget
+import do_.linux.lindo.core.network.ForumConnectionStage
 import coil3.disk.directory
 import do_.linux.lindo.core.network.SavedAccounts
 import do_.linux.lindo.core.network.AccountSessionGate
@@ -389,6 +393,8 @@ class MainActivity : ComponentActivity() {
     private var debugPreviewGeneration by mutableStateOf(0)
 
     internal val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val verificationTarget = AndroidVerificationTarget()
+    private var passedWebSession: Long? = null
     private val iconManager by lazy { AndroidAppIconManager(this) }
 
     private val prefs by lazy {
@@ -1286,6 +1292,7 @@ class MainActivity : ComponentActivity() {
         do_.linux.lindo.ui.PlatformSessionRecovery.verifySession = {
             verifyInteractiveChallengeSession()
         }
+        PlatformSessionRecovery.checkForumConnection = ::checkVerifiedForumConnection
         do_.linux.lindo.ui.PlatformSessionRecovery.onExpandVerifyPill = {
             do_.linux.lindo.core.network.NetworkPolicyEngine.clearUserDismissedVerify()
             if (do_.linux.lindo.core.network.NetworkPolicyEngine.verifyCoordinator.isActive()) {
@@ -1319,6 +1326,7 @@ class MainActivity : ComponentActivity() {
             }
         }
         UserApiKeyAuthManager.onLogoutPlatformClear = {
+            activityScope.launch(Dispatchers.Main.immediate) { passedWebSession = null; PlatformSessionRecovery.forumConnection.reset() }
             runCatching {
                 // 仅清除 Discourse 账号会话 Cookie (_t / _forum_session / authentication_data)，保留 Cloudflare 信任通行证 (cf_clearance / __cf_bm / _cfuvid)
                 val cm = MainActivity.currentWebViewCookieManager()
@@ -1399,6 +1407,7 @@ class MainActivity : ComponentActivity() {
                     NetworkRecoveryPolicy.androidVerifying = false
                     MainActivity.discardHandoffVerifyWebView()
                     if (isVerifyUrl) {
+                        PlatformSessionRecovery.forumConnection.discardUnfinishedVerification()
                         onDismiss()
                         return@dismissed
                     }
@@ -1465,6 +1474,7 @@ class MainActivity : ComponentActivity() {
                         runCatching { ensureAuthCookiesInWebKit(cm) }
                         persistSessionToDisk()
                     }
+                    if (isVerifyUrl) passedWebSession = modalSessionNonce
                     onLoginSuccess()
                 },
                 onLaunchFileChooser = ::launchWebFileChooser
@@ -2129,9 +2139,7 @@ class MainActivity : ComponentActivity() {
                         val cfHdr = errorResponse?.responseHeaders?.entries?.firstOrNull {
                             it.key.equals("cf-mitigated", ignoreCase = true)
                         }?.value.orEmpty()
-                        if (status in setOf(403, 503) &&
-                            (cfHdr.contains("challenge", ignoreCase = true) || status == 403)
-                        ) {
+                        if (status in setOf(403, 429, 503) && cfHdr.equals("challenge", ignoreCase = true)) {
                             apiWebViewBootstrapChallenged = true
                             // 若当前已处于同源文档，立即停止后台挑战子资源与脚本自刷新
                             if (do_.linux.lindo.core.network.AndroidWebViewBridgeContract.isValidLinuxDoDocumentUrl(view?.url)) {
@@ -2395,6 +2403,38 @@ class MainActivity : ComponentActivity() {
     @Volatile
     private var lastPrewarmFinishedAtMs: Long = 0L
 
+    private suspend fun checkVerifiedForumConnection(explicitRetry: Boolean): Boolean = withContext(Dispatchers.Main.immediate) {
+        val generation = UserApiKeyAuthManager.sessionGeneration
+        val round = do_.linux.lindo.core.network.NetworkPolicyEngine.verifyCoordinator.currentRound()
+        val modalSession = passedWebSession
+        var bootstrapNeedsVerification = false
+        PlatformSessionRecovery.forumConnection.check(
+            generation, verificationTarget.get(round, generation), explicitRetry,
+            { UserApiKeyAuthManager.sessionGeneration }, { reply -> bootstrapNeedsVerification || isChallengeResponse(reply) }
+        ) { request ->
+            try {
+                // The persistent Android WebView needs a committed forum document to issue a same-origin read.
+                when {
+                    LinuxDoRepository.isRateLimitedNow() -> null
+                    !refreshApiWebViewOriginAfterVerify() -> {
+                        bootstrapNeedsVerification = apiWebViewBootstrapChallenged
+                        null
+                    }
+                    else -> executeHttpViaWebViewBridge(request.url, "GET", null, request.headers,
+                        allowSilentChallengeRetry = false, allowOriginLostRetry = false)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                null
+            }
+        }.also {
+            if (it && passedWebSession == modalSession) passedWebSession = null
+            LinDoDiagnosticLogger.info(DiagnosticCategory.NETWORK, "SiteVerify",
+                "Forum connection result (session=${modalSession ?: "background"}, round=$round, ready=$it, retry=$explicitRetry, stage=${PlatformSessionRecovery.forumConnection.stage})")
+        }
+    }
+
     /**
      * 前台静默 `/challenge` 预检与按需主动升舱：
      * - 浏览器自动过盾时 0 胶囊、0 弹窗；
@@ -2531,6 +2571,7 @@ class MainActivity : ComponentActivity() {
      */
     private suspend fun verifyInteractiveChallengeSession(): Boolean {
         if (isFinishing || isDestroyed) return false
+        if (PlatformSessionRecovery.forumConnection.stage != ForumConnectionStage.Idle) return false
         do_.linux.lindo.core.network.NetworkPolicyEngine.clearUserDismissedVerify()
         val callerDeadline = kotlin.coroutines.coroutineContext[do_.linux.lindo.core.network.ActiveCallDeadlineContext]?.deadline
         val coordinator = do_.linux.lindo.core.network.NetworkPolicyEngine.verifyCoordinator
@@ -2554,7 +2595,8 @@ class MainActivity : ComponentActivity() {
                     try {
                         val result = awaitEmbeddedVerificationModal()
                         passed = result == VerificationDialogResult.Passed
-                        abandoned = result == VerificationDialogResult.Expired || result == VerificationDialogResult.Dismissed
+                        abandoned = result == VerificationDialogResult.Expired || result == VerificationDialogResult.Dismissed ||
+                            PlatformSessionRecovery.forumConnection.stage != ForumConnectionStage.Idle
                     } catch (ce: CancellationException) {
                         abandoned = true
                         throw ce
@@ -2593,9 +2635,11 @@ class MainActivity : ComponentActivity() {
         previousClearance: String? = null,
         trigger: do_.linux.lindo.core.network.SilentVerifyTrigger = do_.linux.lindo.core.network.SilentVerifyTrigger.FOREGROUND,
         reason: String = "foreground_challenge",
-        isForegroundWrite: Boolean = false
+        isForegroundWrite: Boolean = false,
+        originalRead: AndroidForumRead? = null
     ): Boolean {
         val isForegroundCaller = trigger == do_.linux.lindo.core.network.SilentVerifyTrigger.FOREGROUND
+        if (PlatformSessionRecovery.forumConnection.stage != ForumConnectionStage.Idle) return false
         if (isFinishing || isDestroyed || (!isForegroundCaller && LinuxDoRepository.isRateLimitedNow())) return false
         val callerDeadline = kotlin.coroutines.coroutineContext[do_.linux.lindo.core.network.ActiveCallDeadlineContext]?.deadline
         val coordinator = do_.linux.lindo.core.network.NetworkPolicyEngine.verifyCoordinator
@@ -2621,12 +2665,14 @@ class MainActivity : ComponentActivity() {
                 is do_.linux.lindo.core.network.VerifyJoin.RecentPass -> return true
                 is do_.linux.lindo.core.network.VerifyJoin.Follower -> {
                     // 前台请求加入进行中的预热轮次：把该轮升级为前台语义（可显示胶囊 / 需人工时展开面板）
+                    verificationTarget.offer(decision.round, UserApiKeyAuthManager.sessionGeneration, originalRead)
                     if (isForegroundCaller) silentForegroundJoinedAtMs.compareAndSet(0L, System.currentTimeMillis())
                     if (isForegroundWrite) silentForegroundWriteJoined.set(true)
                     return decision.deferred.await().passed
                 }
             }
             val startAt = System.currentTimeMillis()
+            verificationTarget.offer(activeRound, UserApiKeyAuthManager.sessionGeneration, originalRead)
             if (isForegroundCaller) silentForegroundJoinedAtMs.compareAndSet(0L, startAt)
             if (isForegroundWrite) silentForegroundWriteJoined.set(true)
 
@@ -2974,7 +3020,8 @@ class MainActivity : ComponentActivity() {
                             finalPres = do_.linux.lindo.core.network.VerifyPresentation.BLOCKING
                             val result = awaitEmbeddedVerificationModal()
                             foregroundDialogPassed = result == VerificationDialogResult.Passed
-                            abandoned = result == VerificationDialogResult.Expired || result == VerificationDialogResult.Dismissed
+                            abandoned = result == VerificationDialogResult.Expired || result == VerificationDialogResult.Dismissed ||
+                                PlatformSessionRecovery.forumConnection.stage != ForumConnectionStage.Idle
                             outcome = when (result) {
                                 VerificationDialogResult.Passed -> "passed_after_escalate:${step.reason}"
                                 VerificationDialogResult.Expired -> "abandoned:dialog_expired"
@@ -3056,7 +3103,7 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
-                if (succeeded && !foregroundDialogPassed && !refreshApiWebViewOriginAfterVerify()) {
+                if (succeeded && !foregroundDialogPassed && !checkVerifiedForumConnection(false)) {
                     succeeded = false
                     abandoned = true
                     outcome = "abandoned:connection_not_ready"
@@ -3089,6 +3136,7 @@ class MainActivity : ComponentActivity() {
                         do_.linux.lindo.ui.PlatformSessionRecovery.verifyPillVisible = false
                     }
                 }
+                verificationTarget.release(activeRound)
                 coordinator.finishFlight(
                     round = activeRound,
                     passed = succeeded,
@@ -3427,9 +3475,9 @@ class MainActivity : ComponentActivity() {
             val rawZero = bridgeResult!!.second
             if (rawZero.startsWith("[BRIDGE_DIAG:origin_lost]")) {
                 apiWebViewOriginHealthy = false
-                if (UserPresenceService.isForeground && !isFinishing && !isDestroyed) {
+                if (allowOriginLostRetry && UserPresenceService.isForeground && !isFinishing && !isDestroyed) {
                     val restored = refreshApiWebViewOriginAfterVerify(forceReload = true)
-                    if (restored && allowOriginLostRetry && isRead && !url.contains("/session/otp/", ignoreCase = true)) {
+                    if (restored && isRead && !url.contains("/session/otp/", ignoreCase = true)) {
                         return executeHttpViaWebViewBridge(
                             url = url,
                             method = method,
@@ -3512,13 +3560,16 @@ class MainActivity : ComponentActivity() {
                 .substringBefore('?')
                 .ifBlank { "/" }
             val triggerReason = (if (isRead) "foreground_read:" else "foreground_write:") + "${method.uppercase()} $cleanPath"
+            val originalRead = AndroidForumRead.fromRequest(url, method, headers)
             if (silentRevalidateChallenge(
                     previousClearance = staleCf,
                     trigger = do_.linux.lindo.core.network.SilentVerifyTrigger.FOREGROUND,
                     reason = triggerReason,
-                    isForegroundWrite = !isRead
+                    isForegroundWrite = !isRead,
+                    originalRead = originalRead
                 )
             ) {
+                originalRead?.response?.let { return it }
                 val passedRound = do_.linux.lindo.core.network.NetworkPolicyEngine.verifyCoordinator.lastPassedRound()
                 val replayResult = executeHttpViaWebViewBridge(
                     url = url,
@@ -4171,6 +4222,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private suspend fun replaceAccountCookies(raw: String) = withContext(Dispatchers.Main) {
+        passedWebSession = null
+        PlatformSessionRecovery.forumConnection.reset()
         val cm = MainActivity.currentWebViewCookieManager()
         nukeAuthCookieVariantsInWebKit(cm)
         suspend fun set(origin: String, value: String) = suspendCancellableCoroutine<Unit> { continuation ->
@@ -4823,6 +4876,8 @@ class MainActivity : ComponentActivity() {
             PlatformQrScanner.pickImageAndDecodeQr = null
             UserApiKeyAuthManager.onRequestClearancePrewarm = null
             do_.linux.lindo.ui.PlatformSessionRecovery.verifySession = null
+            PlatformSessionRecovery.checkForumConnection = null
+            PlatformSessionRecovery.forumConnection.reset()
             do_.linux.lindo.ui.PlatformSessionRecovery.onExpandVerifyPill = null
         }
         apiWebView?.let { releaseNativeWebView(it) }
@@ -5240,7 +5295,6 @@ private fun AndroidWebLoginModal(
     var rendererGone by remember { mutableStateOf(false) }
     var pendingUrl by remember { mutableStateOf<String?>(null) }
     var initialLoadDispatched by remember(initialUrl, sessionNonce) { mutableStateOf(false) }
-    val modalScope = androidx.compose.runtime.rememberCoroutineScope()
     val isDark = LocalLinDoDarkTheme.current
     val modalKeyboardController = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
     val modalFocusManager = androidx.compose.ui.platform.LocalFocusManager.current
@@ -5274,35 +5328,9 @@ private fun AndroidWebLoginModal(
         modalWebViewGeneration++
     }
 
-    var restoringConnection by remember { mutableStateOf(false) }
-    fun restoreConnection() {
-        if (restoringConnection) return
-        restoringConnection = true
-        pageLoadError = null
-        modalScope.launch {
-            try {
-                val act = MainActivity.activeInstance
-                if (act != null && act.refreshApiWebViewOriginAfterVerify()) {
-                    do_.linux.lindo.core.network.NetworkPolicyEngine.cf429Classifier.reset()
-                    do_.linux.lindo.core.network.NetworkPolicyEngine.backgroundChallengeTracker.reset()
-                    LinDoDiagnosticLogger.info(DiagnosticCategory.AUTH, "SiteVerify", "Request channel ready (session=$sessionNonce)")
-                    onLoginSuccess()
-                } else {
-                    pageLoadError = "验证已完成，连接尚未恢复。可以重试连接或返回帖子。"
-                }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Exception) {
-                pageLoadError = "验证已完成，暂时连不上站点，请重试连接"
-            } finally {
-                restoringConnection = false
-            }
-        }
-    }
-
     fun retryPage() {
         if (isVerificationFlow) {
-            if (completed) restoreConnection() else reloadVerificationPage()
+            if (!completed) reloadVerificationPage()
             return
         }
         val view = webViewRef
@@ -5376,7 +5404,7 @@ private fun AndroidWebLoginModal(
             MainActivity.mirrorActiveCookiesToDefaultProfile()
             UserApiKeyAuthManager.persistSessionQuietly()
         }
-        restoreConnection()
+        onLoginSuccess()
     }
 
     fun handleUserDismiss() = onDismiss()
@@ -5776,7 +5804,12 @@ private fun AndroidWebLoginModal(
 
     DisposableEffect(isVerificationFlow) {
         if (isVerificationFlow) NetworkRecoveryPolicy.androidVerifying = true
-        onDispose { if (isVerificationFlow) NetworkRecoveryPolicy.androidVerifying = false }
+        onDispose {
+            if (isVerificationFlow) {
+                NetworkRecoveryPolicy.androidVerifying = false
+                LinDoDiagnosticLogger.info(DiagnosticCategory.AUTH, "SiteVerify", "Verification window closed (session=$sessionNonce, completed=$completed)")
+            }
+        }
     }
 
     DisposableEffect(Unit) {

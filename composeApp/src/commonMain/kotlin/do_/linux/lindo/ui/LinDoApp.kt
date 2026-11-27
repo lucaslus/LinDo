@@ -1,6 +1,7 @@
 package do_.linux.lindo.ui
 
 import do_.linux.lindo.core.update.AppUpdateManager
+import do_.linux.lindo.core.network.ForumConnectionStage
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
@@ -2056,11 +2057,45 @@ internal fun LinDoApp(
     fun cancelPendingVerifyModalIfAny() {
         finishVerifyWaiters(VerificationDialogResult.Expired)
     }
+
+    fun checkPassedConnection(explicitRetry: Boolean) {
+        val check = PlatformSessionRecovery.checkForumConnection ?: return
+        val generation = UserApiKeyAuthManager.sessionGeneration
+        val waiters = verifyWaiters.toList()
+        verifyWaiters.clear()
+        scope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+            var result = VerificationDialogResult.Expired
+            try {
+                val ready = check(explicitRetry)
+                if (generation != UserApiKeyAuthManager.sessionGeneration) return@launch
+                result = if (ready) VerificationDialogResult.Passed else VerificationDialogResult.Unavailable
+                if (ready) {
+                    do_.linux.lindo.core.network.NetworkPolicyEngine.clearVerifyAttentionAndSnooze()
+                    do_.linux.lindo.core.network.NetworkPolicyEngine.cf429Classifier.reset()
+                    do_.linux.lindo.core.network.NetworkPolicyEngine.backgroundChallengeTracker.reset()
+                    LinuxDoRepository.clearChallengeCooldown()
+                    PlatformSessionRecovery.verifyPillVisible = false
+                    verificationFeedbackNotice = "论坛连接已恢复"
+                    siteVerificationRestoreVersion++
+                }
+            } finally {
+                waiters.forEach { it(result) }
+            }
+        }
+    }
+
+    fun handleConnectionAction(): Boolean = when (PlatformSessionRecovery.forumConnection.stage) {
+        ForumConnectionStage.Checking -> true
+        ForumConnectionStage.Retry -> { checkPassedConnection(explicitRetry = true); true }
+        ForumConnectionStage.VerifyAgain -> { PlatformSessionRecovery.forumConnection.beginRequestedVerification(); false }
+        ForumConnectionStage.Idle -> false
+    }
     LaunchedEffect(authVersion) {
         topicDetailUiCache.clear()
     }
 
     fun openManualSiteVerifyFromSettings() {
+        if (handleConnectionAction()) return
         rootFocusManager.clearFocus(force = true)
         rootKeyboardController?.hide()
         guestLoginPrompt = null
@@ -2095,6 +2130,7 @@ internal fun LinDoApp(
         val trimmed = url.trim()
         val isExplicitVerifyTarget = trimmed.endsWith("#lindo-verify", ignoreCase = true)
         val isSiteRecovery = trimmed.trimEnd('/').equals("https://linux.do", ignoreCase = true)
+        if ((isExplicitVerifyTarget || isSiteRecovery) && handleConnectionAction()) return
         if (isExplicitVerifyTarget) {
             // 统一将所有站点验证入口路由至轻量 /challenge 端点（Cloudflare WAF 必拦截签发读写级 cf_clearance，且通过后仅落入轻量 404 而非重型主站或 Rails Oops）
             pendingVerifyTargetUrl = "https://linux.do/challenge#lindo-verify"
@@ -2763,7 +2799,8 @@ internal fun LinDoApp(
     DisposableEffect(hasEmbeddedWebLogin) {
         PlatformSessionRecovery.openEmbeddedVerifyModal = { onResult ->
             val target = "https://linux.do/challenge#lindo-verify"
-            if (activeWebLoginUrl != null && activeWebLoginUrl != target) {
+            if (PlatformSessionRecovery.forumConnection.stage != ForumConnectionStage.Idle ||
+                (activeWebLoginUrl != null && activeWebLoginUrl != target)) {
                 onResult(VerificationDialogResult.Unavailable)
             } else {
                 verifyWaiters.add(onResult)
@@ -3967,7 +4004,8 @@ internal fun LinDoApp(
                     }
                 }
                 val showVerifyAttentionPill = do_.linux.lindo.core.network.NetworkPolicyEngine.verifyAttentionNeeded
-                val showVerificationStatus = (delayedVerifyPill || PlatformSessionRecovery.verifyPillVisible || showVerifyAttentionPill) && !showSiteVerifySheet && activeWebLoginUrl == null && !authCompleting
+                val forumStage = PlatformSessionRecovery.forumConnection.stage
+                val showVerificationStatus = (forumStage != ForumConnectionStage.Idle || delayedVerifyPill || PlatformSessionRecovery.verifyPillVisible || showVerifyAttentionPill) && !showSiteVerifySheet && activeWebLoginUrl == null && !authCompleting
                 val activeExpiredUser = sessionExpiredBannerUser?.takeIf {
                     !isAuthorized && !showAuthSheet && activeWebLoginUrl == null && guestLoginPrompt == null
                 }
@@ -4000,6 +4038,7 @@ internal fun LinDoApp(
                                     .border(0.5.dp, palette.hairline, CircleShape)
                                     .clickable {
 
+                                        if (handleConnectionAction()) return@clickable
                                         PlatformWebLoginHost.armOneShotForceRefresh(false)
                                         do_.linux.lindo.core.network.NetworkPolicyEngine.clearUserDismissedVerify()
                                         do_.linux.lindo.core.network.NetworkPolicyEngine.updateVerifyAttentionNeeded(false)
@@ -4025,7 +4064,7 @@ internal fun LinDoApp(
                                         .background(palette.brandGold)
                                 )
                                 Text(
-                                    text = if (showVerifyAttentionPill) "需安全确认" else "安全校验中…",
+                                    text = forumStage.label.ifEmpty { if (showVerifyAttentionPill) "需安全确认" else "安全校验中…" },
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Medium,
                                     color = palette.inkPrimary,
@@ -5503,14 +5542,18 @@ internal fun LinDoApp(
                                     PlatformSessionRecovery.verifyPillVisible = false
                                     if (completingVerify) {
                                         lastSiteVerifiedAtMs = System.currentTimeMillis()
-                                        verificationFeedbackNotice = "安全验证已刷新"
-                                    }
-                                    finishVerifyWaiters(VerificationDialogResult.Passed)
-                                    if (completingVerify) {
                                         showSiteVerifySheet = false
-                                        siteVerificationRestoreVersion++
+                                        if (PlatformSessionRecovery.checkForumConnection != null) {
+                                            verificationFeedbackNotice = null
+                                            checkPassedConnection(explicitRetry = false)
+                                        } else {
+                                            verificationFeedbackNotice = "安全验证已刷新"
+                                            finishVerifyWaiters(VerificationDialogResult.Passed)
+                                            siteVerificationRestoreVersion++
+                                        }
                                         return@success
                                     }
+                                    finishVerifyWaiters(VerificationDialogResult.Passed)
                                     if (completingLogin && UserApiKeyAuthManager.isAuthorized()) {
                                         currentTab = MainTab.HOME
                                         mobileShowingDetail = false
@@ -15313,12 +15356,12 @@ internal fun CommunityProfileScreen(
                             siteVerifyNowMs = System.currentTimeMillis()
                         }
                     }
-                    val siteVerifyStatusText = formatSiteVerifyStatusLabel(
+                    val siteVerifyStatusText = PlatformSessionRecovery.forumConnection.stage.label.ifEmpty { formatSiteVerifyStatusLabel(
                         isVerifying = siteVerifyActive,
                         attentionNeeded = siteVerifyAttention,
                         lastVerifiedAtMs = lastSiteVerifiedAtMs,
                         nowMs = siteVerifyNowMs
-                    )
+                    ) }
                     val manualVerifyScope = rememberCoroutineScope()
                     LinDoSettingRow(
                         icon = LinDoIcons.ShieldCheck,
