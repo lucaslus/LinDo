@@ -151,4 +151,8 @@ adb shell am start -n do_.linux.lindo/.MainActivity --ez lindo.brand_preview tru
 
 [LINUX DO 社区](https://linux.do/)
 
+## 许可证
+
+LinDo 的项目代码使用 [MIT License](LICENSE)。LINUX DO 的名称、标志和截图中的社区内容，其权利属于各自权利人。
+
 徽章内置矢量由 LINUX DO 提供的 Font Awesome Free SVG 转换而来。图标 © Fonticons, Inc.，采用 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) 许可。[Font Awesome Free 许可](https://fontawesome.com/license/free)
