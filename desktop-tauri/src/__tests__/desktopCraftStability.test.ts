@@ -108,6 +108,41 @@ function makeSummary(): TopicSummary {
   };
 }
 
+function readerProps() {
+  const summary = makeSummary();
+  return {
+    summary,
+    isLoading: false,
+    errorMessage: null,
+    targetFloor: null,
+    targetJumpNonce: 0,
+    onlyOpFilter: false,
+    isAuthorized: true,
+    isDark: true,
+    currentUser: {
+      userId: 99,
+      username: "viewer",
+      displayName: "Viewer",
+      avatarTemplate: "",
+      trustLevel: 2,
+    },
+    onRefresh: vi.fn().mockResolvedValue(undefined),
+    onToggleOnlyOp: vi.fn(),
+    onAppendPosts: vi.fn(),
+    onUpdateDetail: vi.fn(),
+    onRemovePost: vi.fn(),
+    onOpenComposer: vi.fn(),
+    onInspectUser: vi.fn(),
+    onOpenImageLightbox: vi.fn(),
+    onNavigateTopicLink: vi.fn(),
+    onRequestGuestLogin: vi.fn(),
+    onTriggerVerify: vi.fn(),
+    showBackButton: false,
+    onBack: vi.fn(),
+    onFloorSeen: vi.fn(),
+  };
+}
+
 function makePost(overrides: Partial<PostItemModel> = {}): PostItemModel {
   return {
     id: 2002,
@@ -227,38 +262,7 @@ describe("Desktop Native Craft & Zero-Layout-Jitter Stability", () => {
   });
 
   it("locks TopicReader floor action row margin & height identically when toggling Like 0 -> 1", () => {
-    const summary = makeSummary();
-    const commonProps = {
-      summary,
-      isLoading: false,
-      errorMessage: null,
-      targetFloor: null,
-      targetJumpNonce: 0,
-      onlyOpFilter: false,
-      isAuthorized: true,
-      isDark: true,
-      currentUser: {
-        userId: 99,
-        username: "viewer",
-        displayName: "Viewer",
-        avatarTemplate: "",
-        trustLevel: 2,
-      },
-      onRefresh: vi.fn().mockResolvedValue(undefined),
-      onToggleOnlyOp: vi.fn(),
-      onAppendPosts: vi.fn(),
-      onUpdateDetail: vi.fn(),
-      onRemovePost: vi.fn(),
-      onOpenComposer: vi.fn(),
-      onInspectUser: vi.fn(),
-      onOpenImageLightbox: vi.fn(),
-      onNavigateTopicLink: vi.fn(),
-      onRequestGuestLogin: vi.fn(),
-      onTriggerVerify: vi.fn(),
-      showBackButton: false,
-      onBack: vi.fn(),
-      onFloorSeen: vi.fn(),
-    };
+    const commonProps = readerProps();
 
     // State A: 0 reactions, 0 likes
     const container0 = mountElement(
@@ -312,6 +316,45 @@ describe("Desktop Native Craft & Zero-Layout-Jitter Stability", () => {
     expect(heartAfter).not.toBeNull();
     expect(heartAfter?.className).toContain("h-[26px]");
     expect(heartAfter?.className).toContain("w-[26px]");
+  });
+
+  it("opens the floor picker and the topic composer from independent floating controls", () => {
+    const props = readerProps();
+    const container = mountElement(React.createElement(TopicReaderPane, {
+      ...props, detail: makeDetail(makePost()),
+    }));
+    const floors = container.querySelector<HTMLButtonElement>('button[title="楼层导航"]')!;
+    const reply = container.querySelector<HTMLButtonElement>('button[aria-label="回复话题"]')!;
+    expect(reply.textContent).toBe("");
+    expect(floors.textContent).toContain("1 / 2 楼");
+    act(() => floors.click());
+    expect(floors.getAttribute("aria-expanded")).toBe("true");
+    expect(container.querySelector('input[type="range"]')).not.toBeNull();
+    act(() => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); });
+    expect(container.querySelector('input[type="range"]')).toBeNull();
+    expect(document.activeElement).toBe(floors);
+    act(() => reply.click());
+    expect(props.onOpenComposer).toHaveBeenCalledWith(expect.objectContaining({
+      action: "REPLY", topicId: props.summary.id,
+    }));
+    expect(props.onOpenComposer.mock.calls[0][0].replyToPostNumber).toBeUndefined();
+  });
+
+  it("routes guests to login and keeps a closed topic read-only", () => {
+    const props = readerProps();
+    const detail = makeDetail(makePost());
+    const guest = mountElement(React.createElement(TopicReaderPane, {
+      ...props, detail, isAuthorized: false, currentUser: null,
+    }));
+    act(() => guest.querySelector<HTMLButtonElement>('button[aria-label="登录后回复话题"]')!.click());
+    expect(props.onRequestGuestLogin).toHaveBeenCalledOnce();
+    const closed = mountElement(React.createElement(TopicReaderPane, {
+      ...props, detail: { ...detail, closed: true },
+    }));
+    const locked = closed.querySelector<HTMLButtonElement>('button[aria-label="话题已关闭回复"]')!;
+    expect(locked.disabled).toBe(true);
+    act(() => locked.click());
+    expect(props.onOpenComposer).not.toHaveBeenCalled();
   });
 
   it("renders SideRail with quiet macOS hover pills, zero scale wobble, uniform label weight, and tabular-nums", () => {

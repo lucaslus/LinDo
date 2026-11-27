@@ -17722,8 +17722,8 @@ internal fun LinDoMarkdownWorkbench(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
                 horizontalArrangement = Arrangement.End
             ) {
-                TextButton(onClick = { internalViewMode = WorkbenchViewMode.SOURCE }) {
-                    Text(LinDoCommonCopy.CONTINUE_EDIT.text, color = palette.activeChipText)
+                WorkbenchDockIconButton(LinDoIcons.Edit, LinDoCommonCopy.CONTINUE_EDIT.text) {
+                    internalViewMode = WorkbenchViewMode.SOURCE
                 }
             }
         }

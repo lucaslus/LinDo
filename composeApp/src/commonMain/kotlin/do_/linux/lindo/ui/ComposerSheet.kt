@@ -20,6 +20,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
@@ -908,9 +909,8 @@ internal fun ComposerSheet(
                 )
                 if (prepared && prepareError == null) {
                     val isPreview = viewMode == WorkbenchViewMode.PREVIEW
-                    TextButton(
+                    IconButton(
                         enabled = !busy,
-                        contentPadding = PaddingValues(horizontal = 10.dp),
                         onClick = {
                             if (isPreview) {
                                 viewMode = WorkbenchViewMode.SOURCE
@@ -921,7 +921,11 @@ internal fun ComposerSheet(
                             }
                         }
                     ) {
-                        Text(if (isPreview) LinDoCommonCopy.CONTINUE_EDIT.text else LinDoCommonCopy.PREVIEW.text, color = palette.inkPrimary, maxLines = 1)
+                        Icon(
+                            imageVector = if (isPreview) LinDoIcons.Edit else LinDoIcons.Eye,
+                            contentDescription = if (isPreview) LinDoCommonCopy.CONTINUE_EDIT.text else LinDoCommonCopy.PREVIEW.text,
+                            modifier = Modifier.size(20.dp)
+                        )
                     }
                 }
                 val actionLabel = when (action) {
@@ -929,13 +933,13 @@ internal fun ComposerSheet(
                     ComposerAction.REPLY -> LinDoCommonCopy.SEND.text
                     ComposerAction.EDIT -> LinDoCommonCopy.SAVE.text
                 }
-                TextButton(
+                IconButton(
                     enabled = canClickSubmit,
-                    contentPadding = PaddingValues(horizontal = 10.dp),
-                    modifier = Modifier.pointerHoverIcon(androidx.compose.ui.input.pointer.PointerIcon.Hand),
+                    modifier = Modifier.pointerHoverIcon(androidx.compose.ui.input.pointer.PointerIcon.Hand)
+                        .semantics { contentDescription = if (submitting) LinDoCommonCopy.SUBMITTING.text else actionLabel },
                     onClick = {
-                        if (!canClickSubmit || submitting) return@TextButton
-                        if (hasTopicMetaControls && tagsLoading) return@TextButton
+                        if (!canClickSubmit || submitting) return@IconButton
+                        if (hasTopicMetaControls && tagsLoading) return@IconButton
                         val missingTitle = hasTopicMetaControls && titleValidation != null
                         val missingTag = hasTopicMetaControls && !tagValidationOk
                         val missingBody = bodyValidation != null
@@ -949,7 +953,7 @@ internal fun ComposerSheet(
                                 }
                                 missingBody -> runCatching { bodyFocusRequester.requestFocus() }
                             }
-                            return@TextButton
+                            return@IconButton
                         }
                         if (action == ComposerAction.NEW_TOPIC && LinuxDoSiteRules.requiresTopicCostConfirmation(draft.tags)) {
                             showCost = true
@@ -959,9 +963,11 @@ internal fun ComposerSheet(
                     if (submitting) {
                         LinDoMascot(state = LinDoMascotState.Loading, compact = true, size = 18.dp)
                     } else {
-                        Text(
-                            actionLabel, fontWeight = FontWeight.Bold, maxLines = 1,
-                            color = if (canClickSubmit) palette.activeChipText else palette.inkTertiary
+                        Icon(
+                            imageVector = if (action == ComposerAction.EDIT) LinDoIcons.Check else LinDoIcons.Send,
+                            contentDescription = null,
+                            tint = if (canClickSubmit) palette.activeChipText else palette.inkTertiary,
+                            modifier = Modifier.size(20.dp)
                         )
                     }
                 }
@@ -1014,10 +1020,8 @@ internal fun ComposerSheet(
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .height(IntrinsicSize.Min)
-                                        .clip(RoundedCornerShape(10.dp))
+                                        .clip(RoundedCornerShape(topEnd = 10.dp, bottomEnd = 10.dp))
                                         .background(palette.subtleSurface)
-                                        .border(0.5.dp, palette.hairline.copy(alpha = 0.65f), RoundedCornerShape(10.dp))
                                         .then(
                                             if (snippet.isNotBlank()) {
                                                 Modifier
@@ -1029,10 +1033,10 @@ internal fun ComposerSheet(
                                         ),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .width(2.5.dp)
-                                            .fillMaxHeight()
+                                    Spacer(
+                                        Modifier.align(Alignment.Top)
+                                            .padding(top = 9.dp)
+                                            .size(width = 2.dp, height = 24.dp)
                                             .background(palette.brandGold)
                                     )
                                     Column(

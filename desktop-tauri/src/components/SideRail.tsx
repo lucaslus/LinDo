@@ -128,12 +128,11 @@ export const SideRail: React.FC<SideRailProps> = ({
   return (
     <aside
       data-fixed-scale="1"
-      className={`relative z-20 flex h-full shrink-0 flex-col items-center justify-between select-none ${
+      className={`lindo-glass-rail relative z-20 flex h-full shrink-0 flex-col items-center justify-between select-none ${
         hasOrganicEar ? "" : "lindo-hairline-r"
       }`}
       style={{
         width: isMacos ? 76 : 72,
-        backgroundColor: "var(--nav-bar-surface)",
         paddingBottom: 14,
       }}
     >
@@ -249,9 +248,6 @@ export const SideRail: React.FC<SideRailProps> = ({
         </div>
       </div>
 
-      {/* 从右侧 Feed 栏边缘自然“生长”出来的流线型收折耳扣：
-          下移至侧栏底部边缘，中心点距窗口底部恰好 27px（3px 底线 + 48px 耳高的一半 24px），
-          与右侧阅读器底部「✎ 回复话题」输入框（py-2.5 10px + 34px 高的一半 17px = 27px）像素级水平平行！ */}
       {hasOrganicEar && (
         <div className="pointer-events-none absolute inset-y-0 right-0 flex w-[22px] flex-col">
           <div

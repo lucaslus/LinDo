@@ -230,6 +230,26 @@ afterEach(() => {
 });
 
 describe("forum writing and reading", () => {
+  it("keeps the draft when switching between the three editor icon buttons", async () => {
+    const el = mountElement(React.createElement(ComposerModal, {
+      request: { action: "REPLY", topicId: 7, replyToPostNumber: 2, replyToUsername: "alice", replyToSnippet: "所回复的楼层", initialRaw: "切换预览时保留的正文" },
+      categories: SAMPLE_CATEGORIES, onTopicEdited: vi.fn(), onPublished: vi.fn(), onClose: vi.fn(), onTriggerVerify: vi.fn(),
+    }));
+    await flushPromises();
+    const header = el.querySelector("header")!;
+    for (const name of ["分栏", "预览", "编辑"]) {
+      const mode = header.querySelector<HTMLButtonElement>(`button[aria-label="${name}"]`)!;
+      expect(mode.textContent).toBe("");
+      expect(mode.querySelector("svg")).toBeTruthy();
+      act(() => mode.click());
+      expect(mode.getAttribute("aria-pressed")).toBe("true");
+      expect(header.querySelectorAll('[aria-pressed="true"]')).toHaveLength(1);
+      expect(Boolean(el.querySelector("textarea"))).toBe(name !== "预览");
+    }
+    expect(el.querySelector("textarea")!.value).toBe("切换预览时保留的正文");
+    expect(header.querySelector('button[aria-label="发送"] svg')).toBeTruthy();
+  });
+
   it.each(["title", "body"])("submits only the changed first-post %s", async (field) => {
     const published = vi.fn();
     const edited = vi.fn();
@@ -253,7 +273,7 @@ describe("forum writing and reading", () => {
       Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "value")!.set!.call(input, value);
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    await act(async () => { findButtonByText(el, "保存")!.click(); });
+    await act(async () => { el.querySelector<HTMLButtonElement>('button[aria-label="保存"]')!.click(); });
     expect(writes.map((r) => [new URL(r.url).pathname, r.form])).toEqual(field === "title"
       ? [["/t/-/7.json", { title: value }]] : [["/posts/9.json", { "post[raw]": value }]]);
     expect(published).toHaveBeenCalledOnce();
@@ -273,7 +293,7 @@ describe("forum writing and reading", () => {
     }));
     await flushPromises();
     expect(el.querySelector("textarea")!.value).toBe("上次保存的修改正文");
-    await act(async () => { findButtonByText(el, "保存")!.click(); });
+    await act(async () => { el.querySelector<HTMLButtonElement>('button[aria-label="保存"]')!.click(); });
     expect(invokeMock).toHaveBeenCalledWith("site_request", expect.objectContaining({
       method: "PUT", form: { "post[raw]": "上次保存的修改正文" },
     }));
@@ -1269,7 +1289,7 @@ describe("P1-11: Reader archived reply lock & non-contiguous middle-gap floor lo
     );
 
     // 1) Archived reply button is disabled for regular user
-    const replyBtn = findButtonByText(el, "话题已归档，无法回复");
+    const replyBtn = el.querySelector<HTMLButtonElement>('button[aria-label="话题已归档，无法回复"]');
     expect(replyBtn).toBeTruthy();
     expect(replyBtn!.disabled).toBe(true);
 
@@ -1311,7 +1331,7 @@ describe("P1-11: Reader archived reply lock & non-contiguous middle-gap floor lo
         onFloorSeen: vi.fn(),
       })
     );
-    const staffReplyBtn = findButtonByText(staffEl, "话题已归档，无法回复");
+    const staffReplyBtn = staffEl.querySelector<HTMLButtonElement>('button[aria-label="回复话题"]');
     expect(staffReplyBtn).toBeTruthy();
     expect(staffReplyBtn!.disabled).toBe(false);
   });

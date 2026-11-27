@@ -1526,9 +1526,9 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
           >
             {(
               [
-                { key: "SOURCE", label: "编辑" },
-                { key: "SPLIT", label: "分栏" },
-                { key: "PREVIEW", label: "预览" },
+                { key: "SOURCE", label: "编辑", icon: LinDoIcons.Edit },
+                { key: "SPLIT", label: "分栏", icon: LinDoIcons.ColumnsSplit },
+                { key: "PREVIEW", label: "预览", icon: LinDoIcons.Eye },
               ] as const
             ).map((mode) => {
               const active = viewMode === mode.key;
@@ -1537,14 +1537,16 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                   key={mode.key}
                   type="button"
                   onClick={() => setViewMode(mode.key)}
-                  className="flex items-center gap-1 rounded-md px-2.5 py-1 font-medium transition-colors cursor-pointer"
+                  title={mode.label}
+                  aria-label={mode.label}
+                  aria-pressed={active}
+                  className="flex h-7 w-8 items-center justify-center rounded-md transition-colors cursor-pointer"
                   style={{
                     backgroundColor: active ? "var(--card-surface)" : "transparent",
                     color: active ? "var(--ink-primary)" : "var(--ink-tertiary)",
                   }}
                 >
-                  {mode.key === "SPLIT" && <LinDoIcons.ColumnsSplit size={12.5} />}
-                  <span>{mode.label}</span>
+                  <mode.icon size={16} aria-hidden="true" />
                 </button>
               );
             })}
@@ -1579,13 +1581,22 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
             type="button"
             disabled={Boolean(cloudDraftConflict) || submitting || uploading || rawReadFailed || loadingRawEdit}
             onClick={handleAttemptSubmit}
-            className="ml-0.5 rounded-full px-4 py-1 text-[13px] font-semibold transition-opacity hover:opacity-90 cursor-pointer disabled:opacity-45"
+            title={submitting ? "提交中" : actionLabel}
+            aria-label={submitting ? "提交中" : actionLabel}
+            aria-busy={submitting}
+            className="ml-0.5 flex h-8 w-8 items-center justify-center rounded-full transition-opacity hover:opacity-90 cursor-pointer disabled:opacity-45"
             style={{
               backgroundColor: "var(--publish-btn-bg)",
               color: "var(--publish-btn-fg)",
             }}
           >
-            {submitting ? "提交中..." : actionLabel}
+            {submitting ? (
+              <LinDoIcons.Refresh size={16} className="motion-safe:animate-spin" aria-hidden="true" />
+            ) : request.action === "EDIT" ? (
+              <LinDoIcons.Check size={17} aria-hidden="true" />
+            ) : (
+              <LinDoIcons.Send size={16} aria-hidden="true" />
+            )}
           </button>
         </div>
       </header>
@@ -1617,12 +1628,12 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                     setReplyQuoteExpanded((v) => !v);
                   }
                 }}
-                className={`rounded-lg border-l-[2.5px] px-3 py-2.5 transition-colors ${
+                aria-expanded={canExpandQuote ? replyQuoteExpanded : undefined}
+                className={`relative rounded-r-lg px-3 py-2.5 transition-colors before:pointer-events-none before:absolute before:start-0 before:top-2.5 before:h-6 before:w-0.5 before:bg-[var(--brand-gold)] ${
                   canExpandQuote ? "cursor-pointer" : ""
                 }`}
                 style={{
                   backgroundColor: "var(--subtle-surface)",
-                  borderLeftColor: "var(--brand-gold)",
                 }}
               >
                 <div className="flex items-center justify-between gap-2 text-[12px]">

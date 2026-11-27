@@ -320,7 +320,7 @@ class LoginQrAndFoldableSplitRegressionTest {
                 onNodeWithContentDescription("关闭楼层导航").performClick()
                 onNodeWithContentDescription("回复话题").performClick()
             }
-            waitForText("发送")
+            waitForContentDescription("发送")
         }
 
     @Test
@@ -383,7 +383,7 @@ class LoginQrAndFoldableSplitRegressionTest {
             edt { onAllNodesWithContentDescription("回复本楼").onLast().performTouchInput { click() } }
             waitForText("Alice · 2 楼", substring = true)
             edt { BackNavigationBridge.dispatchBack() }
-            waitForTextGone("发送")
+            waitUntil { edt { onAllNodesWithContentDescription("发送").fetchSemanticsNodes().isEmpty() } }
             edt { onNodeWithContentDescription("展开安全校验").performTouchInput { click() } }
             assertTrue(noticeOpened)
         }

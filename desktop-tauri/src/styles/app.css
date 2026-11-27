@@ -351,6 +351,68 @@ html.lindo-scrolling .lindo-title-holo {
 
 .lindo-reader-scroll {
   overflow-anchor: auto;
+  /* Leave room below the last floor for the floating controls and keyboard focus. */
+  padding-bottom: 64px;
+  scroll-padding-bottom: 64px;
+}
+
+.lindo-glass-rail {
+  background-color: var(--nav-bar-surface);
+  background-image: linear-gradient(155deg, color-mix(in srgb, var(--ink-primary) 8%, transparent), transparent 48%);
+  box-shadow: inset 1px 0 color-mix(in srgb, var(--ink-primary) 6%, transparent);
+}
+
+.lindo-reader-glass {
+  pointer-events: auto;
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  height: 38px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--ink-secondary) 32%, transparent);
+  background-color: var(--card-surface);
+  color: var(--ink-primary);
+  box-shadow: inset 0 1px color-mix(in srgb, var(--ink-primary) 7%, transparent), 0 2px 8px #0002;
+  cursor: pointer;
+}
+
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .lindo-glass-rail {
+    background-color: color-mix(in srgb, var(--nav-bar-surface) 74%, transparent);
+    -webkit-backdrop-filter: blur(16px);
+    backdrop-filter: blur(16px);
+  }
+  .lindo-reader-glass {
+    background-color: color-mix(in srgb, var(--card-surface) 74%, transparent);
+    -webkit-backdrop-filter: blur(12px) saturate(115%);
+    backdrop-filter: blur(12px) saturate(115%);
+  }
+}
+
+.lindo-reader-glass:hover:not(:disabled),
+.lindo-reader-glass[aria-expanded="true"] {
+  background-color: var(--subtle-surface);
+  border-color: var(--ink-tertiary);
+}
+
+.lindo-reader-glass:focus-visible {
+  outline: 2px solid var(--brand-gold);
+  outline-offset: 2px;
+}
+
+.lindo-reader-glass:disabled {
+  color: var(--ink-secondary);
+  cursor: default;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .lindo-glass-rail, .lindo-reader-glass {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+  .lindo-glass-rail { background: var(--nav-bar-surface); }
+  .lindo-reader-glass { background: var(--card-surface); }
 }
 
 .lindo-scroll::-webkit-scrollbar {

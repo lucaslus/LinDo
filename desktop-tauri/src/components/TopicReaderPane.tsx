@@ -432,6 +432,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
 
   useEffect(() => clearFloorFlash, [clearFloorFlash]);
   const [floorNavOpen, setFloorNavOpen] = useState(false);
+  const floorNavButtonRef = useRef<HTMLButtonElement>(null);
   const [floorInputVal, setFloorInputVal] = useState("1");
   const [loadingMoreBottom, setLoadingMoreBottom] = useState(false);
   const [refreshingTail, setRefreshingTail] = useState(false);
@@ -1136,9 +1137,10 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
   }, [summary?.id]);
 
   useEffect(() => {
-    if (activeFloorMorePostId === null && activeReactionPickerPostId === null && !aiSummaryOpen) return;
+    if (activeFloorMorePostId === null && activeReactionPickerPostId === null && !aiSummaryOpen && !floorNavOpen) return;
     const onDocDown = (ev: MouseEvent) => {
       const target = ev.target as HTMLElement | null;
+      if (floorNavOpen && !target?.closest("[data-floor-navigation]")) setFloorNavOpen(false);
       if (target?.closest("[data-floor-popover]")) return;
       if (target?.closest("[data-ai-summary-popover]")) return;
       setActiveFloorMorePostId(null);
@@ -1148,6 +1150,10 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
     const onKeyDown = (ev: KeyboardEvent) => {
       if (isImeComposingEvent(ev)) return;
       if (ev.key === "Escape") {
+        if (floorNavOpen) {
+          setFloorNavOpen(false);
+          floorNavButtonRef.current?.focus();
+        }
         setActiveFloorMorePostId(null);
         setActiveReactionPickerPostId(null);
         setAiSummaryOpen(false);
@@ -1159,7 +1165,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
       document.removeEventListener("mousedown", onDocDown);
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [activeFloorMorePostId, activeReactionPickerPostId, aiSummaryOpen]);
+  }, [activeFloorMorePostId, activeReactionPickerPostId, aiSummaryOpen, floorNavOpen]);
 
   const executeToggleReaction = useCallback(
     async (postId: number, reactionId: string, fallbackErrMsg: string) => {
@@ -1773,6 +1779,17 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
   }
 
   const totalFloors = Math.max(detail?.postsCount ?? summary.postsCount, 1);
+  function selectFloor(floor: number) {
+    setFloorNavOpen(false);
+    floorNavButtonRef.current?.focus({ preventScroll: true });
+    void jumpToFloor(Math.max(1, Math.min(totalFloors, floor || 1)));
+  }
+  const archived = detail?.archived ?? summary.archived;
+  const closed = detail?.closed ?? summary.closed;
+  const isReplyLocked = (archived || closed) && !(currentUser?.admin || currentUser?.moderator);
+  const replyLabel = isReplyLocked
+    ? (archived ? "话题已归档，无法回复" : "话题已关闭回复")
+    : (isAuthorized ? "回复话题" : "登录后回复话题");
   const catVis = resolveCategoryVisual(
     detail?.categoryName || summary.categoryName || "",
     detail?.categoryColorHex || summary.categoryColorHex
@@ -2304,7 +2321,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
       {/* 2. 主阅读滚动视口（全宽滚轮响应 + 900px 居中高信息密度舒适阅读版心） */}
       <div
         ref={scrollContainerRef}
-        className={`lindo-scroll lindo-reader-scroll relative flex-1 min-h-0 ${hideQuickReplyBar ? "pb-10" : "pb-16"}`}
+        className="lindo-scroll lindo-reader-scroll relative flex-1 min-h-0"
       >
         <div className="mx-auto w-full max-w-[900px] px-5">
         {/* 话题大标题与元数据区 */}
@@ -4895,188 +4912,136 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
         </div>
       )}
 
-      {/* 底部渐隐悬浮快捷回复栏 + 楼层进度导航器（与 900px 正文版心同宽居中对齐） */}
-      <div
-        className={
-          hideQuickReplyBar
-            ? "pointer-events-none absolute inset-x-0 bottom-2.5 z-20"
-            : "pointer-events-none absolute inset-x-0 bottom-0 z-20 py-2.5"
-        }
-        style={
-          hideQuickReplyBar
-            ? undefined
-            : {
-                background:
-                  "linear-gradient(to top, var(--canvas) 74%, color-mix(in srgb, var(--canvas) 82%, transparent) 90%, transparent 100%)",
-              }
-        }
-      >
-        <div
-          className={
-            hideQuickReplyBar
-              ? "mx-auto flex w-full max-w-[900px] items-center justify-end px-5"
-              : "mx-auto flex w-full max-w-[900px] items-center justify-between gap-3 px-5"
-          }
-        >
-        {!hideQuickReplyBar && (() => {
-          const isStaffUser = Boolean(currentUser?.admin || currentUser?.moderator);
-          const isReplyLocked = Boolean((detail?.closed || detail?.archived) && !isStaffUser);
-          const lockLabel = detail?.archived
-            ? "话题已归档，无法回复"
-            : detail?.closed
-              ? "话题已关闭回复"
-              : "回复话题";
-          return (
-            <button
-              type="button"
-              disabled={isReplyLocked}
-              onClick={() => {
-                if (!isAuthorized) {
-                  onRequestGuestLogin("登录后回复话题", "登录后即可参与社区讨论");
-                  return;
-                }
-                onOpenComposer({
-                  action: "REPLY",
-                  topicId: summary.id,
-                  topicTitle: detail?.title || summary.title,
-                  replyToUsername: resolvedTopicOp.username || undefined,
-                  replyToDisplayName: resolvedTopicOp.displayName || undefined,
-                  replyToAvatarTemplate: resolvedTopicOp.avatarTemplate || undefined,
-                  replyToAnimatedAvatar: resolvedTopicOp.animatedAvatar,
-                });
-              }}
-              className="pointer-events-auto flex h-[34px] min-w-0 flex-1 items-center gap-2 rounded-full px-4 text-[13px] transition-colors cursor-pointer disabled:opacity-55"
-              style={{
-                backgroundColor: "var(--subtle-surface)",
-                border: "0.5px solid var(--hairline)",
-                color: "var(--ink-tertiary)",
-              }}
-            >
-              {isReplyLocked ? <LinDoIcons.Lock size={14} /> : <LinDoIcons.Edit size={14} />}
-              <span className="truncate">{lockLabel}</span>
-            </button>
-          );
-        })()}
-
-        {/* 楼层导航胶囊 + 跨楼层跳转一键返回原楼胶囊 */}
-        <div className="pointer-events-auto relative flex shrink-0 items-center gap-2">
-          {returnFloor !== null && returnFloor !== currentVisibleFloor && (
-            <button
-              type="button"
-              onClick={() => void jumpToFloor(returnFloor, undefined, true)}
-              className="lindo-interactive flex h-[30px] items-center gap-1 rounded-full px-3 text-[12px] font-semibold tabular-nums"
-              style={{
-                backgroundColor: "var(--active-chip-bg)",
-                border: "0.5px solid var(--hairline)",
-                color: "var(--active-chip-text)",
-              }}
-            >
-              <LinDoIcons.Reply size={12.5} />
-              <span>返回 #{returnFloor} 楼</span>
-            </button>
-          )}
+      <div className="pointer-events-none absolute inset-x-4 bottom-3 z-20 mx-auto flex max-w-[900px] items-center justify-end gap-2">
+        {returnFloor !== null && returnFloor !== currentVisibleFloor && (
           <button
             type="button"
-            onClick={() => {
-              const cur = visibleFloorRef.current;
-              setCurrentVisibleFloor(cur);
-              setFloorInputVal(String(cur));
-              setFloorNavOpen((v) => !v);
-            }}
-            className="lindo-interactive flex h-[30px] items-center gap-1 rounded-full px-3 text-[12px] font-medium tabular-nums"
+            onClick={() => void jumpToFloor(returnFloor, undefined, true)}
+            className="lindo-reader-glass gap-1 px-3 text-[12px] font-medium tabular-nums"
+          >
+            <LinDoIcons.Reply size={12.5} />
+            <span>返回 #{returnFloor} 楼</span>
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => {
+            const cur = visibleFloorRef.current;
+            setCurrentVisibleFloor(cur);
+            setFloorInputVal(String(cur));
+            setFloorNavOpen((v) => !v);
+          }}
+          ref={floorNavButtonRef}
+          data-floor-navigation=""
+          title="楼层导航"
+          aria-expanded={floorNavOpen}
+          className="lindo-reader-glass gap-1 px-3 text-[12px] font-medium tabular-nums"
+        >
+          <span className="sr-only">楼层导航，</span>
+          <span ref={floorBadgeTextRef} />
+          <LinDoIcons.ChevronUp size={12} className={floorNavOpen ? "rotate-180" : undefined} />
+        </button>
+
+        {floorNavOpen && (
+          <div
+            data-floor-navigation=""
+            className="pointer-events-auto absolute bottom-[calc(100%+8px)] right-0 z-30 w-[256px] max-w-full rounded-2xl p-3.5 shadow-2xl"
             style={{
               backgroundColor: "var(--subtle-surface)",
               border: "0.5px solid var(--hairline)",
-              color: "var(--ink-secondary)",
             }}
           >
-            <span ref={floorBadgeTextRef} />
-            <LinDoIcons.ChevronUp size={12} />
-          </button>
-
-          {floorNavOpen && (
             <div
-              className="absolute bottom-10 right-0 z-30 w-[256px] rounded-2xl p-3.5 shadow-2xl"
-              style={{
-                backgroundColor: "var(--subtle-surface)",
-                border: "0.5px solid var(--hairline)",
-              }}
+              className="flex items-center justify-between text-[12px] font-semibold"
+              style={{ color: "var(--ink-primary)" }}
             >
-              <div
-                className="flex items-center justify-between text-[12px] font-semibold"
-                style={{ color: "var(--ink-primary)" }}
+              <span>跳转楼层</span>
+              <span className="tabular-nums" style={{ color: "var(--brand-gold)" }}>
+                #{floorInputVal} / {totalFloors}
+              </span>
+            </div>
+            <input
+              type="range"
+              aria-label="选择楼层"
+              min={1}
+              max={totalFloors}
+              value={Number(floorInputVal) || 1}
+              onChange={(e) => setFloorInputVal(e.target.value)}
+              onPointerUp={(e) => selectFloor(e.currentTarget.valueAsNumber)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") selectFloor(e.currentTarget.valueAsNumber);
+              }}
+              className="mt-2.5 w-full accent-amber-400 cursor-pointer"
+            />
+            <div className="mt-2.5 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => selectFloor(1)}
+                className="lindo-interactive rounded-lg px-2.5 py-1 text-[11.5px]"
+                style={{
+                  backgroundColor: "var(--tonal-pill)",
+                  color: "var(--ink-secondary)",
+                }}
               >
-                <span>跳转楼层</span>
-                <span className="tabular-nums" style={{ color: "var(--brand-gold)" }}>
-                  #{floorInputVal} / {totalFloors}
-                </span>
-              </div>
+                首楼
+              </button>
               <input
-                type="range"
+                type="number"
+                aria-label="楼层号"
                 min={1}
                 max={totalFloors}
-                value={Number(floorInputVal) || 1}
+                value={floorInputVal}
                 onChange={(e) => setFloorInputVal(e.target.value)}
-                onMouseUp={() => {
-                  jumpToFloor(Number(floorInputVal) || 1);
-                  setFloorNavOpen(false);
+                onKeyDown={(e) => {
+                  if (isImeComposingEvent(e)) return;
+                  if (e.key === "Enter") selectFloor(e.currentTarget.valueAsNumber);
                 }}
-                className="mt-2.5 w-full accent-amber-400 cursor-pointer"
+                className="w-16 rounded-lg bg-transparent px-2 py-1 text-center text-[12px] tabular-nums outline-none"
+                style={{
+                  border: "0.5px solid var(--hairline)",
+                  color: "var(--ink-primary)",
+                }}
               />
-              <div className="mt-2.5 flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    jumpToFloor(1);
-                    setFloorNavOpen(false);
-                  }}
-                  className="lindo-interactive rounded-lg px-2.5 py-1 text-[11.5px]"
-                  style={{
-                    backgroundColor: "var(--tonal-pill)",
-                    color: "var(--ink-secondary)",
-                  }}
-                >
-                  首楼
-                </button>
-                <input
-                  type="number"
-                  min={1}
-                  max={totalFloors}
-                  value={floorInputVal}
-                  onChange={(e) => setFloorInputVal(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (isImeComposingEvent(e)) return;
-                    if (e.key === "Enter") {
-                      const f = Math.max(1, Math.min(totalFloors, Number(floorInputVal) || 1));
-                      jumpToFloor(f);
-                      setFloorNavOpen(false);
-                    }
-                  }}
-                  className="w-16 rounded-lg bg-transparent px-2 py-1 text-center text-[12px] tabular-nums outline-none"
-                  style={{
-                    border: "0.5px solid var(--hairline)",
-                    color: "var(--ink-primary)",
-                  }}
-                />
-                <button
-                  type="button"
-                  onClick={() => {
-                    jumpToFloor(totalFloors);
-                    setFloorNavOpen(false);
-                  }}
-                  className="lindo-interactive ml-auto rounded-lg px-2.5 py-1 text-[11.5px]"
-                  style={{
-                    backgroundColor: "var(--tonal-pill)",
-                    color: "var(--ink-secondary)",
-                  }}
-                >
-                  末楼
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={() => selectFloor(totalFloors)}
+                className="lindo-interactive ml-auto rounded-lg px-2.5 py-1 text-[11.5px]"
+                style={{
+                  backgroundColor: "var(--tonal-pill)",
+                  color: "var(--ink-secondary)",
+                }}
+              >
+                末楼
+              </button>
             </div>
-          )}
-        </div>
-        </div>
+          </div>
+        )}
+        {!hideQuickReplyBar && (
+          <button
+            type="button"
+            disabled={isReplyLocked}
+            onClick={() => {
+              if (!isAuthorized) {
+                onRequestGuestLogin("登录后回复话题", "登录后即可参与社区讨论");
+                return;
+              }
+              onOpenComposer({
+                action: "REPLY",
+                topicId: summary.id,
+                topicTitle: detail?.title || summary.title,
+                replyToUsername: resolvedTopicOp.username || undefined,
+                replyToDisplayName: resolvedTopicOp.displayName || undefined,
+                replyToAvatarTemplate: resolvedTopicOp.avatarTemplate || undefined,
+                replyToAnimatedAvatar: resolvedTopicOp.animatedAvatar,
+              });
+            }}
+            title={replyLabel}
+            aria-label={replyLabel}
+            className="lindo-reader-glass aspect-square"
+          >
+            {isReplyLocked ? <LinDoIcons.Lock size={16} /> : <LinDoIcons.Edit size={18} />}
+          </button>
+        )}
       </div>
 
       {/* 删除回复二次确认 */}

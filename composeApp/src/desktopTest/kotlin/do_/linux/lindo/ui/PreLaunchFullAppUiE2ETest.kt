@@ -604,7 +604,7 @@ class PreLaunchFullAppUiE2ETest {
         waitForText("回复话题")
         onNodeWithText("回复话题").edtClick()
 
-        waitForText("发送")
+        waitForContentDescription("发送")
         waitForContentDescription("图片")
         waitUntil(timeoutMillis = 5_000L) {
             onAllNodes(hasSetTextAction()).edtCount() > 0
@@ -616,11 +616,11 @@ class PreLaunchFullAppUiE2ETest {
         assertEquals(1, backend.mediaUploadCount.get(), "Binary media upload executor must be invoked")
         waitUntil(timeoutMillis = 5_000L) {
             runCatching {
-                onEdt { onAllNodesWithText("发送").onLast().assertIsEnabled() }
+                onEdt { onAllNodesWithContentDescription("发送").onLast().assertIsEnabled() }
                 true
             }.getOrDefault(false)
         }
-        onAllNodesWithText("发送").onLast().edtClick()
+        onAllNodesWithContentDescription("发送").onLast().edtClick()
 
         waitUntil(timeoutMillis = 5_000L) { backend.createdReplies.size == 1 }
         val submittedReply = backend.createdReplies.single()
@@ -628,7 +628,7 @@ class PreLaunchFullAppUiE2ETest {
             submittedReply.raw.contains("upload://e2eTestImg.png"),
             "Submitted reply raw markdown must contain uploaded short_url"
         )
-        waitForTextGone("发送")
+        waitUntil { onAllNodesWithContentDescription("发送").edtCount() == 0 }
 
         // New Topic Composer via DesktopSideRail Publish button
         onNodeWithContentDescription("发布新话题").edtClick()
@@ -651,11 +651,11 @@ class PreLaunchFullAppUiE2ETest {
 
         waitUntil(timeoutMillis = 5_000L) {
             runCatching {
-                onEdt { onAllNodesWithText("发布").onLast().assertIsEnabled() }
+                onEdt { onAllNodesWithContentDescription("发布").onLast().assertIsEnabled() }
                 true
             }.getOrDefault(false)
         }
-        onAllNodesWithText("发布").onLast().edtClick()
+        onAllNodesWithContentDescription("发布").onLast().edtClick()
 
         waitUntil(timeoutMillis = 5_000L) { backend.createdTopics.size == 1 }
         val createdTopic = backend.createdTopics.single()

@@ -110,15 +110,19 @@ class ComposerFormValidationTest {
             onAllNodesWithText("需选标签：类版块组", substring = true).assertCountEquals(0)
         }
 
+        onEdt { onNodeWithContentDescription("预览").performClick() }
+        onEdt { onNodeWithContentDescription("继续编辑").performClick() }
+        onEdt { onAllNodes(hasSetTextAction()).onFirst().assertTextContains("测试") }
+
         // 3. Clicking 发布 triggers form-style inline validation highlights on the incomplete fields/chips
         waitUntil(timeoutMillis = 3_000L) {
             runCatching {
-                onEdt { onNodeWithText("发布").assertIsEnabled() }
+                onEdt { onNodeWithContentDescription("发布").assertIsEnabled() }
                 true
             }.getOrDefault(false)
         }
         onEdt {
-            onNodeWithText("发布").performClick()
+            onNodeWithContentDescription("发布").performClick()
         }
         waitUntil(timeoutMillis = 3_000L) {
             onEdt {
