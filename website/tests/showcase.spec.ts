@@ -2,6 +2,23 @@ import { expect, test } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
+test("the hero avatar stays beside the centered LinDo wordmark", async ({ page }) => {
+  await page.goto("./");
+  const title = page.getByRole("heading", { level: 1, name: "LinDo", exact: true });
+  const avatar = title.locator(".hero-avatar");
+  const expression = avatar.locator('img[src$="/expressions/wink.svg"]');
+  await expect(expression).toBeVisible();
+  await expect.poll(() => expression.evaluate(image => (image as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
+
+  for (const width of [360, 768, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    const face = await avatar.boundingBox();
+    const word = await title.getByText("LinDo", { exact: true }).boundingBox();
+    expect(face!.x + face!.width).toBeLessThan(word!.x);
+    expect(Math.abs((face!.x + word!.x + word!.width) / 2 - width / 2)).toBeLessThan(1);
+  }
+});
+
 test("the README, gallery and backdrop share the same themed screenshots", async ({ page }) => {
   const readme = readFileSync(resolve(__dirname, "../../README.md"), "utf8");
   await page.goto("./");

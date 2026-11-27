@@ -20,7 +20,8 @@ export function Hero() {
       <div className="hero-inner">
         <div className="hero-header">
           <h1 id="home-title">
-            Lin<span className="brand-do">Do</span>
+            <LingduHead size={88} expression="wink" className="hero-avatar" />
+            <span>Lin<span className="brand-do">Do</span></span>
           </h1>
 
           <p className="hero-subtitle">LINUX DO 第三方客户端</p>

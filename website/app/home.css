@@ -410,11 +410,18 @@ html.dark .home .hero-wall-scrim {
 }
 
 .home .hero-header h1 {
+  display: flex;
+  align-items: center;
+  gap: 0.15em;
   font-size: clamp(54px, 7.2vw, 84px);
   font-weight: 740;
   line-height: 1.02;
   letter-spacing: -0.052em;
   color: var(--ink-1);
+}
+.home .hero-avatar {
+  max-width: 1.05em;
+  max-height: 1.05em;
 }
 html.dark .home .hero-header h1 {
   text-shadow: 0 10px 34px rgba(0, 0, 0, 0.52);
