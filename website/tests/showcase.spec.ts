@@ -1,4 +1,28 @@
 import { expect, test } from "@playwright/test";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
+test("the README, gallery and backdrop share the same themed screenshots", async ({ page }) => {
+  const readme = readFileSync(resolve(__dirname, "../../README.md"), "utf8");
+  await page.goto("./");
+  const gallery = page.getByRole("list", { name: "各端界面" });
+  for (const theme of ["light", "dark"]) {
+    const sources = await gallery.locator(`.theme-shot-${theme}`).evaluateAll(images =>
+      images.map(image => image.getAttribute("src")!.split("/shots/")[1])
+    );
+    const background = await page.locator(`.wall-img-${theme}`).evaluateAll(images =>
+      images.map(image => image.getAttribute("src")!.split("/shots/")[1])
+    );
+    const readmeSources = await page.evaluate(({ readme, theme }) =>
+      Array.from(new DOMParser().parseFromString(readme, "text/html")
+        .querySelectorAll(`picture source[media="(prefers-color-scheme: ${theme})"]`),
+        source => source.getAttribute("srcset")!.replace("website/public/shots/", "")),
+    { readme, theme });
+    expect(sources).toHaveLength(4);
+    expect(readmeSources).toEqual(sources);
+    expect(new Set(background)).toEqual(new Set(sources));
+  }
+});
 
 for (const width of [360, 768, 1440]) {
   test(`four equal-height screenshots with a gap between each pair at ${width}px`, async ({ page }) => {

@@ -19,7 +19,7 @@ npm run build
 
 ## 界面截图
 
-首页从左到右并排展示 macOS、Pixel 9、Pixel 9 Pro Fold 内屏和 Pixel Tablet 的截图。窄屏可横向滑动，点击任一设备可查看大图。四台设备都打开 Neo 的置顶帖 [《请不要把互联网上的戾气带来这里！》](https://linux.do/t/topic/482293)。Android 图片取自同一 1.1.6 本地构建的模拟器画面，保留原始分辨率，以无损 WebP 存放在 `public/shots/`。每台设备的深浅色图片在 `components/theme-screenshot.tsx` 中配对。
+首页从左到右并排展示 macOS、Pixel 9、Pixel 9 Pro Fold 内屏和 Pixel Tablet 的截图。窄屏可横向滑动，点击任一设备可查看大图。四台设备都打开 Neo 的置顶帖 [《请不要把互联网上的戾气带来这里！》](https://linux.do/t/topic/482293)。这组截图取自 v1.1.8 的 macOS 客户端和三台安装了 Android build 108 的模拟器。各设备在应用内切换深浅色后分别截图。原始分辨率的无损 WebP 存放在 `public/shots/v1.1.8/`，官网和仓库首页共用这八张图。
 
 运行 `npm run build` 后，可用 `npx playwright install chromium` 和 `npm run test:e2e` 验证截图布局、主题切换和放大操作。
 

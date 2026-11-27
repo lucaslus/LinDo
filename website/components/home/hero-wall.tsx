@@ -1,12 +1,10 @@
-/* 全幅倾斜视觉幕墙（纯装饰背景，严格随深浅色主题切换，零廉价素材） */
-
+import { APP_SCREENSHOTS, type ScreenshotKey } from "@/components/theme-screenshot";
 import { assetPath } from "@/lib/site";
 
 type ShotTile = {
   kind: "shot";
   id: string;
-  light: string;
-  dark: string;
+  shot: ScreenshotKey;
   pos: string;
   size?: "sm" | "md" | "lg";
 };
@@ -22,39 +20,39 @@ type WallTile = ShotTile | MotifTile;
 
 const ROWS: readonly (readonly WallTile[])[] = [
   [
-    { kind: "shot", id: "r1-1", light: "/shots/desktop-light.webp", dark: "/shots/desktop-dark.webp", pos: "0% 10%", size: "md" },
+    { kind: "shot", id: "r1-1", shot: "desktop", pos: "0% 10%", size: "md" },
     { kind: "motif", id: "r1-2", variant: "palette", size: "sm" },
-    { kind: "shot", id: "r1-3", light: "/shots/fold-light.webp", dark: "/shots/fold-dark.webp", pos: "50% 15%", size: "lg" },
+    { kind: "shot", id: "r1-3", shot: "fold", pos: "50% 15%", size: "lg" },
     { kind: "motif", id: "r1-4", variant: "feed", size: "md" },
-    { kind: "shot", id: "r1-5", light: "/shots/macos-v115.webp", dark: "/shots/macos-v115-dark.webp", pos: "85% 22%", size: "lg" },
+    { kind: "shot", id: "r1-5", shot: "desktop", pos: "85% 22%", size: "lg" },
     { kind: "motif", id: "r1-6", variant: "qr", size: "sm" },
-    { kind: "shot", id: "r1-7", light: "/shots/tablet-light.webp", dark: "/shots/tablet-dark.webp", pos: "18% 45%", size: "md" },
+    { kind: "shot", id: "r1-7", shot: "tablet", pos: "18% 45%", size: "md" },
   ],
   [
     { kind: "motif", id: "r2-1", variant: "reader", size: "md" },
-    { kind: "shot", id: "r2-2", light: "/shots/macos-v115.webp", dark: "/shots/macos-v115-dark.webp", pos: "14% 28%", size: "lg" },
+    { kind: "shot", id: "r2-2", shot: "desktop", pos: "14% 28%", size: "lg" },
     { kind: "motif", id: "r2-3", variant: "split", size: "sm" },
-    { kind: "shot", id: "r2-4", light: "/shots/desktop-light.webp", dark: "/shots/desktop-dark.webp", pos: "76% 18%", size: "md" },
+    { kind: "shot", id: "r2-4", shot: "desktop", pos: "76% 18%", size: "md" },
     { kind: "motif", id: "r2-5", variant: "connect", size: "md" },
-    { kind: "shot", id: "r2-6", light: "/shots/fold-light.webp", dark: "/shots/fold-dark.webp", pos: "8% 82%", size: "lg" },
+    { kind: "shot", id: "r2-6", shot: "fold", pos: "8% 82%", size: "lg" },
     { kind: "motif", id: "r2-7", variant: "brand", size: "sm" },
   ],
   [
-    { kind: "shot", id: "r3-1", light: "/shots/tablet-light.webp", dark: "/shots/tablet-dark.webp", pos: "82% 20%", size: "lg" },
+    { kind: "shot", id: "r3-1", shot: "tablet", pos: "82% 20%", size: "lg" },
     { kind: "motif", id: "r3-2", variant: "feed", size: "md" },
-    { kind: "shot", id: "r3-3", light: "/shots/phone-light.webp", dark: "/shots/phone-dark.webp", pos: "50% 24%", size: "sm" },
+    { kind: "shot", id: "r3-3", shot: "phone", pos: "50% 24%", size: "sm" },
     { kind: "motif", id: "r3-4", variant: "reader", size: "md" },
-    { kind: "shot", id: "r3-5", light: "/shots/desktop-light.webp", dark: "/shots/desktop-dark.webp", pos: "22% 58%", size: "lg" },
+    { kind: "shot", id: "r3-5", shot: "desktop", pos: "22% 58%", size: "lg" },
     { kind: "motif", id: "r3-6", variant: "palette", size: "sm" },
-    { kind: "shot", id: "r3-7", light: "/shots/macos-v115.webp", dark: "/shots/macos-v115-dark.webp", pos: "70% 56%", size: "md" },
+    { kind: "shot", id: "r3-7", shot: "desktop", pos: "70% 56%", size: "md" },
   ],
   [
     { kind: "motif", id: "r4-1", variant: "qr", size: "sm" },
-    { kind: "shot", id: "r4-2", light: "/shots/fold-light.webp", dark: "/shots/fold-dark.webp", pos: "68% 42%", size: "lg" },
+    { kind: "shot", id: "r4-2", shot: "fold", pos: "68% 42%", size: "lg" },
     { kind: "motif", id: "r4-3", variant: "reader", size: "md" },
-    { kind: "shot", id: "r4-4", light: "/shots/macos-v115.webp", dark: "/shots/macos-v115-dark.webp", pos: "20% 72%", size: "md" },
+    { kind: "shot", id: "r4-4", shot: "desktop", pos: "20% 72%", size: "md" },
     { kind: "motif", id: "r4-5", variant: "split", size: "sm" },
-    { kind: "shot", id: "r4-6", light: "/shots/tablet-light.webp", dark: "/shots/tablet-dark.webp", pos: "30% 18%", size: "lg" },
+    { kind: "shot", id: "r4-6", shot: "tablet", pos: "30% 18%", size: "lg" },
     { kind: "motif", id: "r4-7", variant: "connect", size: "md" },
   ],
 ];
@@ -206,7 +204,7 @@ export function HeroBackdropWall() {
                         <>
                           {/* eslint-disable-next-line @next/next/no-img-element */}
                           <img
-                            src={assetPath(tile.light)}
+                            src={assetPath(APP_SCREENSHOTS[tile.shot].light)}
                             alt=""
                             className="wall-tile-img wall-img-light"
                             style={{ objectPosition: tile.pos }}
@@ -214,7 +212,7 @@ export function HeroBackdropWall() {
                           />
                           {/* eslint-disable-next-line @next/next/no-img-element */}
                           <img
-                            src={assetPath(tile.dark)}
+                            src={assetPath(APP_SCREENSHOTS[tile.shot].dark)}
                             alt=""
                             className="wall-tile-img wall-img-dark"
                             style={{ objectPosition: tile.pos }}

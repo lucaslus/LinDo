@@ -12,24 +12,24 @@
 </p>
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="website/public/shots/macos-v115-dark.webp">
-    <source media="(prefers-color-scheme: light)" srcset="website/public/shots/macos-v115.webp">
-    <img src="website/public/shots/macos-v115.webp" width="31.4%" alt="macOS 窗口并排显示话题列表和 Neo 的置顶帖《请不要把互联网上的戾气带来这里！》">
+    <source media="(prefers-color-scheme: dark)" srcset="website/public/shots/v1.1.8/desktop-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="website/public/shots/v1.1.8/desktop-light.webp">
+    <img src="website/public/shots/v1.1.8/desktop-light.webp" width="31.4%" alt="macOS 窗口并排显示话题列表和 Neo 的置顶帖《请不要把互联网上的戾气带来这里！》">
   </picture>
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="website/public/shots/phone-dark-neo.webp">
-    <source media="(prefers-color-scheme: light)" srcset="website/public/shots/phone-light-neo.webp">
-    <img src="website/public/shots/phone-light-neo.webp" width="9.25%" alt="Pixel 9 竖屏阅读置顶帖">
+    <source media="(prefers-color-scheme: dark)" srcset="website/public/shots/v1.1.8/phone-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="website/public/shots/v1.1.8/phone-light.webp">
+    <img src="website/public/shots/v1.1.8/phone-light.webp" width="9.25%" alt="Pixel 9 竖屏阅读置顶帖">
   </picture>
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="website/public/shots/fold-dark-neo.webp">
-    <source media="(prefers-color-scheme: light)" srcset="website/public/shots/fold-light-neo.webp">
-    <img src="website/public/shots/fold-light-neo.webp" width="20%" alt="Pixel 9 Pro Fold 展开内屏，左侧是话题列表，右侧是置顶帖正文">
+    <source media="(prefers-color-scheme: dark)" srcset="website/public/shots/v1.1.8/fold-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="website/public/shots/v1.1.8/fold-light.webp">
+    <img src="website/public/shots/v1.1.8/fold-light.webp" width="20%" alt="Pixel 9 Pro Fold 展开内屏，左侧是话题列表，右侧是置顶帖正文">
   </picture>
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="website/public/shots/tablet-dark-neo.webp">
-    <source media="(prefers-color-scheme: light)" srcset="website/public/shots/tablet-light-neo.webp">
-    <img src="website/public/shots/tablet-light-neo.webp" width="33.25%" alt="Pixel Tablet 横屏分栏阅读置顶帖">
+    <source media="(prefers-color-scheme: dark)" srcset="website/public/shots/v1.1.8/tablet-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="website/public/shots/v1.1.8/tablet-light.webp">
+    <img src="website/public/shots/v1.1.8/tablet-light.webp" width="33.25%" alt="Pixel Tablet 横屏分栏阅读置顶帖">
   </picture>
 </p>
 
