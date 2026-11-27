@@ -7,6 +7,15 @@ export type Release = {
 
 export const CHANGELOG: Release[] = [
   {
+    date: "2026-11-28",
+    version: "v1.1.12",
+    items: [
+      "修复了 Android 验证通过后仍被后台轮询清空验证票据、反复弹出安全验证及校验未通过提示的问题。",
+      "优化了 Android 切网、长后台恢复与 VPN 下的连接收敛稳定性，减少请求中断。",
+      "将「需安全确认」提示从右上角移至底部悬浮层，不再挤占顶部布局，页面正常加载后自动收起。",
+    ],
+  },
+  {
     date: "2026-11-27",
     version: "v1.1.11",
     items: [
