@@ -513,9 +513,9 @@ class Wave2ParityRegressionTest {
                 csrfProbeChallenged = false
             )
         )
-        // Clean IP: cf_clearance empty after purge, origin 404 reached -> first requests single /session/csrf.json probe
+        // Clean IP: cf_clearance empty after pre-load purge + Discourse origin 404/DOM reached without challenge -> PASS immediately (ZERO secondary probe!)
         assertEquals(
-            ForceRefreshEval.PROBE_CSRF_ONCE,
+            ForceRefreshEval.PASS_CLEAN_IP_NO_COOKIE,
             ManualForceRefreshPolicy.evaluateOutcome(
                 forceRefresh = true,
                 freshClearance = null,
@@ -526,7 +526,6 @@ class Wave2ParityRegressionTest {
                 csrfProbeChallenged = false
             )
         )
-        // Clean IP: /session/csrf.json returns 200 OK without cf-mitigated: challenge -> PASS cleanly (ZERO loop!)
         assertEquals(
             ForceRefreshEval.PASS_CLEAN_IP_NO_COOKIE,
             ManualForceRefreshPolicy.evaluateOutcome(
@@ -624,5 +623,128 @@ class Wave2ParityRegressionTest {
         assertTrue(expiredSpec.contains("domain=.linux.do", ignoreCase = true))
         assertTrue(expiredSpec.contains("partitioned", ignoreCase = true))
         assertTrue(expiredSpec.endsWith("Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT"), "Epoch deletion must appear last: $expiredSpec")
+    }
+
+    @Test
+    fun rotatedClearanceXhrConfirmDismissPromotionAndSyntheticPausePreventInfiniteVerifyLoop() {
+        do_.linux.lindo.core.network.CfClearanceAuthority.reset()
+        try {
+            val initialSet = setOf("incumbent_cf_001")
+            val purgedSet = setOf("incumbent_cf_001")
+            val probedFailed = mutableSetOf<String>()
+
+            // 1. Unsolved Turnstile (empty jar, pre-existing incumbent, or purged stale cookie) MUST NEVER yield a rotated candidate
+            assertEquals(
+                null,
+                do_.linux.lindo.core.network.CfClearanceAuthority.selectRotatedVerifyCandidate(
+                    observedClearances = emptyList(),
+                    initialClearances = initialSet,
+                    purgedStaleClearances = purgedSet,
+                    probedFailedClearances = probedFailed
+                )
+            )
+            assertEquals(
+                null,
+                do_.linux.lindo.core.network.CfClearanceAuthority.selectRotatedVerifyCandidate(
+                    observedClearances = listOf("incumbent_cf_001"),
+                    initialClearances = initialSet,
+                    purgedStaleClearances = emptySet(),
+                    probedFailedClearances = probedFailed
+                ),
+                "Pre-existing cookie at modal open must NEVER false-pass while Turnstile is unsolved"
+            )
+
+            // 2. Once Turnstile issues a brand-new cf_clearance, selectRotatedVerifyCandidate picks it immediately
+            assertEquals(
+                "fresh_rotated_cf_002",
+                do_.linux.lindo.core.network.CfClearanceAuthority.selectRotatedVerifyCandidate(
+                    observedClearances = listOf("incumbent_cf_001", "fresh_rotated_cf_002"),
+                    initialClearances = initialSet,
+                    purgedStaleClearances = purgedSet,
+                    probedFailedClearances = probedFailed
+                )
+            )
+
+            // 3. XHR probe outcome classification matches PC bridge.rs parity
+            assertEquals(
+                do_.linux.lindo.core.network.RotatedXhrProbeOutcome.CONFIRMED_PASS,
+                ManualForceRefreshPolicy.evaluateRotatedXhrProbe(status = 200, challenged = false)
+            )
+            assertEquals(
+                do_.linux.lindo.core.network.RotatedXhrProbeOutcome.REJECT_MARK_CHALLENGED,
+                ManualForceRefreshPolicy.evaluateRotatedXhrProbe(status = 200, challenged = true)
+            )
+            assertEquals(
+                do_.linux.lindo.core.network.RotatedXhrProbeOutcome.REJECT_MARK_CHALLENGED,
+                ManualForceRefreshPolicy.evaluateRotatedXhrProbe(status = 403, challenged = false)
+            )
+            assertEquals(
+                do_.linux.lindo.core.network.RotatedXhrProbeOutcome.REJECT_DO_NOT_REPOLL,
+                ManualForceRefreshPolicy.evaluateRotatedXhrProbe(status = 429, challenged = false)
+            )
+            assertEquals(
+                do_.linux.lindo.core.network.RotatedXhrProbeOutcome.TRANSIENT_ABORT_RETRYABLE,
+                ManualForceRefreshPolicy.evaluateRotatedXhrProbe(status = 0, challenged = false)
+            )
+
+            // 4. User closing (×) modal:
+            //    - Genuine cancel before rotation -> false (arms snooze + pill)
+            //    - Closing after Turnstile rotated fresh_rotated_cf_002 -> true (promotes to connection check!)
+            //    - Closing after candidate failed XHR or was marked challenged -> false
+            assertFalse(
+                ManualForceRefreshPolicy.shouldCompleteVerifyOnUserDismiss(
+                    observedClearances = listOf("incumbent_cf_001"),
+                    initialClearances = initialSet,
+                    purgedStaleClearances = emptySet(),
+                    probedFailedClearances = probedFailed
+                )
+            )
+            assertTrue(
+                ManualForceRefreshPolicy.shouldCompleteVerifyOnUserDismiss(
+                    observedClearances = listOf("fresh_rotated_cf_002"),
+                    initialClearances = initialSet,
+                    purgedStaleClearances = purgedSet,
+                    probedFailedClearances = probedFailed
+                ),
+                "Closing modal after cf_clearance already rotated must promote to connection verification"
+            )
+            probedFailed.add("bad_rotated_cf_003")
+            assertFalse(
+                ManualForceRefreshPolicy.shouldCompleteVerifyOnUserDismiss(
+                    observedClearances = listOf("bad_rotated_cf_003"),
+                    initialClearances = initialSet,
+                    purgedStaleClearances = purgedSet,
+                    probedFailedClearances = probedFailed
+                )
+            )
+            do_.linux.lindo.core.network.CfClearanceAuthority.noteChallenged("challenged_cf_004")
+            assertFalse(
+                ManualForceRefreshPolicy.shouldCompleteVerifyOnUserDismiss(
+                    observedClearances = listOf("challenged_cf_004"),
+                    initialClearances = initialSet,
+                    purgedStaleClearances = purgedSet,
+                    probedFailedClearances = probedFailed
+                )
+            )
+
+            // 5. Local synthetic pause short-circuit is distinguished from real network Cloudflare challenge HTML
+            assertTrue(
+                do_.linux.lindo.core.network.LinuxDoRepository.isLocalPausedVerificationResponse(
+                    "${do_.linux.lindo.core.network.CF_MITIGATED_CHALLENGE_PREFIX}<html>需要完成站点验证</html>"
+                )
+            )
+            assertFalse(
+                do_.linux.lindo.core.network.LinuxDoRepository.isLocalPausedVerificationResponse(
+                    "${do_.linux.lindo.core.network.CF_MITIGATED_CHALLENGE_PREFIX}<html>cf-browser-verification</html>"
+                )
+            )
+            assertFalse(
+                do_.linux.lindo.core.network.LinuxDoRepository.isLocalPausedVerificationResponse(
+                    "${do_.linux.lindo.core.network.CF_MITIGATED_CHALLENGE_PREFIX}<html><head><title>Just a moment...</title></head></html>"
+                )
+            )
+        } finally {
+            do_.linux.lindo.core.network.CfClearanceAuthority.reset()
+        }
     }
 }

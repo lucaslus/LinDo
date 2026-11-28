@@ -2968,6 +2968,11 @@ object LinuxDoRepository {
         return !desktopProbe && (NetworkRecoveryPolicy.verifying || isChallengeCooldownActive())
     }
 
+    internal fun isLocalPausedVerificationResponse(body: String?): Boolean {
+        if (body.isNullOrBlank()) return false
+        return body.removePrefix(CF_MITIGATED_CHALLENGE_PREFIX).trim() == "<html>需要完成站点验证</html>"
+    }
+
     internal fun isChallengeCooldownActive(): Boolean =
         System.currentTimeMillis() < challengeBlockedUntilMs.get()
 
@@ -3167,7 +3172,8 @@ object LinuxDoRepository {
                     ) {
                         onPreSendFailure?.invoke(diagReason)
                     }
-                    if (!isSilentTiming && (result == null || !isExpectedResponse(result.first, result.second))) {
+                    val isLocalSyntheticPause = result != null && isLocalPausedVerificationResponse(result.second)
+                    if (!isSilentTiming && !isLocalSyntheticPause && (result == null || !isExpectedResponse(result.first, result.second))) {
                         val cfFlag = if (result != null && looksLikeCloudflareChallenge(result.second)) "challenge" else null
                         val cleanSnippet = when {
                             result != null -> result.second.removePrefix(CF_MITIGATED_CHALLENGE_PREFIX)
@@ -3209,7 +3215,7 @@ object LinuxDoRepository {
                 val writeResult = callWebView()
                 val writeIsCfChallenge = writeResult != null && looksLikeCloudflareChallenge(writeResult.second)
                 if (!isSilentTiming && writeResult?.first == 429 && !writeIsCfChallenge && (!NetworkRecoveryPolicy.enabled || !isRateLimitedNow())) noteRateLimitHit()
-                if (writeIsCfChallenge) {
+                if (writeIsCfChallenge && !isLocalPausedVerificationResponse(writeResult?.second)) {
                     if (SilentVerifyPolicy.backgroundChallengeArmsGlobalPause(!isForegroundRequest)) {
                         noteChallengeHit()
                     } else {
@@ -3258,7 +3264,7 @@ object LinuxDoRepository {
                     }
                     val candidateIsCfChallenge = candidate != null && looksLikeCloudflareChallenge(candidate.second)
                     if (candidate?.first == 429 && !candidateIsCfChallenge && (!NetworkRecoveryPolicy.enabled || !isRateLimitedNow())) noteRateLimitHit()
-                    if (candidateIsCfChallenge) {
+                    if (candidateIsCfChallenge && !isLocalPausedVerificationResponse(candidate?.second)) {
                         if (SilentVerifyPolicy.backgroundChallengeArmsGlobalPause(!isForegroundRequest)) {
                             noteChallengeHit()
                         } else {

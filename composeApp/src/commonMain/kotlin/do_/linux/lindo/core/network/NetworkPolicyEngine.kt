@@ -935,6 +935,17 @@ enum class ForceRefreshEval {
     REJECT_CHALLENGED_OR_FAILED
 }
 
+enum class RotatedXhrProbeOutcome {
+    /** `/session/csrf.json` returned 2xx without `cf-mitigated: challenge` -> fresh ticket confirmed! */
+    CONFIRMED_PASS,
+    /** Status <= 0 (navigation / network abort) -> allow retry in next probe cycle without blacklisting. */
+    TRANSIENT_ABORT_RETRYABLE,
+    /** Returned 403 or `cf-mitigated: challenge` -> mark candidate challenged and never re-probe it. */
+    REJECT_MARK_CHALLENGED,
+    /** Returned non-2xx (e.g. 429/500) without challenge header -> stop re-probing this candidate without poisoning CfClearanceAuthority. */
+    REJECT_DO_NOT_REPOLL
+}
+
 /**
  * Pure single-shot `forceRefresh` policy for Settings -> `站点安全验证`.
  *
@@ -979,8 +990,8 @@ object ManualForceRefreshPolicy {
         purgedStaleClearances: Set<String>,
         originReached: Boolean,
         hasChallengeOrWidget: Boolean,
-        csrfProbeStatus: Int?,
-        csrfProbeChallenged: Boolean
+        csrfProbeStatus: Int? = null,
+        csrfProbeChallenged: Boolean = false
     ): ForceRefreshEval {
         if (!forceRefresh) {
             return if (originReached && !hasChallengeOrWidget) ForceRefreshEval.PASS_NEW_TICKET
@@ -997,14 +1008,41 @@ object ManualForceRefreshPolicy {
                 ForceRefreshEval.PASS_NEW_TICKET
             }
         }
-        if (csrfProbeStatus == null) {
-            return ForceRefreshEval.PROBE_CSRF_ONCE
-        }
-        if (csrfProbeChallenged || csrfProbeStatus != 200) {
+        if (csrfProbeChallenged || (csrfProbeStatus != null && csrfProbeStatus !in 200..299)) {
             return ForceRefreshEval.REJECT_CHALLENGED_OR_FAILED
         }
+        // CF cookies were already purged before /challenge loaded; reaching Discourse origin without
+        // challenge proves Cloudflare WAF allowed the request cleanly — pass immediately with zero secondary probe!
         return ForceRefreshEval.PASS_CLEAN_IP_NO_COOKIE
     }
+
+    fun evaluateRotatedXhrProbe(
+        status: Int,
+        challenged: Boolean
+    ): RotatedXhrProbeOutcome = when {
+        status in 200..299 && !challenged -> RotatedXhrProbeOutcome.CONFIRMED_PASS
+        status <= 0 -> RotatedXhrProbeOutcome.TRANSIENT_ABORT_RETRYABLE
+        challenged || status == 403 -> RotatedXhrProbeOutcome.REJECT_MARK_CHALLENGED
+        else -> RotatedXhrProbeOutcome.REJECT_DO_NOT_REPOLL
+    }
+
+    /**
+     * When the user taps `×` on a verification modal AFTER Turnstile already rotated a fresh,
+     * unchallenged `cf_clearance` during that modal session, route completion to connection verification
+     * instead of falsely arming the 180s dismiss snooze & stuck `待验证` / `需安全确认` indicators.
+     * Genuine cancellation before any ticket rotation returns `false`.
+     */
+    fun shouldCompleteVerifyOnUserDismiss(
+        observedClearances: Collection<String>,
+        initialClearances: Set<String>,
+        purgedStaleClearances: Set<String> = emptySet(),
+        probedFailedClearances: Set<String> = emptySet()
+    ): Boolean = CfClearanceAuthority.selectRotatedVerifyCandidate(
+        observedClearances = observedClearances,
+        initialClearances = initialClearances,
+        purgedStaleClearances = purgedStaleClearances,
+        probedFailedClearances = probedFailedClearances
+    ) != null
 
     /**
      * Strips any `cf_clearance` entry whose trimmed value is in [purgedStaleClearances]

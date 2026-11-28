@@ -18,6 +18,7 @@ internal fun webVerificationProbeScript(): String = """
     var isOrigin404Body = lowerHtml.indexOf('page-not-found') !== -1 ||
         lowerHtml.indexOf('"errortype":"notfound"') !== -1 ||
         lowerHtml.indexOf('404-body') !== -1 ||
+        (pathname.indexOf('/challenge') === 0 && /^not found\.?$/i.test(bodyText.trim())) ||
         /exist or is private|page you requested|该页面不存在|页面不存在或为私密/i.test(bodyText);
     var hasWidget = !!document.querySelector('#challenge-stage,.cf-turnstile,#turnstile-wrapper,iframe[src*="challenges.cloudflare.com"]');
     var hasInteractiveSignal = window.__lindoTurnstileInteractiveBegin === true;
@@ -132,5 +133,149 @@ internal fun webVerificationProbeScript(): String = """
         }
     })();
     return result({waiting:true});
+})();
+""".trimIndent()
+
+/**
+ * Single-shot clean-IP `/session/csrf.json` XHR probe for manual `forceRefresh` when `/challenge`
+ * reaches Discourse origin 404 without issuing a `cf_clearance` cookie.
+ * MUST include `Accept: application/json` and `X-Requested-With: XMLHttpRequest` so Discourse Rails'
+ * `check_xhr` filter returns 200 JSON instead of rejecting with 404 HTML.
+ */
+internal fun forceRefreshCsrfProbeScript(): String = """
+(function() {
+    if (location.origin !== 'https://linux.do' || document.readyState === 'loading') return JSON.stringify({pending:true});
+    if (window.__lindoForceRefreshCsrfResult) return JSON.stringify(window.__lindoForceRefreshCsrfResult);
+    if (window.__lindoForceRefreshCsrfRunning) return JSON.stringify({pending:true});
+    window.__lindoForceRefreshCsrfRunning = true;
+    (async function() {
+        var controller = new AbortController();
+        var timer = setTimeout(function() { controller.abort(); }, 8000);
+        try {
+            var r = await fetch('/session/csrf.json', {
+                credentials: 'include',
+                cache: 'no-store',
+                headers: {
+                    'Accept': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest'
+                },
+                signal: controller.signal
+            });
+            var mitigated = (r.headers.get('cf-mitigated') || '').toLowerCase();
+            if (mitigated.indexOf('challenge') !== -1) {
+                window.__lindoForceRefreshCsrfResult = { status: r.status, challenged: true, ok: false };
+                return;
+            }
+            if (r.status >= 200 && r.status < 300) {
+                var data = await r.json().catch(function() { return null; });
+                var csrf = (data && typeof data.csrf === 'string') ? data.csrf : '';
+                window.__lindoForceRefreshCsrfResult = { status: r.status, challenged: false, ok: true, csrf: csrf };
+                return;
+            }
+            window.__lindoForceRefreshCsrfResult = { status: r.status, challenged: false, ok: false };
+        } catch (_) {
+            window.__lindoForceRefreshCsrfResult = { status: 0, challenged: false, ok: false };
+        } finally {
+            window.__lindoForceRefreshCsrfRunning = false;
+            clearTimeout(timer);
+        }
+    })();
+    return JSON.stringify({pending:true});
+})();
+""".trimIndent()
+
+private fun escapeJsStringLiteral(value: String): String = buildString(value.length + 4) {
+    append('"')
+    for (ch in value) {
+        when (ch) {
+            '\\' -> append("\\\\")
+            '"' -> append("\\\"")
+            '\n' -> append("\\n")
+            '\r' -> append("\\r")
+            '\t' -> append("\\t")
+            else -> append(ch)
+        }
+    }
+    append('"')
+}
+
+/**
+ * PC `bridge.rs::confirm_fresh_cf_clearance_via_xhr` parity for Android WebView:
+ * Once `CookieManager` observes a genuinely rotated `cf_clearance` (keyed by opaque [candidateKey]),
+ * confirms via same-origin XHR `GET /session/csrf.json` that Cloudflare WAF + Discourse Rails accept it,
+ * even when `/challenge` stays on the Turnstile DOM or `POST /challenge` returned non-404 status.
+ */
+internal fun rotatedClearanceXhrProbeScript(candidateKey: String): String {
+    val quotedKey = escapeJsStringLiteral(candidateKey)
+    return ROTATED_CLEARANCE_XHR_PROBE_TEMPLATE.replace("__LINDO_CANDIDATE_KEY__", quotedKey)
+}
+
+private val ROTATED_CLEARANCE_XHR_PROBE_TEMPLATE: String = """
+(function() {
+    var key = __LINDO_CANDIDATE_KEY__;
+    if (typeof location === 'undefined' || !location || location.origin !== 'https://linux.do' || document.readyState === 'loading') {
+        return JSON.stringify({ key: key, pending: true });
+    }
+    var nowMs = (typeof Date !== 'undefined' && Date.now) ? Date.now() : 0;
+    var st = window.__lindoRotatedCfProbe;
+    if (st && st.key === key) {
+        if (st.pending) {
+            return JSON.stringify({ key: key, pending: true });
+        }
+        if (st.status === 0 && (st.zeroRetries || 0) < 2 && (nowMs - (st.finishedAt || 0)) >= 600) {
+            // Transient abort during post-Turnstile navigation: allow up to 2 retries on settled document.
+        } else {
+            return JSON.stringify(st);
+        }
+    }
+    var prevZeroRetries = (st && st.key === key) ? (st.zeroRetries || 0) : 0;
+    window.__lindoRotatedCfProbe = { key: key, pending: true, zeroRetries: prevZeroRetries };
+    (async function() {
+        var controller = new AbortController();
+        var timer = setTimeout(function() { controller.abort(); }, 5000);
+        try {
+            var r = await fetch('/session/csrf.json', {
+                credentials: 'include',
+                cache: 'no-store',
+                headers: {
+                    'Accept': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest'
+                },
+                signal: controller.signal
+            });
+            var cf = (r.headers.get('cf-mitigated') || '').toLowerCase();
+            var challenged = cf.indexOf('challenge') !== -1;
+            var ok = r.status >= 200 && r.status < 300 && !challenged;
+            var csrf = '';
+            if (ok) {
+                var data = await r.json().catch(function() { return null; });
+                csrf = (data && typeof data.csrf === 'string') ? data.csrf : '';
+            }
+            window.__lindoRotatedCfProbe = {
+                key: key,
+                pending: false,
+                status: r.status,
+                challenged: challenged,
+                ok: ok,
+                csrf: csrf,
+                zeroRetries: prevZeroRetries,
+                finishedAt: (typeof Date !== 'undefined' && Date.now) ? Date.now() : 0
+            };
+        } catch (_) {
+            window.__lindoRotatedCfProbe = {
+                key: key,
+                pending: false,
+                status: 0,
+                challenged: false,
+                ok: false,
+                csrf: '',
+                zeroRetries: prevZeroRetries + 1,
+                finishedAt: (typeof Date !== 'undefined' && Date.now) ? Date.now() : 0
+            };
+        } finally {
+            clearTimeout(timer);
+        }
+    })();
+    return JSON.stringify({ key: key, pending: true });
 })();
 """.trimIndent()

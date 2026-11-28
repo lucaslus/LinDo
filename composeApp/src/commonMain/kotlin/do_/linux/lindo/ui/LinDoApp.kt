@@ -2044,6 +2044,15 @@ internal fun LinDoApp(
     val verifyWaiters = remember { mutableSetOf<(VerificationDialogResult) -> Unit>() }
     var embeddedPageGeneration by remember { mutableStateOf(0L) }
     var networkOpenedPageGeneration by remember { mutableStateOf<Long?>(null) }
+    var openingVerifyModal by remember { mutableStateOf(false) }
+    fun isVerificationModalOpen(): Boolean =
+        showSiteVerifySheet ||
+            activeWebLoginUrl?.let { do_.linux.lindo.core.network.webPagePurpose(it) == do_.linux.lindo.core.network.WebPagePurpose.VERIFICATION } == true
+    LaunchedEffect(activeWebLoginUrl, showSiteVerifySheet) {
+        if (activeWebLoginUrl != null || showSiteVerifySheet) {
+            openingVerifyModal = false
+        }
+    }
     fun openEmbeddedPage(url: String) {
         networkOpenedPageGeneration = null
         embeddedPageGeneration++
@@ -2096,6 +2105,7 @@ internal fun LinDoApp(
     }
 
     fun openManualSiteVerifyFromSettings() {
+        if (isVerificationModalOpen() || openingVerifyModal) return
         if (handleConnectionAction()) return
         rootFocusManager.clearFocus(force = true)
         rootKeyboardController?.hide()
@@ -2131,7 +2141,7 @@ internal fun LinDoApp(
         val trimmed = url.trim()
         val isExplicitVerifyTarget = trimmed.endsWith("#lindo-verify", ignoreCase = true)
         val isSiteRecovery = trimmed.trimEnd('/').equals("https://linux.do", ignoreCase = true)
-        if ((isExplicitVerifyTarget || isSiteRecovery) && handleConnectionAction()) return
+        if ((isExplicitVerifyTarget || isSiteRecovery) && (isVerificationModalOpen() || openingVerifyModal || handleConnectionAction())) return
         if (isExplicitVerifyTarget) {
             // 统一将所有站点验证入口路由至轻量 /challenge 端点（Cloudflare WAF 必拦截签发读写级 cf_clearance，且通过后仅落入轻量 404 而非重型主站或 Rails Oops）
             pendingVerifyTargetUrl = "https://linux.do/challenge#lindo-verify"
@@ -4062,6 +4072,7 @@ internal fun LinDoApp(
                                 .background(palette.cardSurface.copy(alpha = 0.94f), CircleShape)
                                 .border(0.5.dp, palette.hairline, CircleShape)
                                 .clickable {
+                                    if (isVerificationModalOpen() || openingVerifyModal) return@clickable
                                     if (handleConnectionAction()) return@clickable
                                     PlatformWebLoginHost.armOneShotForceRefresh(false)
                                     do_.linux.lindo.core.network.NetworkPolicyEngine.clearUserDismissedVerify()
@@ -4070,6 +4081,11 @@ internal fun LinDoApp(
                                     delayedVerifyPill = false
                                     val customExpand = PlatformSessionRecovery.onExpandVerifyPill
                                     if (customExpand != null) {
+                                        openingVerifyModal = true
+                                        scope.launch {
+                                            kotlinx.coroutines.delay(1_200L)
+                                            openingVerifyModal = false
+                                        }
                                         customExpand()
                                     } else if (hasEmbeddedWebLogin) {
                                         openEmbeddedPage("https://linux.do/challenge#lindo-verify")
@@ -5554,6 +5570,7 @@ internal fun LinDoApp(
                                         lastSiteVerifiedAtMs = System.currentTimeMillis()
                                         showSiteVerifySheet = false
                                         if (PlatformSessionRecovery.checkForumConnection != null) {
+                                            PlatformSessionRecovery.forumConnection.clearIfNotChecking()
                                             verificationFeedbackNotice = null
                                             checkPassedConnection(explicitRetry = false)
                                         } else {

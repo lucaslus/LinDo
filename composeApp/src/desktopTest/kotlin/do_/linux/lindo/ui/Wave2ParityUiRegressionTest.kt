@@ -1087,7 +1087,27 @@ class Wave2ParityUiRegressionTest {
             edt { PlatformSessionRecovery.openEmbeddedVerifyModal?.invoke {} }
             waitUntil(timeoutMillis = 5_000L) { openedUrls.contains("https://linux.do/challenge#lindo-verify") }
             assertEquals(listOf(false), capturedForceRefreshFlags.toList(), "Reactive verify modal must keep forceRefresh = false")
+            // 2c. Single-flight modal guard: re-triggering manual verify while modal is ALREADY open must NOT tear down & spawn session=2
+            edt { onNodeWithTag("settings_site_verify_row").performClick() }
+            waitForIdle()
+            assertEquals(1, openedUrls.size, "Manual verify while modal is already open must not spawn a duplicate session")
             edt { onVerifiedCallback?.invoke() }
+
+            // 2d. Android production parity (checkForumConnection == null): completing verification immediately clears
+            //     dismiss snooze + verify pill + attention flag and surfaces "安全验证已刷新" with zero blocking secondary probe!
+            openedUrls.clear()
+            assertEquals(null, PlatformSessionRecovery.checkForumConnection, "Default production checkForumConnection must stay null so post-verify never blocks on a secondary GET gate")
+            NetworkPolicyEngine.recordUserDismissedVerify()
+            PlatformSessionRecovery.verifyPillVisible = true
+            val postDismissWaiters = mutableListOf<VerificationDialogResult>()
+            edt { PlatformSessionRecovery.openEmbeddedVerifyModal?.invoke { postDismissWaiters.add(it) } }
+            waitUntil(timeoutMillis = 5_000L) { openedUrls.contains("https://linux.do/challenge#lindo-verify") }
+            edt { onVerifiedCallback?.invoke() }
+            waitForText("安全验证已刷新")
+            assertEquals(listOf(VerificationDialogResult.Passed), postDismissWaiters)
+            assertTrue(!NetworkPolicyEngine.verifyAttentionNeeded, "Attention flag must clear immediately upon verification pass")
+            assertTrue(!NetworkPolicyEngine.isProactiveVerifySnoozed(), "Dismiss snooze must clear immediately upon verification pass")
+            assertTrue(!PlatformSessionRecovery.verifyPillVisible, "Verify pill must hide immediately upon verification pass")
 
             // 3. Post image renders reserved aspect-ratio skeleton while Coil is genuinely loading
             stage = 2

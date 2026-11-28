@@ -110,6 +110,31 @@ object CfClearanceAuthority {
         }
     }
 
+    /**
+     * Picks a genuinely newly-issued `cf_clearance` observed during an active verification session
+     * (mirroring PC `bridge.rs::confirm_fresh_cf_clearance_via_xhr` candidate filtering):
+     * - Must NOT be present in [initialClearances] (cookies already in the jar before verification started);
+     * - Must NOT be in [purgedStaleClearances] or [probedFailedClearances];
+     * - Must NOT be flagged by [isChallenged].
+     */
+    @Synchronized
+    fun selectRotatedVerifyCandidate(
+        observedClearances: Collection<String>,
+        initialClearances: Set<String>,
+        purgedStaleClearances: Set<String> = emptySet(),
+        probedFailedClearances: Set<String> = emptySet()
+    ): String? = observedClearances
+        .asSequence()
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .filter {
+            it !in initialClearances &&
+                it !in purgedStaleClearances &&
+                it !in probedFailedClearances &&
+                !isChallenged(it)
+        }
+        .lastOrNull()
+
     @Synchronized
     fun selectWinner(
         observedValues: List<String>,
