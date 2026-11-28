@@ -2104,8 +2104,19 @@ internal fun LinDoApp(
         topicDetailUiCache.clear()
     }
 
+    fun blockedByChallengeLoopGuard(): Boolean {
+        if (!do_.linux.lindo.core.network.ChallengeLoopGuard.ENABLED) return false
+        val remain = do_.linux.lindo.core.network.NetworkPolicyEngine.challengeLoopGuard.backoffRemainMs()
+        if (remain <= 0L) return false
+        do_.linux.lindo.core.network.NetworkPolicyEngine.updateVerifyAttentionNeeded(false)
+        PlatformSessionRecovery.verifyPillVisible = false
+        verificationFeedbackNotice = do_.linux.lindo.core.network.ChallengeLoopGuard.backoffMessage(remain)
+        return true
+    }
+
     fun openManualSiteVerifyFromSettings() {
         if (isVerificationModalOpen() || openingVerifyModal) return
+        if (blockedByChallengeLoopGuard()) return
         if (handleConnectionAction()) return
         rootFocusManager.clearFocus(force = true)
         rootKeyboardController?.hide()
@@ -2141,7 +2152,7 @@ internal fun LinDoApp(
         val trimmed = url.trim()
         val isExplicitVerifyTarget = trimmed.endsWith("#lindo-verify", ignoreCase = true)
         val isSiteRecovery = trimmed.trimEnd('/').equals("https://linux.do", ignoreCase = true)
-        if ((isExplicitVerifyTarget || isSiteRecovery) && (isVerificationModalOpen() || openingVerifyModal || handleConnectionAction())) return
+        if ((isExplicitVerifyTarget || isSiteRecovery) && (isVerificationModalOpen() || openingVerifyModal || blockedByChallengeLoopGuard() || handleConnectionAction())) return
         if (isExplicitVerifyTarget) {
             // 统一将所有站点验证入口路由至轻量 /challenge 端点（Cloudflare WAF 必拦截签发读写级 cf_clearance，且通过后仅落入轻量 404 而非重型主站或 Rails Oops）
             pendingVerifyTargetUrl = "https://linux.do/challenge#lindo-verify"
@@ -2810,8 +2821,11 @@ internal fun LinDoApp(
     DisposableEffect(hasEmbeddedWebLogin) {
         PlatformSessionRecovery.openEmbeddedVerifyModal = { onResult ->
             val target = "https://linux.do/challenge#lindo-verify"
-            if (PlatformSessionRecovery.forumConnection.stage != ForumConnectionStage.Idle ||
-                (activeWebLoginUrl != null && activeWebLoginUrl != target)) {
+            if ((do_.linux.lindo.core.network.ChallengeLoopGuard.ENABLED &&
+                    do_.linux.lindo.core.network.NetworkPolicyEngine.challengeLoopGuard.isBackingOff()) ||
+                PlatformSessionRecovery.forumConnection.stage != ForumConnectionStage.Idle ||
+                (activeWebLoginUrl != null && activeWebLoginUrl != target)
+            ) {
                 onResult(VerificationDialogResult.Unavailable)
             } else {
                 verifyWaiters.add(onResult)
@@ -4014,9 +4028,13 @@ internal fun LinDoApp(
                         delayedVerifyPill = false
                     }
                 }
-                val showVerifyAttentionPill = do_.linux.lindo.core.network.NetworkPolicyEngine.verifyAttentionNeeded
+                val loopGuardBackoffUntil = do_.linux.lindo.core.network.NetworkPolicyEngine.challengeLoopBackoffUntilMs
+                val loopGuardBackingOff = do_.linux.lindo.core.network.ChallengeLoopGuard.ENABLED &&
+                    (loopGuardBackoffUntil > System.currentTimeMillis() ||
+                        do_.linux.lindo.core.network.NetworkPolicyEngine.challengeLoopGuard.isBackingOff())
+                val showVerifyAttentionPill = !loopGuardBackingOff && do_.linux.lindo.core.network.NetworkPolicyEngine.verifyAttentionNeeded
                 val forumStage = PlatformSessionRecovery.forumConnection.stage
-                val showVerificationStatus = (forumStage != ForumConnectionStage.Idle || delayedVerifyPill || PlatformSessionRecovery.verifyPillVisible || showVerifyAttentionPill) && !showSiteVerifySheet && activeWebLoginUrl == null && !authCompleting
+                val showVerificationStatus = !loopGuardBackingOff && (forumStage != ForumConnectionStage.Idle || delayedVerifyPill || PlatformSessionRecovery.verifyPillVisible || showVerifyAttentionPill) && !showSiteVerifySheet && activeWebLoginUrl == null && !authCompleting
                 val activeExpiredUser = sessionExpiredBannerUser?.takeIf {
                     !isAuthorized && !showAuthSheet && activeWebLoginUrl == null && guestLoginPrompt == null
                 }
@@ -4073,6 +4091,7 @@ internal fun LinDoApp(
                                 .border(0.5.dp, palette.hairline, CircleShape)
                                 .clickable {
                                     if (isVerificationModalOpen() || openingVerifyModal) return@clickable
+                                    if (blockedByChallengeLoopGuard()) return@clickable
                                     if (handleConnectionAction()) return@clickable
                                     PlatformWebLoginHost.armOneShotForceRefresh(false)
                                     do_.linux.lindo.core.network.NetworkPolicyEngine.clearUserDismissedVerify()
@@ -15373,9 +15392,14 @@ internal fun CommunityProfileScreen(
                         }
                     }
 
-                    val siteVerifyAttention = do_.linux.lindo.core.network.NetworkPolicyEngine.verifyAttentionNeeded ||
-                        PlatformSessionRecovery.verifyPillVisible ||
-                        LinuxDoRepository.isChallengeCooldownActive()
+                    val loopGuardBackingOff = do_.linux.lindo.core.network.ChallengeLoopGuard.ENABLED &&
+                        (do_.linux.lindo.core.network.NetworkPolicyEngine.challengeLoopBackoffUntilMs > System.currentTimeMillis() ||
+                            do_.linux.lindo.core.network.NetworkPolicyEngine.challengeLoopGuard.isBackingOff())
+                    val siteVerifyAttention = !loopGuardBackingOff && (
+                        do_.linux.lindo.core.network.NetworkPolicyEngine.verifyAttentionNeeded ||
+                            PlatformSessionRecovery.verifyPillVisible ||
+                            LinuxDoRepository.isChallengeCooldownActive()
+                        )
                     val siteVerifyActive = PlatformSessionRecovery.verifying
                     var siteVerifyNowMs by remember(lastSiteVerifiedAtMs) { mutableStateOf(System.currentTimeMillis()) }
                     LaunchedEffect(lastSiteVerifiedAtMs) {

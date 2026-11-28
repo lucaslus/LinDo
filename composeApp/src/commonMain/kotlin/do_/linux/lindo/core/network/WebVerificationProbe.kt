@@ -35,7 +35,8 @@ internal fun webVerificationProbeScript(): String = """
         return result({challenge:true, widget:false, stageDom:hasStageDom, interactive:hasInteractiveSignal});
     }
     var isCfErrorPage = /^(Something went wrong|Access denied)/i.test(title) ||
-        /error code:\s*1034\b/i.test(bodyText);
+        /error code:\s*(1020|1034)\b/i.test(bodyText) ||
+        /sorry,\s*you have been blocked/i.test(bodyText);
     if (isCfErrorPage && !isOrigin404Body) {
         return result({ cfErrorPage: true });
     }
@@ -100,12 +101,16 @@ internal fun webVerificationProbeScript(): String = """
     if (isOrigin404 || (pathname.indexOf('/challenge') === 0 && document.readyState === 'complete' && metaCsrf)) {
         return result({ ok: true, originReached: true, csrf: csrfVal, user: readBootedDiscourseUser() });
     }
-    try {
-        var bodyJson = JSON.parse(bodyText);
-        if (bodyJson && ((bodyJson.topic_list && Array.isArray(bodyJson.topic_list.topics)) || (bodyJson.post_stream && Array.isArray(bodyJson.post_stream.posts)))) {
-            return result({ ok: true, csrf: csrfVal });
-        }
-    } catch (_) {}
+    var docCt = ((document.contentType || '') + '').toLowerCase();
+    var trimmedBody = (bodyText || '').trim();
+    if (docCt.indexOf('json') !== -1 || (trimmedBody.length >= 2 && (trimmedBody[0] === '{' || trimmedBody[0] === '['))) {
+        try {
+            var bodyJson = JSON.parse(trimmedBody);
+            if (bodyJson !== null && typeof bodyJson === 'object') {
+                return result({ ok: true, originReached: true, csrf: csrfVal });
+            }
+        } catch (_) {}
+    }
     if (window.__lindoRecoveryResult) return result(window.__lindoRecoveryResult);
     if ((!metaCsrf && !isDiscourseOops) || document.readyState !== 'complete' || window.__lindoRecoveryProbeSent) {
         return result({waiting:true});

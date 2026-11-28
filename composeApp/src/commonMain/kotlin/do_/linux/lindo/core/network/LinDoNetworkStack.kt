@@ -1747,6 +1747,8 @@ object LinuxDoRepository {
         clearReadTopics()
         followFeedCursors.clear()
         userFollowFeedActivityCursors.clear()
+        NetworkPolicyEngine.challengeLoopGuard.reset()
+        NetworkPolicyEngine.syncChallengeLoopBackoffUi()
         synchronized(badgeCacheLock) {
             cachedUserBadgesByUsername = emptyMap()
         }
@@ -3214,7 +3216,8 @@ object LinuxDoRepository {
             if (!isReadMethod && UserApiKeyAuthManager.webViewHttpExecutor != null) {
                 val writeResult = callWebView()
                 val writeIsCfChallenge = writeResult != null && looksLikeCloudflareChallenge(writeResult.second)
-                if (!isSilentTiming && writeResult?.first == 429 && !writeIsCfChallenge && (!NetworkRecoveryPolicy.enabled || !isRateLimitedNow())) noteRateLimitHit()
+                val writeIsLoopGuardBackoff = writeResult?.first == 429 && writeResult.second.contains("站点暂时限制访问")
+                if (!isSilentTiming && !writeIsLoopGuardBackoff && writeResult?.first == 429 && !writeIsCfChallenge && (!NetworkRecoveryPolicy.enabled || !isRateLimitedNow())) noteRateLimitHit()
                 if (writeIsCfChallenge && !isLocalPausedVerificationResponse(writeResult?.second)) {
                     if (SilentVerifyPolicy.backgroundChallengeArmsGlobalPause(!isForegroundRequest)) {
                         noteChallengeHit()
@@ -3263,7 +3266,8 @@ object LinuxDoRepository {
                         }
                     }
                     val candidateIsCfChallenge = candidate != null && looksLikeCloudflareChallenge(candidate.second)
-                    if (candidate?.first == 429 && !candidateIsCfChallenge && (!NetworkRecoveryPolicy.enabled || !isRateLimitedNow())) noteRateLimitHit()
+                    val candidateIsLoopGuardBackoff = candidate?.first == 429 && candidate.second.contains("站点暂时限制访问")
+                    if (!candidateIsLoopGuardBackoff && candidate?.first == 429 && !candidateIsCfChallenge && (!NetworkRecoveryPolicy.enabled || !isRateLimitedNow())) noteRateLimitHit()
                     if (candidateIsCfChallenge && !isLocalPausedVerificationResponse(candidate?.second)) {
                         if (SilentVerifyPolicy.backgroundChallengeArmsGlobalPause(!isForegroundRequest)) {
                             noteChallengeHit()
@@ -3699,8 +3703,10 @@ object LinuxDoRepository {
             // Successful explicit redemption permits one new session check, even if the
             // browser kept the same valid token. A new challenge immediately pauses again.
             clearChallengeCooldown()
-            // 新会话：清掉登录前（如切去系统浏览器授权期间）遗留的静默退避
+            // 新会话：清掉登录前（如切去系统浏览器授权期间）遗留的静默退避与循环熔断
             NetworkPolicyEngine.verifyCoordinator.resetOnSessionChange()
+            NetworkPolicyEngine.challengeLoopGuard.reset()
+            NetworkPolicyEngine.syncChallengeLoopBackoffUi()
             val epochBefore = UserApiKeyAuthManager.authStateNotifyEpoch
             if (currentT == previousT) {
                 val preservedApiKey = UserApiKeyAuthManager.getApiKey()

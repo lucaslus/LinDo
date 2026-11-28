@@ -98,6 +98,18 @@ kotlin {
             @OptIn(org.jetbrains.compose.ExperimentalComposeLibrary::class)
             implementation(compose.uiTest)
         }
+
+        val androidInstrumentedTest by getting {
+            dependencies {
+                @OptIn(org.jetbrains.compose.ExperimentalComposeLibrary::class)
+                implementation(compose.uiTest)
+                implementation("androidx.compose.ui:ui-test-junit4-android:1.9.4")
+                implementation("androidx.test:runner:1.6.2")
+                implementation("androidx.test:core-ktx:1.6.1")
+                implementation("androidx.test.ext:junit:1.2.1")
+                implementation(kotlin("test"))
+            }
+        }
     }
 }
 
@@ -113,6 +125,7 @@ android {
         targetSdk = 36
         versionCode = 114
         versionName = "1.1.14"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
@@ -157,6 +170,7 @@ android {
 
 dependencies {
     coreLibraryDesugaring(libs.android.desugar)
+    debugImplementation("androidx.compose.ui:ui-test-manifest:1.9.4")
 }
 
 compose.desktop {

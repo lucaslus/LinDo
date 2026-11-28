@@ -104,6 +104,37 @@ test('/challenge plain Not Found. text completes immediately while root plain No
   assert.equal(rootUnknown.calls, 0);
 });
 
+test('target-aware JSON documents (array, error object, session/current) complete as originReached, while JSON-path challenge & CF 1020 do not', () => {
+  for (const [pathname, body] of [
+    ['/emojis.json', '[{"name":"smile"}]'],
+    ['/discourse-boosts/posts/1/boosts.json', '{"errors":["not found"]}'],
+    ['/session/current.json', '{"current_user":{"id":42,"username":"jedilus"}}']
+  ]) {
+    const p = page({ pathname, csrf: false, body });
+    const r = p.poll();
+    assert.equal(r.ok, true, `Expected ok=true for ${pathname}`);
+    assert.equal(r.originReached, true, `Expected originReached=true for ${pathname}`);
+    assert.equal(p.calls, 0);
+  }
+
+  const challengedJsonPath = page({ pathname: '/t/3262685.json', challenge: true, csrf: false, title: 'Just a moment...', body: 'Checking...' });
+  const rc = challengedJsonPath.poll();
+  assert.equal(rc.challenge, true);
+  assert.equal(rc.ok, undefined);
+  assert.equal(challengedJsonPath.calls, 0);
+
+  const cf1020 = page({ pathname: '/t/3262685.json', csrf: false, title: 'Access denied', body: 'Error code: 1020' });
+  const r1020 = cf1020.poll();
+  assert.equal(r1020.cfErrorPage, true);
+  assert.equal(r1020.ok, undefined);
+  assert.equal(cf1020.calls, 0);
+
+  const cfBlocked = page({ pathname: '/t/3262685.json', csrf: false, title: 'Attention Required! | Cloudflare', body: 'Sorry, you have been blocked' });
+  const rBlocked = cfBlocked.poll();
+  assert.equal(rBlocked.ok, undefined);
+  assert.equal(cfBlocked.calls, 0);
+});
+
 test('forceRefreshCsrfProbeScript sends XMLHttpRequest + JSON headers and single-flights clean-IP 200 & challenged 403', async () => {
   let capturedCalls = [];
   const ctx200 = vm.createContext({

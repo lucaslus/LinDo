@@ -728,10 +728,12 @@ data class NetworkHealthSnapshot(
     val api429Total: Int,
     val mediaRatePerSec: Double,
     val media429Total: Int,
-    val csrfInCooldown: Boolean
+    val csrfInCooldown: Boolean,
+    val loopGuard: String = ""
 ) {
     fun toDiagnosticLine(): String =
-        "profile=$profileName gen=$webViewGeneration net=$networkSignature cfHealthy=$hasHealthyCfClearance cfAge=${cfClearanceAgeSecs ?: -1}s cfRot=$cfTotalRotations verifyActive=$verifyActive round=$verifyRound fail=$verifyConsecutiveFailures cool=${verifyCooldownRemainMs}ms breaker=$verifyIneffectiveBreaker apiRate=${"%.2f".format(apiRatePerSec)} api429=$api429Total mediaRate=${"%.2f".format(mediaRatePerSec)} csrfCool=$csrfInCooldown"
+        "profile=$profileName gen=$webViewGeneration net=$networkSignature cfHealthy=$hasHealthyCfClearance cfAge=${cfClearanceAgeSecs ?: -1}s cfRot=$cfTotalRotations verifyActive=$verifyActive round=$verifyRound fail=$verifyConsecutiveFailures cool=${verifyCooldownRemainMs}ms breaker=$verifyIneffectiveBreaker apiRate=${"%.2f".format(apiRatePerSec)} api429=$api429Total mediaRate=${"%.2f".format(mediaRatePerSec)} csrfCool=$csrfInCooldown" +
+            (if (loopGuard.isNotBlank()) " loopGuard=$loopGuard" else "")
 }
 
 /**
@@ -1108,6 +1110,7 @@ object NetworkPolicyEngine {
     val priorityGate = PriorityGate(maxInflight = 4, maxLowInflight = 1)
     val timeoutBlackholeDetector = TimeoutBlackholeDetector()
     val backgroundChallengeTracker = BackgroundChallengeTracker()
+    val challengeLoopGuard = ChallengeLoopGuard()
 
     /** 由平台层（如 MainActivity）挂载的只读实时运行态元数据提供器：(profileName, webViewGen, netSignature) */
     @Volatile
@@ -1116,6 +1119,18 @@ object NetworkPolicyEngine {
     /** 右下角常驻轻量提醒（「需安全确认」）：在打字保护期或用户点 `×` 关闭后的免打扰期展示，点击立即打开验证面板 */
     var verifyAttentionNeeded by mutableStateOf(false)
         private set
+
+    /** Compose 可观察的熔断退避截止时间（与 [challengeLoopGuard] 同步，用于在退避期隐藏胶囊与「待验证」）。 */
+    var challengeLoopBackoffUntilMs by mutableStateOf(0L)
+        private set
+
+    fun syncChallengeLoopBackoffUi(nowMs: Long = System.currentTimeMillis()) {
+        val remain = challengeLoopGuard.backoffRemainMs(nowMs)
+        val until = if (remain > 0L) nowMs + remain else 0L
+        runUiSafeStateWrite {
+            challengeLoopBackoffUntilMs = until
+        }
+    }
 
     private val snoozeLock = Any()
     private var userDismissedUntilMs: Long = 0L
@@ -1338,7 +1353,8 @@ object NetworkPolicyEngine {
             api429Total = apiTokenBucket.total429s(),
             mediaRatePerSec = mediaTokenBucket.currentRate(),
             media429Total = mediaTokenBucket.total429s(),
-            csrfInCooldown = isCsrfInCooldown(nowMs)
+            csrfInCooldown = isCsrfInCooldown(nowMs),
+            loopGuard = challengeLoopGuard.snapshot(nowMs)
         )
     }
 
@@ -1445,6 +1461,8 @@ object NetworkPolicyEngine {
         priorityGate.resetForTesting()
         timeoutBlackholeDetector.resetForTesting()
         backgroundChallengeTracker.reset()
+        challengeLoopGuard.reset()
+        syncChallengeLoopBackoffUi()
         clearCsrfCooldown()
         clearVerifyAttentionAndSnooze()
         lastUserTypingAtMs = 0L

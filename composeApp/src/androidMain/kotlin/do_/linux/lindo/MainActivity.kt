@@ -61,6 +61,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Text
+import androidx.compose.ui.platform.testTag
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
@@ -180,6 +181,16 @@ private fun releaseNativeWebView(view: WebView, rendererGone: Boolean = false) {
 }
 
 class MainActivity : ComponentActivity() {
+    internal enum class WebViewHostRole {
+        API_BRIDGE,
+        SILENT_VERIFY,
+        INTERACTIVE_MODAL
+    }
+
+    internal fun interface WebViewTestInterceptor {
+        fun intercept(role: WebViewHostRole, request: WebResourceRequest): android.webkit.WebResourceResponse?
+    }
+
     companion object {
         private const val REBUILD_ABORTED_STATUS = -2
         private const val REBUILD_ABORTED_BODY = "__REBUILD_ABORTED__"
@@ -257,7 +268,12 @@ class MainActivity : ComponentActivity() {
         private var lastTakenHandoffClearances: Set<String>? = null
         private val modalSessionNonceCounter = java.util.concurrent.atomic.AtomicLong(1L)
 
+        /** 仅在 androidInstrumentedTest 中使用的内存级拦截钩子；生产环境恒为 null，绝不触碰系统网络或 VPN。 */
+        @Volatile
+        internal var webViewTestInterceptor: WebViewTestInterceptor? = null
+
         internal fun nextModalSessionNonce(): Long = modalSessionNonceCounter.getAndIncrement()
+        internal fun currentModalSessionNonceForTest(): Long = modalSessionNonceCounter.get() - 1L
 
         internal fun discardHandoffVerifyWebView() {
             handoffInitialClearances = emptySet()
@@ -1315,12 +1331,19 @@ class MainActivity : ComponentActivity() {
         // without blocking on a redundant secondary /latest.json GET gate!
         PlatformSessionRecovery.checkForumConnection = null
         do_.linux.lindo.ui.PlatformSessionRecovery.onExpandVerifyPill = {
-            do_.linux.lindo.core.network.NetworkPolicyEngine.clearUserDismissedVerify()
-            if (do_.linux.lindo.core.network.NetworkPolicyEngine.verifyCoordinator.isActive()) {
-                // 静默轮次进行中：下一个探测周期（≤200ms）把同一 WebView 交棒给面板并自动展开
-                silentPanelRequested = true
+            if (do_.linux.lindo.core.network.ChallengeLoopGuard.ENABLED &&
+                do_.linux.lindo.core.network.NetworkPolicyEngine.challengeLoopGuard.isBackingOff()
+            ) {
+                do_.linux.lindo.core.network.NetworkPolicyEngine.updateVerifyAttentionNeeded(false)
+                do_.linux.lindo.ui.PlatformSessionRecovery.verifyPillVisible = false
             } else {
-                activityScope.launch { verifyInteractiveChallengeSession() }
+                do_.linux.lindo.core.network.NetworkPolicyEngine.clearUserDismissedVerify()
+                if (do_.linux.lindo.core.network.NetworkPolicyEngine.verifyCoordinator.isActive()) {
+                    // 静默轮次进行中：下一个探测周期（≤200ms）把同一 WebView 交棒给面板并自动展开
+                    silentPanelRequested = true
+                } else {
+                    activityScope.launch { verifyInteractiveChallengeSession() }
+                }
             }
         }
         UserApiKeyAuthManager.onPrepareFreshAuthExchange = {
@@ -1347,6 +1370,8 @@ class MainActivity : ComponentActivity() {
             }
         }
         UserApiKeyAuthManager.onLogoutPlatformClear = {
+            do_.linux.lindo.core.network.NetworkPolicyEngine.challengeLoopGuard.reset()
+            do_.linux.lindo.core.network.NetworkPolicyEngine.syncChallengeLoopBackoffUi()
             activityScope.launch(Dispatchers.Main.immediate) { passedWebSession = null; PlatformSessionRecovery.forumConnection.reset() }
             runCatching {
                 // 仅清除 Discourse 账号会话 Cookie (_t / _forum_session / authentication_data)，保留 Cloudflare 信任通行证 (cf_clearance / __cf_bm / _cfuvid)
@@ -1399,6 +1424,16 @@ class MainActivity : ComponentActivity() {
                 do_.linux.lindo.core.network.webPagePurpose(initialUrl) == do_.linux.lindo.core.network.WebPagePurpose.VERIFICATION
             }
             val modalSessionNonce = remember { MainActivity.nextModalSessionNonce() }
+            val resolvedModalUrl = remember(initialUrl, modalSessionNonce, isVerifyUrl) {
+                val isDefaultChallenge = isVerifyUrl && runCatching {
+                    java.net.URI(initialUrl).rawPath?.startsWith("/challenge") == true
+                }.getOrDefault(false)
+                if (isDefaultChallenge && do_.linux.lindo.core.network.ChallengeLoopGuard.ENABLED) {
+                    do_.linux.lindo.core.network.NetworkPolicyEngine.challengeLoopGuard.verifyNavigationUrl() ?: initialUrl
+                } else {
+                    initialUrl
+                }
+            }
             val oneShotForceRefresh = remember(initialUrl, modalSessionNonce) {
                 PlatformWebLoginHost.consumeOneShotForceRefresh(isVerifyUrl)
             }
@@ -1462,7 +1497,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
             AndroidWebLoginModal(
-                initialUrl = initialUrl,
+                initialUrl = resolvedModalUrl,
                 sessionNonce = modalSessionNonce,
                 openedClearance = openedClearance,
                 openedAllClearances = openedAllClearances,
@@ -1496,6 +1531,7 @@ class MainActivity : ComponentActivity() {
                             probedFailedClearances = modalProbedFailedClearances.toSet()
                         )
                         if (rotatedDuringModal) {
+                            do_.linux.lindo.core.network.NetworkPolicyEngine.challengeLoopGuard.onVerifyCompleted(effective = true)
                             resetPostVerifyGuardsAndRefreshOriginAsync(cm, effectiveCookies, canPromoteVerified = true)
                             LinDoDiagnosticLogger.info(
                                 DiagnosticCategory.AUTH,
@@ -2227,6 +2263,16 @@ class MainActivity : ComponentActivity() {
             }
             wv.addJavascriptInterface(LinDoJsBridge(), "LinDoJsBridge")
             wv.webViewClient = object : WebViewClient() {
+                override fun shouldInterceptRequest(
+                    view: WebView?,
+                    request: WebResourceRequest?
+                ): android.webkit.WebResourceResponse? {
+                    if (request != null) {
+                        MainActivity.webViewTestInterceptor?.intercept(MainActivity.WebViewHostRole.API_BRIDGE, request)?.let { return it }
+                    }
+                    return super.shouldInterceptRequest(view, request)
+                }
+
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                     super.onPageStarted(view, url, favicon)
                     if (view != null && view !== apiWebView) return
@@ -2609,6 +2655,9 @@ class MainActivity : ComponentActivity() {
                 return@launch
             }
             if (LinuxDoRepository.isRateLimitedNow() || NetworkRecoveryPolicy.verifying) return@launch
+            if (do_.linux.lindo.core.network.ChallengeLoopGuard.ENABLED &&
+                do_.linux.lindo.core.network.NetworkPolicyEngine.challengeLoopGuard.isBackingOff()
+            ) return@launch
             if (do_.linux.lindo.core.network.NetworkPolicyEngine.verifyCoordinator.isActive()) return@launch
             val existingCf = runOnCookieIo {
                 runCatching {
@@ -2718,6 +2767,9 @@ class MainActivity : ComponentActivity() {
      */
     private suspend fun verifyInteractiveChallengeSession(): Boolean {
         if (isFinishing || isDestroyed) return false
+        if (do_.linux.lindo.core.network.ChallengeLoopGuard.ENABLED &&
+            do_.linux.lindo.core.network.NetworkPolicyEngine.challengeLoopGuard.isBackingOff()
+        ) return false
         if (PlatformSessionRecovery.forumConnection.stage != ForumConnectionStage.Idle) return false
         do_.linux.lindo.core.network.NetworkPolicyEngine.clearUserDismissedVerify()
         val callerDeadline = kotlin.coroutines.coroutineContext[do_.linux.lindo.core.network.ActiveCallDeadlineContext]?.deadline
@@ -2786,6 +2838,9 @@ class MainActivity : ComponentActivity() {
         originalRead: AndroidForumRead? = null
     ): Boolean {
         val isForegroundCaller = trigger == do_.linux.lindo.core.network.SilentVerifyTrigger.FOREGROUND
+        if (do_.linux.lindo.core.network.ChallengeLoopGuard.ENABLED &&
+            do_.linux.lindo.core.network.NetworkPolicyEngine.challengeLoopGuard.isBackingOff()
+        ) return false
         if (PlatformSessionRecovery.forumConnection.stage != ForumConnectionStage.Idle) return false
         if (isFinishing || isDestroyed || (!isForegroundCaller && LinuxDoRepository.isRateLimitedNow())) return false
         val callerDeadline = kotlin.coroutines.coroutineContext[do_.linux.lindo.core.network.ActiveCallDeadlineContext]?.deadline
@@ -2827,7 +2882,16 @@ class MainActivity : ComponentActivity() {
             var abandoned = false
             var finalPres = initialPres
             var foregroundDialogPassed = false
+            var silentVerifyEffective = false
             var outcome = "unknown"
+            val verifyStartUrl = (
+                if (do_.linux.lindo.core.network.ChallengeLoopGuard.ENABLED) {
+                    do_.linux.lindo.core.network.NetworkPolicyEngine.challengeLoopGuard.verifyNavigationUrl()?.substringBefore('#')
+                } else {
+                    null
+                }
+            ) ?: "https://linux.do/challenge"
+            val verifyTargetFamily = do_.linux.lindo.core.network.ChallengeLoopGuard.pathFamilyOf(verifyStartUrl)
             var pillShown = false
             var keepAttentionPillOnExit = false
             var tempWv: WebView? = null
@@ -2907,6 +2971,15 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                         webViewClient = object : WebViewClient() {
+                            override fun shouldInterceptRequest(
+                                view: WebView?,
+                                request: WebResourceRequest?
+                            ): android.webkit.WebResourceResponse? {
+                                if (request != null) {
+                                    MainActivity.webViewTestInterceptor?.intercept(MainActivity.WebViewHostRole.SILENT_VERIFY, request)?.let { return it }
+                                }
+                                return super.shouldInterceptRequest(view, request)
+                            }
                             override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
                                 mainFrameFailed.set(true)
                                 probeWakeSignal.trySend(Unit)
@@ -2947,14 +3020,13 @@ class MainActivity : ComponentActivity() {
                                         mainFrameFailed.set(true)
                                         probeWakeSignal.trySend(Unit)
                                     } else if (request.url?.host.equals("linux.do", ignoreCase = true) &&
-                                        request.url?.path?.startsWith("/challenge") == true &&
-                                        status in setOf(404, 405, 422) &&
+                                        status in setOf(400, 401, 404, 405, 409, 410, 422, 429) &&
                                         errorResponse?.responseHeaders?.entries?.none {
                                             it.key.equals("cf-mitigated", ignoreCase = true) &&
                                                 it.value.contains("challenge", ignoreCase = true)
                                         } != false
                                     ) {
-                                        // 抵达源站 /challenge 轻量 404 = 已穿过 Cloudflare WAF
+                                        // 抵达源站任意非挑战状态码（明确排除 403）= 已穿过 Cloudflare WAF
                                         originLandedAtMs.compareAndSet(0L, System.currentTimeMillis())
                                         originLanded.set(true)
                                         probeWakeSignal.trySend(Unit)
@@ -2980,7 +3052,7 @@ class MainActivity : ComponentActivity() {
                     host.addView(wv, android.widget.FrameLayout.LayoutParams(viewportW, viewportH))
                     wv.onResume()
                     wv.resumeTimers()
-                    wv.loadUrl("https://linux.do/challenge")
+                    wv.loadUrl(verifyStartUrl)
                     true
                 }
                 if (!created) {
@@ -3041,7 +3113,7 @@ class MainActivity : ComponentActivity() {
                                 do_.linux.lindo.ech.EchGatewayManager.rotateStickyIpAsync()
                                 purgeCfCookiesInWebKit(currentWebViewCookieManager())
                                 if (tempWv === wv && !mainFrameFailed.get()) {
-                                    wv.loadUrl("https://linux.do/challenge")
+                                    wv.loadUrl(verifyStartUrl)
                                 }
                                 return@withContext do_.linux.lindo.core.network.SilentProbeSignal.PENDING
                             }
@@ -3060,7 +3132,7 @@ class MainActivity : ComponentActivity() {
                                 interactiveWidgetReady = false
                                 purgeCfCookiesInWebKit(currentWebViewCookieManager())
                                 if (tempWv === wv && !mainFrameFailed.get()) {
-                                    wv.loadUrl("https://linux.do/challenge")
+                                    wv.loadUrl(verifyStartUrl)
                                 }
                                 return@withContext do_.linux.lindo.core.network.SilentProbeSignal.PENDING
                             }
@@ -3107,7 +3179,7 @@ class MainActivity : ComponentActivity() {
                                 interactiveWidgetReady = false
                                 purgeCfCookiesInWebKit(currentWebViewCookieManager())
                                 if (tempWv === wv && !mainFrameFailed.get()) {
-                                    wv.loadUrl("https://linux.do/challenge")
+                                    wv.loadUrl(verifyStartUrl)
                                 }
                                 return@withContext do_.linux.lindo.core.network.SilentProbeSignal.PENDING
                             }
@@ -3261,6 +3333,7 @@ class MainActivity : ComponentActivity() {
                                 CookieSentinel.syncFromAuthoritativeBrowserCookieString(latest, verified = true)
                             }
                             succeeded = true
+                            silentVerifyEffective = true
                             if (outcome == "passed") outcome = "passed:rotated"
                         }
                         do_.linux.lindo.core.network.VerifyTicketOutcome.EXISTING_VALID -> {
@@ -3295,6 +3368,11 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 if (succeeded) {
+                    if (!foregroundDialogPassed) {
+                        do_.linux.lindo.core.network.NetworkPolicyEngine.challengeLoopGuard.onVerifyCompleted(
+                            effective = silentVerifyEffective
+                        )
+                    }
                     keepAttentionPillOnExit = false
                     apiWebViewBootstrapChallenged = false
                     do_.linux.lindo.core.network.NetworkPolicyEngine.clearCsrfCooldown()
@@ -3339,7 +3417,12 @@ class MainActivity : ComponentActivity() {
                 silentForegroundWriteJoined.set(false)
                 silentPanelRequested = false
                 val elapsedMs = System.currentTimeMillis() - startAt
-                val summary = "round=$activeRound trigger=${effectiveTrigger.name.lowercase()} reason=$reason outcome=$outcome elapsed=${elapsedMs}ms hasCf=$succeeded profile=$activeWebViewProfileName net=${activeTransportSignature.ifBlank { "none" }}"
+                val effectiveLogged = if (foregroundDialogPassed) {
+                    do_.linux.lindo.core.network.NetworkPolicyEngine.challengeLoopGuard.lastVerifyWasEffective()
+                } else {
+                    silentVerifyEffective
+                }
+                val summary = "round=$activeRound trigger=${effectiveTrigger.name.lowercase()} reason=$reason outcome=$outcome effective=$effectiveLogged target=$verifyTargetFamily elapsed=${elapsedMs}ms hasCf=$succeeded profile=$activeWebViewProfileName net=${activeTransportSignature.ifBlank { "none" }}"
                 if (succeeded || outcome.startsWith("skipped:")) {
                     LinDoDiagnosticLogger.info(DiagnosticCategory.AUTH, "SilentVerify", "Cloudflare verification completed ($summary)")
                 } else {
@@ -3367,11 +3450,16 @@ class MainActivity : ComponentActivity() {
         allowOriginLostRetry: Boolean = true,
         allowRebuildRetry: Boolean = true
     ): Pair<Int, String>? {
-        if (LinuxDoRepository.isRateLimitedNow()) return 429 to """{"errors":["请求较频繁，请稍后再试"]}"""
         val isRead = method.equals("GET", true) || method.equals("HEAD", true)
         val isBackground = headers.entries.any {
             it.key.equals("Discourse-Background", ignoreCase = true) && it.value.equals("true", ignoreCase = true)
         }
+        val loopGuard = do_.linux.lindo.core.network.NetworkPolicyEngine.challengeLoopGuard
+        if (do_.linux.lindo.core.network.ChallengeLoopGuard.ENABLED && loopGuard.shouldFailFast(url, isBackground)) {
+            val msg = do_.linux.lindo.core.network.ChallengeLoopGuard.backoffMessage(loopGuard.backoffRemainMs())
+            return 429 to """{"errors":[${JSONObject.quote(msg)}]}"""
+        }
+        if (LinuxDoRepository.isRateLimitedNow()) return 429 to """{"errors":["请求较频繁，请稍后再试"]}"""
         val isPauseFlushAllowed = url.contains("/topics/timings", ignoreCase = true) && pauseWebViewJob?.isActive == true
         // App 已切入后台/Doze 休眠态时，跳过所有非切后台瞬时 flush 的后台请求，杜绝 WebView 冻结导致假超时或唤醒风暴
         if (!UserPresenceService.isForeground && isBackground && !isPauseFlushAllowed) {
@@ -3759,8 +3847,42 @@ class MainActivity : ComponentActivity() {
             return 0 to enriched
         }
 
+        val isAnyForegroundCfChallenge = !isBackground && bridgeResult != null &&
+            !LinuxDoRepository.isLocalPausedVerificationResponse(bridgeResult.second) &&
+            (isChallengeResponse(bridgeResult) ||
+                (bridgeResult.first == 429 && do_.linux.lindo.core.network.looksLikeCloudflareChallenge(bridgeResult.second)))
+
+        if (!isBackground && bridgeResult != null && bridgeResult.first in 200..299 && !isAnyForegroundCfChallenge) {
+            loopGuard.onHealthyResponse(url)
+        }
+
+        if (do_.linux.lindo.core.network.ChallengeLoopGuard.ENABLED && isAnyForegroundCfChallenge && bridgeResult != null) {
+            val cfStatus = bridgeResult.first
+            when (val guardDecision = loopGuard.onForegroundChallenge(url, method, cfStatus)) {
+                is do_.linux.lindo.core.network.ChallengeLoopGuard.Decision.Backoff -> {
+                    do_.linux.lindo.core.network.NetworkPolicyEngine.syncChallengeLoopBackoffUi()
+                    do_.linux.lindo.core.network.NetworkPolicyEngine.updateVerifyAttentionNeeded(false)
+                    withContext(Dispatchers.Main) {
+                        do_.linux.lindo.ui.PlatformSessionRecovery.verifyPillVisible = false
+                    }
+                    if (guardDecision.newlyArmed) {
+                        val cfAge = CfClearanceAuthority.ageSecs() ?: -1L
+                        val targetFamily = do_.linux.lindo.core.network.ChallengeLoopGuard.pathFamilyOf(url)
+                        LinDoDiagnosticLogger.warn(
+                            DiagnosticCategory.AUTH,
+                            "ChallengeLoopGuard",
+                            "Challenge recurred ${guardDecision.elapsedSinceVerifyMs / 1000}s after verification (effective=${guardDecision.lastVerifyEffective}, target=${method.uppercase()} $targetFamily $cfStatus, strike=${guardDecision.strikes}, cfAge=${cfAge}s, net=${activeTransportSignature.ifBlank { "none" }}) -> backoff ${guardDecision.remainMs / 1000}s"
+                        )
+                    }
+                    val backoffMsg = do_.linux.lindo.core.network.ChallengeLoopGuard.backoffMessage(guardDecision.remainMs)
+                    return 429 to """{"errors":[${JSONObject.quote(backoffMsg)}]}"""
+                }
+                do_.linux.lindo.core.network.ChallengeLoopGuard.Decision.Verify -> Unit
+            }
+        }
+
         // 前台请求首次命中 Cloudflare 403/503 或已升级的持续 429 边缘挑战时（请求在 CDN 边缘即被拦截，从未抵达源站 Rails，故写请求重放同样幂等安全），
-        // 先单飞尝试静默 `/challenge` 续期：若非交互式挑战自动通过，立即无感重放原请求；若检测需人工点击则原位交棒同一 WebView 给前台弹窗！
+        // 先单飞尝试静默续期：若非交互式挑战自动通过，立即无感重放原请求；若检测需人工点击则原位交棒同一 WebView 给前台弹窗！
         if (allowSilentChallengeRetry && !isBackground && isChallengeResponse(bridgeResult) &&
             (isRead || bridgeResult?.second?.startsWith(CF_MITIGATED_CHALLENGE_PREFIX) == true)) {
             val staleCf = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["cf_clearance"]?.value
@@ -3793,7 +3915,9 @@ class MainActivity : ComponentActivity() {
                     val postReplayCf = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["cf_clearance"]?.value
                     CfClearanceAuthority.noteChallenged(postReplayCf)
                     do_.linux.lindo.core.network.NetworkPolicyEngine.verifyCoordinator.recordIneffectiveClearance(passedRound)
-                    do_.linux.lindo.core.network.NetworkPolicyEngine.updateVerifyAttentionNeeded(true)
+                    if (!loopGuard.isBackingOff()) {
+                        do_.linux.lindo.core.network.NetworkPolicyEngine.updateVerifyAttentionNeeded(true)
+                    }
                 }
                 return replayResult
             }
@@ -4070,7 +4194,41 @@ class MainActivity : ComponentActivity() {
         mimeType: String,
         rawBytes: ByteArray
     ): Pair<Int, String>? {
+        val uploadUrl = "https://linux.do/uploads.json"
+        val loopGuard = do_.linux.lindo.core.network.NetworkPolicyEngine.challengeLoopGuard
+        if (do_.linux.lindo.core.network.ChallengeLoopGuard.ENABLED && loopGuard.shouldFailFast(uploadUrl, isBackground = false)) {
+            val msg = do_.linux.lindo.core.network.ChallengeLoopGuard.backoffMessage(loopGuard.backoffRemainMs())
+            return 429 to """{"errors":[${JSONObject.quote(msg)}]}"""
+        }
         val first = uploadOnce(fileName, mimeType, rawBytes)
+        val firstIsAnyCf = first != null && !LinuxDoRepository.isLocalPausedVerificationResponse(first.second) &&
+            (isChallengeResponse(first) || (first.first == 429 && do_.linux.lindo.core.network.looksLikeCloudflareChallenge(first.second)))
+        if (first != null && first.first in 200..299 && !firstIsAnyCf) {
+            loopGuard.onHealthyResponse(uploadUrl)
+            return first
+        }
+        if (do_.linux.lindo.core.network.ChallengeLoopGuard.ENABLED && firstIsAnyCf && first != null) {
+            when (val decision = loopGuard.onForegroundChallenge(uploadUrl, "POST", first.first)) {
+                is do_.linux.lindo.core.network.ChallengeLoopGuard.Decision.Backoff -> {
+                    do_.linux.lindo.core.network.NetworkPolicyEngine.syncChallengeLoopBackoffUi()
+                    do_.linux.lindo.core.network.NetworkPolicyEngine.updateVerifyAttentionNeeded(false)
+                    withContext(Dispatchers.Main) {
+                        do_.linux.lindo.ui.PlatformSessionRecovery.verifyPillVisible = false
+                    }
+                    if (decision.newlyArmed) {
+                        val cfAge = CfClearanceAuthority.ageSecs() ?: -1L
+                        LinDoDiagnosticLogger.warn(
+                            DiagnosticCategory.AUTH,
+                            "ChallengeLoopGuard",
+                            "Challenge recurred ${decision.elapsedSinceVerifyMs / 1000}s after verification (effective=${decision.lastVerifyEffective}, target=POST /uploads.json ${first.first}, strike=${decision.strikes}, cfAge=${cfAge}s, net=${activeTransportSignature.ifBlank { "none" }}) -> backoff ${decision.remainMs / 1000}s"
+                        )
+                    }
+                    val msg = do_.linux.lindo.core.network.ChallengeLoopGuard.backoffMessage(decision.remainMs)
+                    return 429 to """{"errors":[${JSONObject.quote(msg)}]}"""
+                }
+                do_.linux.lindo.core.network.ChallengeLoopGuard.Decision.Verify -> Unit
+            }
+        }
         if (!isChallengeResponse(first) || first?.second?.startsWith(CF_MITIGATED_CHALLENGE_PREFIX) != true ||
             NetworkRecoveryPolicy.verifying) return first
         val staleCf = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["cf_clearance"]?.value
@@ -4085,9 +4243,38 @@ class MainActivity : ComponentActivity() {
         val coordinator = do_.linux.lindo.core.network.NetworkPolicyEngine.verifyCoordinator
         val round = coordinator.lastPassedRound()
         val replay = uploadOnce(fileName, mimeType, rawBytes)
+        val replayIsAnyCf = replay != null && !LinuxDoRepository.isLocalPausedVerificationResponse(replay.second) &&
+            (isChallengeResponse(replay) || (replay.first == 429 && do_.linux.lindo.core.network.looksLikeCloudflareChallenge(replay.second)))
+        if (replay != null && replay.first in 200..299 && !replayIsAnyCf) {
+            loopGuard.onHealthyResponse(uploadUrl)
+        } else if (do_.linux.lindo.core.network.ChallengeLoopGuard.ENABLED && replayIsAnyCf && replay != null) {
+            when (val d = loopGuard.onForegroundChallenge(uploadUrl, "POST", replay.first)) {
+                is do_.linux.lindo.core.network.ChallengeLoopGuard.Decision.Backoff -> {
+                    do_.linux.lindo.core.network.NetworkPolicyEngine.syncChallengeLoopBackoffUi()
+                    do_.linux.lindo.core.network.NetworkPolicyEngine.updateVerifyAttentionNeeded(false)
+                    withContext(Dispatchers.Main) {
+                        do_.linux.lindo.ui.PlatformSessionRecovery.verifyPillVisible = false
+                    }
+                    if (d.newlyArmed) {
+                        val cfAge = CfClearanceAuthority.ageSecs() ?: -1L
+                        LinDoDiagnosticLogger.warn(
+                            DiagnosticCategory.AUTH,
+                            "ChallengeLoopGuard",
+                            "Challenge recurred ${d.elapsedSinceVerifyMs / 1000}s after verification (effective=${d.lastVerifyEffective}, target=POST /uploads.json ${replay.first}, strike=${d.strikes}, cfAge=${cfAge}s, net=${activeTransportSignature.ifBlank { "none" }}) -> backoff ${d.remainMs / 1000}s"
+                        )
+                    }
+                    coordinator.recordIneffectiveClearance(round)
+                    val msg = do_.linux.lindo.core.network.ChallengeLoopGuard.backoffMessage(d.remainMs)
+                    return 429 to """{"errors":[${JSONObject.quote(msg)}]}"""
+                }
+                do_.linux.lindo.core.network.ChallengeLoopGuard.Decision.Verify -> Unit
+            }
+        }
         if (isChallengeResponse(replay)) {
             coordinator.recordIneffectiveClearance(round)
-            do_.linux.lindo.core.network.NetworkPolicyEngine.updateVerifyAttentionNeeded(true)
+            if (!loopGuard.isBackingOff()) {
+                do_.linux.lindo.core.network.NetworkPolicyEngine.updateVerifyAttentionNeeded(true)
+            }
         }
         return replay
     }
@@ -5649,10 +5836,13 @@ private fun AndroidWebLoginModal(
             }
         }
         val hasCfAfterVerify = !latestCf.isNullOrBlank()
+        val verifyEffective = rotatedAfterVerify != null
+        val verifyTargetFamily = do_.linux.lindo.core.network.ChallengeLoopGuard.pathFamilyOf(initialUrl)
+        do_.linux.lindo.core.network.NetworkPolicyEngine.challengeLoopGuard.onVerifyCompleted(effective = verifyEffective)
         LinDoDiagnosticLogger.info(
             DiagnosticCategory.AUTH,
             "SiteVerify",
-            "Cloudflare verification completed (session=$sessionNonce, hasCf=$hasCfAfterVerify, origin404=$challengeOrigin404Reached, profile=${MainActivity.currentProfileName()}, handoff=$usedHandoffWebView)"
+            "Cloudflare verification completed (session=$sessionNonce, hasCf=$hasCfAfterVerify, effective=$verifyEffective, target=$verifyTargetFamily, origin404=$challengeOrigin404Reached, profile=${MainActivity.currentProfileName()}, handoff=$usedHandoffWebView)"
         )
         MainActivity.activeInstance?.activityScope?.launch(MainActivity.cookieIoDispatcher) {
             runCatching { cm.flush() }
@@ -6263,7 +6453,7 @@ private fun AndroidWebLoginModal(
                     )
                     androidx.compose.material3.IconButton(
                         onClick = ::retryPage,
-                        modifier = Modifier.size(34.dp)
+                        modifier = Modifier.size(34.dp).testTag("verify_modal_refresh_button")
                     ) {
                         androidx.compose.material3.Icon(
                             imageVector = do_.linux.lindo.ui.components.LinDoIcons.Refresh,
@@ -6274,7 +6464,7 @@ private fun AndroidWebLoginModal(
                     }
                     androidx.compose.material3.IconButton(
                         onClick = ::handleUserDismiss,
-                        modifier = Modifier.size(34.dp)
+                        modifier = Modifier.size(34.dp).testTag("verify_modal_close_button")
                     ) {
                         androidx.compose.material3.Icon(
                             imageVector = do_.linux.lindo.ui.components.LinDoIcons.Close,
@@ -6458,6 +6648,15 @@ private fun AndroidWebLoginModal(
                             }
 
                             webViewClient = object : WebViewClient() {
+                                override fun shouldInterceptRequest(
+                                    view: WebView?,
+                                    request: WebResourceRequest?
+                                ): android.webkit.WebResourceResponse? {
+                                    if (request != null) {
+                                        MainActivity.webViewTestInterceptor?.intercept(MainActivity.WebViewHostRole.INTERACTIVE_MODAL, request)?.let { return it }
+                                    }
+                                    return super.shouldInterceptRequest(view, request)
+                                }
                                 override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
                                     if (webViewRef === view) {
                                         webViewRef = null
@@ -6597,8 +6796,7 @@ private fun AndroidWebLoginModal(
                                         }
                                         if (isVerificationFlow &&
                                             request.url?.host.equals("linux.do", ignoreCase = true) &&
-                                            request.url?.path?.startsWith("/challenge") == true &&
-                                            status in setOf(404, 405, 422) &&
+                                            status in setOf(400, 401, 404, 405, 409, 410, 422, 429) &&
                                             errorResponse?.responseHeaders?.entries?.none {
                                                 it.key.equals("cf-mitigated", ignoreCase = true) &&
                                                     it.value.contains("challenge", ignoreCase = true)
