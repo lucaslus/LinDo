@@ -1,6 +1,6 @@
 # Maintainer: Lucas <https://github.com/lucaslus/LinDo>
 pkgname=lindo
-pkgver=1.1.12
+pkgver=1.1.13
 pkgrel=1
 pkgdesc="Linux.do 社区原生桌面客户端（内置 BoringSSL ECH 与无感安全验证）"
 arch=('x86_64' 'aarch64')
