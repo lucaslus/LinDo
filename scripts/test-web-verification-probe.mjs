@@ -59,3 +59,30 @@ test('a textual waiting page stays noninteractive and issues no request',()=> {
  assert.deepEqual(p.poll(),{challenge:true,widget:false,stageDom:true,interactive:false});
  assert.equal(p.calls,0);
 });
+
+test('#d-splash with live csrf-token meta completes immediately even while readyState is loading', () => {
+ let calls = 0;
+ const ctx = vm.createContext({
+  location: { origin: 'https://linux.do', pathname: '/' },
+  document: {
+   title: 'LINUX DO',
+   readyState: 'loading',
+   body: { innerText: '', children: [{}], scrollHeight: 400 },
+   querySelector: (s) => {
+    if (s.includes('csrf-token')) return { content: 'live_discourse_csrf_tok' };
+    if (s.includes('#d-splash')) return {};
+    return null;
+   },
+   getElementById: () => null
+  },
+  AbortController,
+  setTimeout: () => 1,
+  clearTimeout: () => {},
+  fetch: async () => { calls++; return { ok: true, headers: { get: () => null }, json: async () => ({}) }; }
+ });
+ ctx.window = ctx;
+ const r = JSON.parse(vm.runInContext(source, ctx));
+ assert.equal(r.ok, true);
+ assert.equal(r.csrf, 'live_discourse_csrf_tok');
+ assert.equal(calls, 0);
+});

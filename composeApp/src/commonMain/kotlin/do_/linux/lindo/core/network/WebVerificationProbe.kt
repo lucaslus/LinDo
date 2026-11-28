@@ -39,23 +39,8 @@ internal fun webVerificationProbeScript(): String = """
         return result({ cfErrorPage: true });
     }
     var isOrigin404 = isOrigin404Body || !!document.querySelector('.page-not-found,.discourse-no-results,#main-outlet .not-found-container');
-    if (document.readyState === 'loading') {
-        return result({waiting:true});
-    }
-    var isDiscourseOops = /discussion forum encountered an unexpected problem/i.test(bodyText);
-    if (isDiscourseOops && document.readyState === 'complete' && !window.__lindoOopsRetried) {
-        window.__lindoOopsRetried = true;
-        try {
-            var oopsKey = '__lindoOops_' + (location.pathname || '/');
-            if (typeof sessionStorage !== 'undefined' && !sessionStorage.getItem(oopsKey) && typeof location.replace === 'function') {
-                sessionStorage.setItem(oopsKey, '1');
-                location.replace(location.pathname || '/');
-                return result({waiting:true});
-            }
-        } catch (_) {}
-    }
     var metaCsrf = document.querySelector('meta[name="csrf-token"]');
-    var csrfVal = (metaCsrf && typeof metaCsrf.content === 'string') ? metaCsrf.content : '';
+    var csrfVal = (metaCsrf && typeof metaCsrf.content === 'string') ? metaCsrf.content.trim() : '';
     function parsePreloadedUser(preload) {
         if (!preload || !preload.currentUser) return null;
         try {
@@ -81,22 +66,39 @@ internal fun webVerificationProbeScript(): String = """
             };
         } catch (_) { return null; }
     }
+    var preloadObj = null;
     try {
         var node = document.getElementById('data-preloaded');
         var rawPre = node && ((node.textContent || '').trim() || (node.getAttribute && node.getAttribute('data-preloaded')) || (node.dataset && node.dataset.preloaded) || '');
-        var preload = rawPre ? JSON.parse(rawPre) : null;
-        if (preload && (preload.site || preload.currentUser || preload.topic_list || preload.topic_view) && metaCsrf) {
-            return result({ ok: true, csrf: csrfVal, user: parsePreloadedUser(preload) });
+        preloadObj = rawPre ? JSON.parse(rawPre) : null;
+        if (preloadObj && (preloadObj.site || preloadObj.currentUser || preloadObj.topic_list || preloadObj.topic_view) && metaCsrf) {
+            return result({ ok: true, csrf: csrfVal, user: parsePreloadedUser(preloadObj) });
         }
     } catch (_) {}
+    var hasDiscourseShell = !!document.querySelector('header.d-header,#main-outlet .topic-list,#main-outlet #topic-title,#main-outlet .container,#d-splash');
+    // Fast-pass as soon as Discourse origin HTML streams meta[name="csrf-token"] + #d-splash / shell
+    // (parity with PC bridge.rs: never stall 60s+ downloading 15MB Ember JS bundles over cellular VPN!).
+    if (hasDiscourseShell && (csrfVal.length > 0 || (metaCsrf && document.readyState !== 'loading'))) {
+        return result({ ok: true, originReached: true, csrf: csrfVal, user: parsePreloadedUser(preloadObj) || readBootedDiscourseUser() });
+    }
+    if (document.readyState === 'loading') {
+        return result({waiting:true});
+    }
+    var isDiscourseOops = /discussion forum encountered an unexpected problem/i.test(bodyText);
+    if (isDiscourseOops && document.readyState === 'complete' && !window.__lindoOopsRetried) {
+        window.__lindoOopsRetried = true;
+        try {
+            var oopsKey = '__lindoOops_' + (location.pathname || '/');
+            if (typeof sessionStorage !== 'undefined' && !sessionStorage.getItem(oopsKey) && typeof location.replace === 'function') {
+                sessionStorage.setItem(oopsKey, '1');
+                location.replace(location.pathname || '/');
+                return result({waiting:true});
+            }
+        } catch (_) {}
+    }
     if (isOrigin404 || (pathname.indexOf('/challenge') === 0 && document.readyState === 'complete' && metaCsrf)) {
         return result({ ok: true, originReached: true, csrf: csrfVal, user: readBootedDiscourseUser() });
     }
-    try {
-        if (metaCsrf && document.querySelector('header.d-header,#main-outlet .topic-list,#main-outlet #topic-title,#main-outlet .container')) {
-            return result({ ok: true, csrf: csrfVal, user: readBootedDiscourseUser() });
-        }
-    } catch (_) {}
     try {
         var bodyJson = JSON.parse(bodyText);
         if (bodyJson && ((bodyJson.topic_list && Array.isArray(bodyJson.topic_list.topics)) || (bodyJson.post_stream && Array.isArray(bodyJson.post_stream.posts)))) {

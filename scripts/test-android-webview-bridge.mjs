@@ -286,3 +286,39 @@ test('window.__lindoCancelHttp aborts in-flight fetch and suppresses late bridge
   assert.equal(aborted, true);
   assert.equal(env.results.length, 0);
 });
+
+test('Cloudflare 403 challenge on /session/csrf.json never poisons foreground Like/Reply writes with CsrfCooldownActive', async () => {
+  const env = createBridgeEnv({
+    fetchImpl: async () => ({
+      ok: false,
+      status: 403,
+      headers: { get: (k) => (k.toLowerCase() === 'cf-mitigated' ? 'challenge' : null) },
+      text: async () => '<html><head><title>Just a moment...</title></head><body></body></html>'
+    })
+  });
+  // 1st background write hits CF 403 on /session/csrf.json
+  env.dispatch({
+    reqId: 'bg_mark_read',
+    url: 'https://linux.do/notifications/mark-read.json',
+    method: 'PUT',
+    headers: { 'Discourse-Background': 'true' },
+    kotlinCsrf: ''
+  });
+  await env.advanceTime(50);
+  assert.equal(env.results[0].status, 403);
+  assert.equal(env.results[0].cfMitigated, 'challenge');
+
+  // 2s later, foreground Like toggle MUST NOT return status=0 csrf_cooldown — it must surface 403 challenge!
+  await env.advanceTime(2000);
+  env.dispatch({
+    reqId: 'fg_heart_toggle',
+    url: 'https://linux.do/discourse-reactions/posts/25358989/custom-reactions/heart/toggle.json',
+    method: 'PUT',
+    headers: {},
+    kotlinCsrf: ''
+  });
+  await env.advanceTime(50);
+  assert.equal(env.results[1].reqId, 'fg_heart_toggle');
+  assert.equal(env.results[1].status, 403);
+  assert.equal(env.results[1].cfMitigated, 'challenge');
+});

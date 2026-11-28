@@ -256,6 +256,7 @@ internal val ANDROID_HTTP_BRIDGE_TEMPLATE_JS: String = """
             window.__lindoCsrf = kotlinCsrf;
         }
         const isOtpExchange = targetUrl.indexOf('/session/otp/') !== -1;
+        const isBgReq = Boolean(hdrs['Discourse-Background'] || hdrs['discourse-background']);
         const isApiKeyRevoke = targetUrl.indexOf('/user-api-key/revoke') !== -1 &&
             Boolean(hdrs['User-Api-Key'] || hdrs['user-api-key']);
         let csrfLastStatus = 0;
@@ -269,7 +270,7 @@ internal val ANDROID_HTTP_BRIDGE_TEMPLATE_JS: String = """
             if (!force && window.__lindoCsrf) {
                 return window.__lindoCsrf;
             }
-            if (!force && ((cfg.csrfInCooldown && !isOtpExchange) || (window.__lindoCsrfCooldownUntil && Date.now() < window.__lindoCsrfCooldownUntil && !isOtpExchange))) {
+            if (!force && ((cfg.csrfInCooldown && !isOtpExchange) || (isBgReq && window.__lindoCsrfCooldownUntil && Date.now() < window.__lindoCsrfCooldownUntil && !isOtpExchange))) {
                 csrfLastErr = 'CsrfCooldownActive';
                 return null;
             }
@@ -317,10 +318,12 @@ internal val ANDROID_HTTP_BRIDGE_TEMPLATE_JS: String = """
                             }
                         } else {
                             csrfLastBody = csrfOut.text || '';
-                            if (csrfResp.status === 429 || csrfResp.status === 403 || csrfResp.status === 503) {
+                            const isCfChallengeResp = (csrfLastMitigated && csrfLastMitigated.toLowerCase().indexOf('challenge') !== -1) ||
+                                /<title>\s*(Just a moment|请稍候|Attention Required|Security Check)/i.test(csrfLastBody);
+                            if (!isCfChallengeResp && (csrfResp.status === 429 || csrfResp.status === 403 || csrfResp.status === 503)) {
                                 window.__lindoCsrfCooldownUntil = Date.now() + 30000;
                             }
-                            if (csrfLastMitigated || csrfResp.status === 429 || csrfResp.status === 401 || csrfResp.status === 403 || csrfResp.status === 503) {
+                            if (csrfLastMitigated || isCfChallengeResp || csrfResp.status === 429 || csrfResp.status === 401 || csrfResp.status === 403 || csrfResp.status === 503) {
                                 break;
                             }
                         }

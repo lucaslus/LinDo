@@ -2085,7 +2085,9 @@ class MainActivity : ComponentActivity() {
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                     super.onPageStarted(view, url, favicon)
                     if (view != null && view !== apiWebView) return
-                    if (apiWebViewCommitSignal != null && url == BRIDGE_BOOTSTRAP_URL) restoreNavigationStarted = true
+                    if (apiWebViewCommitSignal != null && url?.startsWith(BRIDGE_BOOTSTRAP_URL, ignoreCase = true) == true) {
+                        restoreNavigationStarted = true
+                    }
                     apiMainDocumentFailed = false
                     apiMainDocumentCommitted = false
                     val nextEpoch = apiWebViewDocEpoch.incrementAndGet()
@@ -2148,16 +2150,21 @@ class MainActivity : ComponentActivity() {
                         }?.value.orEmpty()
                         if (status in setOf(403, 429, 503) && cfHdr.equals("challenge", ignoreCase = true)) {
                             apiWebViewBootstrapChallenged = true
-                            // 若当前已处于同源文档，立即停止后台挑战子资源与脚本自刷新
-                            if (do_.linux.lindo.core.network.AndroidWebViewBridgeContract.isValidLinuxDoDocumentUrl(view?.url)) {
+                            // 仅当文档已真正 Commit（非 about:blank 预备态）时才可调用 stopLoading()，
+                            // 严禁在 onPageCommitVisible 之前 stopLoading() 把 WebView 永久锁死在 about:blank！
+                            if (apiMainDocumentCommitted &&
+                                do_.linux.lindo.core.network.AndroidWebViewBridgeContract.isValidLinuxDoDocumentUrl(view?.url)
+                            ) {
                                 neutralizeBootstrapChallengePage(view)
                             }
                         }
-                        apiWebViewOriginHealthy = true
-                        apiWebViewDocEpoch.incrementAndGet()
-                        apiWebViewCommitSignal?.complete(false)
-                        if (!apiWebViewReady.isCompleted) {
-                            apiWebViewReady.complete(true)
+                        if (apiMainDocumentCommitted) {
+                            apiWebViewOriginHealthy = true
+                            apiWebViewDocEpoch.incrementAndGet()
+                            if (restoreNavigationStarted) apiWebViewCommitSignal?.complete(true)
+                            if (!apiWebViewReady.isCompleted) {
+                                apiWebViewReady.complete(true)
+                            }
                         }
                     }
                 }
@@ -2239,6 +2246,7 @@ class MainActivity : ComponentActivity() {
                         }
                         return
                     }
+                    apiMainDocumentCommitted = true
                     apiWebViewOriginHealthy = true
                     apiWebViewDocEpoch.incrementAndGet()
                     val cookies = cm.getCookie("https://linux.do").orEmpty()
@@ -2246,6 +2254,7 @@ class MainActivity : ComponentActivity() {
                         CookieSentinel.syncFromAuthoritativeBrowserCookieString(cookies)
                     }
                     view?.evaluateJavascript(installBinaryBridgeHelperJs, null)
+                    if (restoreNavigationStarted) apiWebViewCommitSignal?.complete(true)
                     if (!apiWebViewReady.isCompleted) {
                         apiWebViewReady.complete(true)
                     }
@@ -2375,9 +2384,15 @@ class MainActivity : ComponentActivity() {
                 withTimeoutOrNull(5_000L) { apiWebViewReady.await() }
             }
             suspend fun documentReady(): Boolean = withContext(Dispatchers.Main) {
-                apiWebView === target && apiWebViewOriginHealthy && !apiWebViewBootstrapChallenged &&
-                    apiMainDocumentCommitted && !apiMainDocumentFailed &&
+                val ready = apiWebView === target && apiWebViewOriginHealthy &&
+                    apiMainDocumentCommitted &&
                     do_.linux.lindo.core.network.AndroidWebViewBridgeContract.isValidLinuxDoDocumentUrl(target.url)
+                if (ready) {
+                    apiWebViewBootstrapChallenged = false
+                    apiMainDocumentFailed = false
+                    target.evaluateJavascript("window.__lindoCsrfCooldownUntil = 0;", null)
+                }
+                ready
             }
             if (!forceReload && documentReady()) return@withLock true
             val drainDeadline = System.currentTimeMillis() + 1_200L
@@ -2396,10 +2411,11 @@ class MainActivity : ComponentActivity() {
                         restoreNavigationStarted = false
                         apiWebViewCommitSignal = commitSignal
                         apiWebViewBootstrapChallenged = false
+                        apiMainDocumentFailed = false
                         target.loadUrl(BRIDGE_BOOTSTRAP_URL)
                     } else commitSignal.complete(false)
                 }
-                val committed = withTimeoutOrNull(5_000L) { commitSignal.await() } == true
+                val committed = withTimeoutOrNull(8_000L) { commitSignal.await() } == true
                 val ready = committed && apiWebViewDocEpoch.get() > epochBefore && documentReady()
                 barrier.complete(ready)
                 ready
@@ -2432,8 +2448,9 @@ class MainActivity : ComponentActivity() {
                     }
                     else -> {
                         LinuxDoRepository.clearChallengeCooldown()
+                        do_.linux.lindo.core.network.NetworkPolicyEngine.clearCsrfCooldown()
                         executeHttpViaWebViewBridge(request.url, "GET", null, request.headers,
-                            allowSilentChallengeRetry = false, allowOriginLostRetry = false)
+                            allowSilentChallengeRetry = false, allowOriginLostRetry = true)
                     }
                 }
             } catch (cancelled: CancellationException) {
@@ -3064,7 +3081,7 @@ class MainActivity : ComponentActivity() {
                             break
                         }
                         is do_.linux.lindo.core.network.SilentVerifyStep.Abandon -> {
-                            if (step.reason == "snoozed_by_user_dismiss") {
+                            if (step.reason == "snoozed_by_user_dismiss" || step.reason == "background_requires_user") {
                                 keepAttentionPillOnExit = true
                                 do_.linux.lindo.core.network.NetworkPolicyEngine.updateVerifyAttentionNeeded(true)
                                 withContext(Dispatchers.Main) {
@@ -3294,7 +3311,7 @@ class MainActivity : ComponentActivity() {
                 preferredReferer = preferredReferer,
                 csrfOwnerTag = currentCsrfOwner,
                 initialCachedCsrf = initialCachedCsrf,
-                csrfInCooldown = do_.linux.lindo.core.network.NetworkPolicyEngine.isCsrfInCooldown(),
+                csrfInCooldown = isBackground && do_.linux.lindo.core.network.NetworkPolicyEngine.isCsrfInCooldown(),
                 csrfFallbackErrorMsg = LinDoNetworkCopy.JS_BRIDGE_VERIFY_SESSION_FAILED.text,
                 timeouts = timeoutBudget
             )
@@ -5232,7 +5249,7 @@ private fun buildVerificationCompactFrameJs(isDark: Boolean): String {
             if (!document.getElementById(styleId)) {
               var st = document.createElement('style');
               st.id = styleId;
-              st.textContent = 'html, body { background: $bg !important; overflow-x: hidden !important; }';
+              st.textContent = 'html, body { background: $bg !important; overflow-x: hidden !important; } #d-splash { opacity: 0 !important; pointer-events: none !important; }';
               (document.head || document.documentElement).appendChild(st);
             }
           } catch (e) {}
@@ -5313,7 +5330,7 @@ private fun AndroidWebLoginModal(
     var forceRefreshCsrfStatus by remember(initialUrl, sessionNonce) { mutableStateOf<Int?>(null) }
     var forceRefreshCsrfChallenged by remember(initialUrl, sessionNonce) { mutableStateOf(false) }
     var forceRefreshCsrfValue by remember(initialUrl, sessionNonce) { mutableStateOf<String?>(null) }
-    var forceRefreshCsrfProbeInFlight by remember(initialUrl, sessionNonce) { mutableStateOf(false) }
+    var forceRefreshCsrfProbeStartedAtMs by remember(initialUrl, sessionNonce) { mutableStateOf(0L) }
 
     var verificationExpanded by remember(initialUrl, sessionNonce) { mutableStateOf(false) }
     var interactiveChallengeActive by remember(initialUrl, sessionNonce) { mutableStateOf(false) }
@@ -5329,7 +5346,7 @@ private fun AndroidWebLoginModal(
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var usedHandoffWebView by remember(initialUrl, sessionNonce) { mutableStateOf(false) }
     var completed by remember(initialUrl, sessionNonce) { mutableStateOf(false) }
-    var verificationProbeRunning by remember { mutableStateOf(false) }
+    var verificationProbeStartedAtMs by remember { mutableStateOf(0L) }
     var csrfSyncedInModal by remember(initialUrl, sessionNonce) { mutableStateOf(false) }
     var loginDocumentReady by remember(initialUrl, sessionNonce) { mutableStateOf(false) }
     var loginNavigationEpoch by remember(initialUrl, sessionNonce) { mutableStateOf(0) }
@@ -5373,7 +5390,8 @@ private fun AndroidWebLoginModal(
         forceRefreshCsrfStatus = null
         forceRefreshCsrfChallenged = false
         forceRefreshCsrfValue = null
-        forceRefreshCsrfProbeInFlight = false
+        forceRefreshCsrfProbeStartedAtMs = 0L
+        verificationProbeStartedAtMs = 0L
         initialLoadDispatched = false
         pageProgress = 0
         modalWebViewGeneration++
@@ -5385,11 +5403,16 @@ private fun AndroidWebLoginModal(
         val fallbackUrl = "https://linux.do/#lindo-verify"
         pendingUrl = fallbackUrl
         pageLoadError = null
+        interactiveChallengeActive = false
+        challengeWidgetMounted = false
+        challengeStageMounted = false
+        verificationNavigatingAway = false
         challengeOrigin404Reached = false
         forceRefreshCsrfStatus = null
         forceRefreshCsrfChallenged = false
         forceRefreshCsrfValue = null
-        forceRefreshCsrfProbeInFlight = false
+        forceRefreshCsrfProbeStartedAtMs = 0L
+        verificationProbeStartedAtMs = 0L
         if (purgeStaleFirst) {
             staleClearancePurgedInModal = true
             MainActivity.activeInstance?.activityScope?.launch(Dispatchers.Main) {
@@ -5431,6 +5454,8 @@ private fun AndroidWebLoginModal(
     ) {
         if (completed) return
         interactiveChallengeActive = false
+        runCatching { webViewRef?.stopLoading() }
+        do_.linux.lindo.core.network.NetworkPolicyEngine.clearCsrfCooldown()
         freshCsrf?.takeIf { it.isNotBlank() }?.let { csrf ->
             csrfSyncedInModal = true
             LinuxDoRepository.updateCsrfToken(csrf)
@@ -5544,12 +5569,14 @@ private fun AndroidWebLoginModal(
         }
 
         fun dispatchSingleForceRefreshCsrfProbe(targetWebView: WebView) {
-            if (forceRefreshCsrfProbeInFlight || forceRefreshCsrfStatus != null || completed) return
-            forceRefreshCsrfProbeInFlight = true
+            val nowProbeMs = System.currentTimeMillis()
+            val csrfInFlight = forceRefreshCsrfProbeStartedAtMs > 0L && (nowProbeMs - forceRefreshCsrfProbeStartedAtMs) < 4_000L
+            if (csrfInFlight || forceRefreshCsrfStatus != null || completed) return
+            forceRefreshCsrfProbeStartedAtMs = nowProbeMs
             val probeEpoch = loginNavigationEpoch
             targetWebView.evaluateJavascript(FORCE_REFRESH_CSRF_PROBE_JS) { raw ->
                 if (probeEpoch != loginNavigationEpoch || targetWebView !== webViewRef) return@evaluateJavascript
-                forceRefreshCsrfProbeInFlight = false
+                forceRefreshCsrfProbeStartedAtMs = 0L
                 val obj = decodeJsStringResult(raw)?.let { runCatching { JSONObject(it) }.getOrNull() }
                 if (obj == null || obj.optBoolean("pending", false)) return@evaluateJavascript
                 forceRefreshCsrfStatus = obj.optInt("status", 0)
@@ -5654,12 +5681,14 @@ private fun AndroidWebLoginModal(
         }
 
         // 验证流被动观察真实 Discourse DOM 放行结果（零额外网络请求，杜绝验证刚过又被 /session/csrf.json 429 拦截导致的无限刷新）
-        if (isVerificationFlow && pageLoadError == null && !verificationProbeRunning) {
-            verificationProbeRunning = true
+        val nowVerifyProbeMs = System.currentTimeMillis()
+        val verifyProbeBusy = verificationProbeStartedAtMs > 0L && (nowVerifyProbeMs - verificationProbeStartedAtMs) < 1_500L
+        if (isVerificationFlow && pageLoadError == null && !verifyProbeBusy) {
+            verificationProbeStartedAtMs = nowVerifyProbeMs
             val probeEpoch = loginNavigationEpoch
             webView.evaluateJavascript(do_.linux.lindo.core.network.webVerificationProbeScript()) { raw ->
                 if (probeEpoch != loginNavigationEpoch || webView !== webViewRef) return@evaluateJavascript
-                verificationProbeRunning = false
+                verificationProbeStartedAtMs = 0L
                 if (!completed) {
                     val result = decodeJsStringResult(raw)?.let { runCatching { JSONObject(it) }.getOrNull() }
                     if (result?.optBoolean("cfErrorPage") == true) {
@@ -5692,7 +5721,7 @@ private fun AndroidWebLoginModal(
                             val latestCfNow = resolveFreshClearanceForForceRefresh(
                                 cookieManager.getCookie("https://linux.do").orEmpty()
                             )
-                            val domCsrfReady = fallbackMainSiteTried && result.optString("csrf").isNotBlank()
+                            val domCsrfReady = result.optString("csrf").isNotBlank()
                             val eval = do_.linux.lindo.core.network.ManualForceRefreshPolicy.evaluateOutcome(
                                 forceRefresh = true,
                                 freshClearance = latestCfNow,
@@ -6148,10 +6177,9 @@ private fun AndroidWebLoginModal(
                                 }
                                 override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage?): Boolean {
                                     val msg = consoleMessage?.message().orEmpty()
-                                    if (isVerificationFlow && msg == "__lindo_cf_widget_ready__" && viewOrSelfMatches()) {
+                                    if (isVerificationFlow && msg == "__lindo_cf_widget_ready__" && viewOrSelfMatches() && !verificationNavigatingAway) {
                                         challengeWidgetMounted = true
                                         showVerifyChannelRepairHint = false
-                                        verificationNavigatingAway = false
                                         interactiveChallengeActive = true
                                         return true
                                     }
@@ -6273,13 +6301,13 @@ private fun AndroidWebLoginModal(
                                         loginDocumentReady = false
                                         loginNavigationEpoch++
                                         loginProbeRunning = false
-                                        verificationProbeRunning = false
+                                        verificationProbeStartedAtMs = 0L
                                         confirmingLogin = false
                                         challengeOrigin404Reached = false
                                         forceRefreshCsrfStatus = null
                                         forceRefreshCsrfChallenged = false
                                         forceRefreshCsrfValue = null
-                                        forceRefreshCsrfProbeInFlight = false
+                                        forceRefreshCsrfProbeStartedAtMs = 0L
                                         if (isVerificationFlow) {
                                             if (interactiveChallengeActive) {
                                                 verificationNavigatingAway = true
