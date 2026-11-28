@@ -123,8 +123,8 @@ android {
         applicationId = "do_.linux.lindo"
         minSdk = 24
         targetSdk = 36
-        versionCode = 114
-        versionName = "1.1.14"
+        versionCode = 115
+        versionName = "1.1.15"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -201,12 +201,12 @@ compose.desktop {
             modules("java.net.http", "jdk.crypto.ec")
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
             packageName = "Lindo"
-            packageVersion = "1.1.14"
+            packageVersion = "1.1.15"
             description = "Lindo — High-Performance Native Linux.do Client for Android, macOS, and Windows"
             vendor = "Lindo Community"
 
             macOS {
-                packageBuildVersion = "1.1.14"
+                packageBuildVersion = "1.1.15"
                 bundleID = "do.linux.lindo"
                 iconFile.set(project.file("src/desktopMain/resources/icon.icns"))
                 infoPlist {
